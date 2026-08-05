@@ -15,7 +15,7 @@ target_link_libraries(cpu_sys_jni log)
 
 # ===== MNN 后端 JNI 包装（libmnn_jni.so）=====
 # 链接预编译 libMNN.so（MNN 低内存 LLM 引擎，含 OpenCL GPU 后端 + ARM82 + transformer-fuse），
-# 实现 Java_com_rhodesisland_terminal_llm_backend_MnnBridge_* 符号。
+# 实现 Java_com_chatbyyourside_llm_backend_MnnBridge_* 符号。
 #
 # MNN 引擎运行 `.mnn` 模型目录（config.json + llm.mnn + llm.mnn.weight + tokenizer.txt），
 # 通过 set_config 的 backend_type 字段选 cpu/opencl/qnn。

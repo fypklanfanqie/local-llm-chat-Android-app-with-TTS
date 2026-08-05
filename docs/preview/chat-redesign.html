@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh" data-theme="dark" data-accent="violet">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>聊天界面重设计 · Chat by your side</title>
+<style>
+:root{
+  --r-xs:8px; --r-sm:12px; --r-md:16px; --r-lg:22px; --r-xl:28px; --r-pill:999px;
+  --font:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,monospace;
+}
+[data-accent="violet"]{ --accent-d:#7C5CFF; --accent-l:#6E4DFF; --accent-rgb-d:124,92,255; --accent-rgb-l:110,77,255; }
+[data-accent="iris"]{ --accent-d:#0A84FF; --accent-l:#007AFF; --accent-rgb-d:10,132,255; --accent-rgb-l:0,122,255; }
+[data-accent="mint"]{ --accent-d:#34C7BE; --accent-l:#2BB5AC; --accent-rgb-d:52,199,190; --accent-rgb-l:43,181,172; }
+
+[data-theme="dark"]{
+  --accent:var(--accent-d); --accent-rgb:var(--accent-rgb-d); --accent-glow:rgba(var(--accent-rgb-d),.45);
+  --bg:#07070B; --bg2:#0C0D14; --surface:#13131C;
+  --text:#F2F1F7; --text2:#BDB8CC; --text3:#8A8498;
+  --border:rgba(255,255,255,.10); --tint-border:rgba(var(--accent-rgb),.18);
+  --glass:rgba(13,14,22,.78); --glass2:rgba(var(--accent-rgb),.08);
+  --glass-border:rgba(var(--accent-rgb),.22); --glass-hi:rgba(255,255,255,.24);
+  --ai-bubble:rgba(var(--accent-rgb),.10); --ai-border:rgba(var(--accent-rgb),.22);
+  --code-bg:#0A0B12; --code-border:rgba(var(--accent-rgb),.12);
+  --shadow:0 12px 44px rgba(0,0,0,.55);
+  --mesh1:rgba(var(--accent-rgb),.36); --mesh2:rgba(10,132,255,.24); --mesh3:rgba(52,199,190,.20);
+}
+[data-theme="light"]{
+  --accent:var(--accent-l); --accent-rgb:var(--accent-rgb-l); --accent-glow:rgba(110,77,255,.3);
+  --bg:#F2F3F8; --bg2:#FFFFFF; --surface:#FFFFFF; --text:#0B0C10; --text2:#5A5F6E; --text3:#8E93A0;
+  --border:rgba(0,0,0,.07); --glass:rgba(255,255,255,.66); --glass2:rgba(255,255,255,.5);
+  --glass-border:rgba(255,255,255,.85); --glass-hi:rgba(255,255,255,.9);
+  --ai-bubble:rgba(255,255,255,.75); --ai-border:rgba(0,0,0,.06);
+  --code-bg:#1E1E2E; --code-border:rgba(0,0,0,.2);
+  --shadow:0 10px 34px rgba(0,0,0,.12);
+  --mesh1:rgba(110,77,255,.18); --mesh2:rgba(0,122,255,.14); --mesh3:rgba(52,199,190,.14);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:var(--font);background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;transition:background .4s,color .4s;min-height:100vh;overflow-x:hidden}
+.mesh{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none}
+.mesh span{position:absolute;border-radius:50%;filter:blur(80px)}
+.mesh .b1{width:48vw;height:48vw;background:var(--mesh1);top:-10%;left:-8%;animation:d1 26s ease-in-out infinite}
+.mesh .b2{width:42vw;height:42vw;background:var(--mesh2);top:25%;right:-12%;animation:d2 30s ease-in-out infinite}
+.mesh .b3{width:40vw;height:40vw;background:var(--mesh3);bottom:-15%;left:30%;animation:d3 34s ease-in-out infinite}
+@keyframes d1{50%{transform:translate(9vw,12vh) scale(1.15)}}
+@keyframes d2{50%{transform:translate(-8vw,-9vh) scale(1.1)}}
+@keyframes d3{50%{transform:translate(6vw,-11vh) scale(1.18)}}
+
+.page{position:relative;z-index:1;max-width:1320px;margin:0 auto;padding:24px 20px 70px}
+.topbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:13px 18px;margin-bottom:24px;
+  background:var(--glass);backdrop-filter:blur(30px) saturate(180%);-webkit-backdrop-filter:blur(30px) saturate(180%);
+  border:1px solid var(--glass-border);border-radius:var(--r-xl);box-shadow:var(--shadow),inset 0 1px 0 var(--glass-hi)}
+.topbar .brand{display:flex;align-items:center;gap:11px;margin-right:auto}
+.logo{width:36px;height:36px;border-radius:11px;background:linear-gradient(145deg,var(--accent),rgba(var(--accent-rgb),.45));display:grid;place-items:center;color:#fff;font-weight:700;box-shadow:0 4px 14px var(--accent-glow)}
+.topbar h1{font-size:16px;font-weight:650;letter-spacing:-.2px}
+.topbar .sub{font-size:11.5px;color:var(--text2);margin-top:1px}
+.seg{display:flex;gap:4px;padding:4px;background:var(--glass2);border:1px solid var(--border);border-radius:var(--r-pill)}
+.seg button{border:0;background:transparent;color:var(--text2);font:600 12px var(--font);padding:6px 12px;border-radius:var(--r-pill);cursor:pointer;transition:.2s}
+.seg button.on{background:var(--accent);color:#fff;box-shadow:0 3px 10px var(--accent-glow)}
+.toggle{display:flex;align-items:center;gap:6px;padding:6px 12px;background:var(--glass2);border:1px solid var(--border);border-radius:var(--r-pill);cursor:pointer}
+.toggle span{font-size:12px;color:var(--text2)}
+
+.glass{background:var(--glass);backdrop-filter:blur(34px) saturate(180%);-webkit-backdrop-filter:blur(34px) saturate(180%);border:1px solid var(--glass-border);box-shadow:var(--shadow),inset 0 1px 0 var(--glass-hi)}
+
+.phones{display:flex;gap:26px;justify-content:center;flex-wrap:wrap}
+.phone{width:330px;flex:none;background:var(--bg2);border:1px solid rgba(128,128,128,.18);border-radius:46px;padding:10px;box-shadow:var(--shadow),0 0 0 2px rgba(0,0,0,.25);position:relative}
+.phone .cap{font-size:11px;color:var(--text3);text-align:center;margin-bottom:8px;font-weight:550;letter-spacing:.3px}
+.screen{position:relative;width:100%;height:660px;border-radius:38px;overflow:hidden;background:var(--bg);display:flex;flex-direction:column}
+.island{position:absolute;top:9px;left:50%;transform:translateX(-50%);width:96px;height:26px;background:#000;border-radius:18px;z-index:30}
+.statusbar{display:flex;justify-content:space-between;align-items:center;padding:13px 24px 2px;font-size:12.5px;font-weight:600;color:var(--text);z-index:20}
+.statusbar .r{display:flex;gap:5px;align-items:center}
+.bat{width:22px;height:11px;border:1.5px solid var(--text2);border-radius:3px;padding:1.5px;position:relative}
+.bat::after{content:"";position:absolute;right:-3px;top:3px;width:2px;height:4px;background:var(--text2);border-radius:0 2px 2px 0}
+.bat i{display:block;height:100%;width:72%;background:var(--text);border-radius:1.5px}
+.scroll{flex:1;overflow-y:auto;scrollbar-width:none}
+.scroll::-webkit-scrollbar{display:none}
+
+/* 顶栏 */
+.topbar-chat{position:relative;z-index:15;padding:6px 14px 9px}
+.topbar-chat.glass{box-shadow:var(--shadow),inset 0 1px 0 var(--glass-hi),0 10px 36px rgba(0,0,0,.38)}
+.topbar-chat .row{display:flex;align-items:center;gap:10px}
+.av{border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;flex:none}
+.av.ai{width:38px;height:38px;font-size:16px;background:linear-gradient(145deg,#FF6B9D,#C44CE0)}
+.av.user{width:30px;height:30px;font-size:13px;background:linear-gradient(145deg,var(--accent),rgba(var(--accent-rgb),.5))}
+.meta{flex:1;min-width:0}
+.meta .name{font-size:15.5px;font-weight:650;letter-spacing:-.2px;display:flex;align-items:center;gap:6px}
+.meta .name .dot{width:7px;height:7px;border-radius:50%;background:#34C759;box-shadow:0 0 6px #34C759}
+.meta .role{font-size:11px;color:var(--text2);margin-top:1px}
+.ic-btn{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;color:var(--text2);cursor:pointer;border:1px solid var(--border);background:var(--glass2)}
+.ic-btn.on{color:var(--accent);background:rgba(var(--accent-rgb),.16);border-color:transparent}
+.ic-btn svg{width:17px;height:17px;fill:currentColor}
+.seg-mini{display:flex;padding:3px;border-radius:var(--r-pill);background:var(--glass2);border:1px solid var(--border)}
+.seg-mini button{border:0;background:none;color:var(--text2);font:600 10.5px var(--font);padding:4px 9px;border-radius:var(--r-pill);cursor:pointer}
+.seg-mini button.on{background:var(--accent);color:#fff}
+
+/* 消息 */
+.msgs{padding:10px 13px 140px;display:flex;flex-direction:column;gap:13px}
+.date-sep{display:flex;align-items:center;gap:10px;margin:4px 0}
+.date-sep::before,.date-sep::after{content:"";flex:1;height:1px;background:var(--border)}
+.date-sep span{font-size:10.5px;color:var(--text3);font-weight:500}
+.msg{display:flex;gap:8px;max-width:86%}
+.msg.ai{align-self:flex-start}
+.msg.user{align-self:flex-end;flex-direction:row-reverse}
+.body{display:flex;flex-direction:column;gap:3px;min-width:0}
+.msg.user .body{align-items:flex-end}
+.sender{font-size:10px;color:var(--text3);padding:0 4px}
+.bubble{padding:9px 13px;font-size:14px;line-height:20.5px;word-break:break-word}
+.bubble.ai{background:linear-gradient(135deg,rgba(var(--accent-rgb),.13),rgba(var(--accent-rgb),.06));backdrop-filter:blur(24px) saturate(170%);-webkit-backdrop-filter:blur(24px) saturate(170%);border:1px solid var(--ai-border);border-radius:17px 17px 17px 5px;box-shadow:inset 0 1px 0 rgba(255,255,255,.10),0 6px 22px rgba(0,0,0,.20)}
+.bubble.user{background:var(--accent);color:#fff;border-radius:17px 17px 5px 17px;box-shadow:0 4px 16px var(--accent-glow)}
+.time{font-size:9.5px;color:var(--text3);padding:0 4px}
+.think{background:rgba(var(--accent-rgb),.1);border:1px solid rgba(var(--accent-rgb),.22);border-radius:13px;margin-bottom:5px;overflow:hidden}
+.think .th-head{display:flex;align-items:center;gap:6px;padding:7px 10px;font-size:11.5px;color:var(--accent);font-weight:550;cursor:pointer}
+.think .th-head svg{width:13px;height:13px;fill:currentColor}
+.think .th-head .arr{margin-left:auto;width:12px;height:12px;fill:var(--accent);transition:.2s}
+.think.open .th-head .arr{transform:rotate(90deg)}
+.think .th-body{padding:0 11px 9px;font-size:12px;line-height:18px;color:var(--text2);font-style:italic;border-top:1px solid rgba(var(--accent-rgb),.15)}
+.code{background:var(--code-bg);border:1px solid var(--code-border);border-radius:13px;margin:4px 0;overflow:hidden}
+.code .c-head{display:flex;align-items:center;padding:6px 10px;border-bottom:1px solid var(--code-border)}
+.code .c-head .lang{font:600 10px var(--mono);color:#9aa5ce;letter-spacing:.5px}
+.code .c-head .cp{margin-left:auto;font-size:10.5px;color:var(--text2);cursor:pointer;display:flex;align-items:center;gap:3px}
+.code .c-head .cp svg{width:11px;height:11px;fill:currentColor}
+.code pre{padding:9px 11px;font:12px/18px var(--mono);color:#cdd3f5;overflow-x:auto;white-space:pre}
+.k{color:#c792ea}.s{color:#c3e88d}.c{color:#5a6388;font-style:italic}.fn{color:#82aaff}.n{color:#f78c6c}
+.attach{display:flex;gap:5px;margin-top:5px}
+.attach .img{width:60px;height:60px;border-radius:10px;background:linear-gradient(145deg,#7C5CFF,#FF6B9D);background-size:cover}
+.actions{display:flex;gap:4px;padding:2px 2px 0}
+.chip{display:flex;align-items:center;gap:4px;font-size:10.5px;color:var(--text2);padding:3px 8px;border-radius:var(--r-pill);cursor:pointer;border:1px solid var(--border)}
+.chip:hover{background:var(--glass2);color:var(--text)}
+.chip svg{width:11px;height:11px;fill:currentColor}
+.chip.done{color:#34C759}
+.typing{display:flex;gap:4px;padding:11px 13px;align-items:center}
+.typing i{width:7px;height:7px;border-radius:50%;background:var(--text2);animation:blink 1.3s infinite}
+.typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}
+@keyframes blink{0%,60%,100%{opacity:.25;transform:translateY(0)}30%{opacity:1;transform:translateY(-3px)}}
+
+/* 字幕条 */
+.sub{position:absolute;left:12px;right:12px;bottom:84px;padding:9px 13px;border-radius:var(--r-md);z-index:14}
+.sub .jp{font-size:13px;font-weight:550;color:var(--text)}
+.sub .cn{font-size:11.5px;color:var(--text2);margin-top:2px}
+
+/* 欢迎态 */
+.welcome{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:30px 26px;text-align:center;gap:6px}
+.welcome .big-av{width:96px;height:96px;border-radius:32px;background:linear-gradient(145deg,#FF6B9D,#C44CE0);display:grid;place-items:center;color:#fff;font-size:40px;font-weight:700;margin-bottom:10px;box-shadow:0 12px 30px rgba(196,76,224,.4)}
+.welcome .n{font-size:22px;font-weight:700;letter-spacing:-.3px}
+.welcome .r{font-size:13px;color:var(--text2)}
+.welcome .desc{font-size:12.5px;color:var(--text3);margin-top:8px;line-height:18px;max-width:240px}
+.suggest{display:flex;flex-wrap:wrap;gap:7px;justify-content:center;margin-top:16px}
+.suggest .s{font-size:12.5px;color:var(--text2);padding:8px 14px;border-radius:var(--r-pill);cursor:pointer;background:var(--glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--glass-border)}
+.suggest .s:hover{color:var(--accent);border-color:rgba(var(--accent-rgb),.4)}
+
+/* 输入栏 */
+.inputbar{position:absolute;left:0;right:0;bottom:0;padding:8px 12px 12px;z-index:18}
+.att-row{display:flex;gap:7px;margin-bottom:7px}
+.att-row .att{display:flex;align-items:center;gap:5px;padding:5px 9px 5px 5px;border-radius:var(--r-md);background:var(--glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--glass-border)}
+.att-row .att .thumb{width:26px;height:26px;border-radius:7px;background:linear-gradient(145deg,#7C5CFF,#0A84FF)}
+.att-row .att .nm{font-size:11px;color:var(--text2)}
+.att-row .att .x{width:16px;height:16px;border-radius:50%;background:var(--glass2);display:grid;place-items:center;color:var(--text3);cursor:pointer}
+.att-row .att .x svg{width:9px;height:9px;fill:currentColor}
+.inputbar .row{display:flex;align-items:flex-end;gap:6px;padding:6px 6px 6px 8px;border-radius:var(--r-xl);box-shadow:var(--shadow),inset 0 1px 0 var(--glass-hi),0 8px 28px rgba(0,0,0,.32)}
+.inputbar .field{flex:1;font-size:14px;color:var(--text);padding:7px 2px;min-height:22px;max-height:90px;overflow-y:auto}
+.inputbar .field .ph{color:var(--text3)}
+.add{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;color:var(--text2);cursor:pointer;flex:none}
+.add svg{width:19px;height:19px;fill:currentColor}
+.send{width:34px;height:34px;border-radius:50%;background:var(--accent);display:grid;place-items:center;cursor:pointer;box-shadow:0 4px 12px var(--accent-glow);flex:none}
+.send svg{width:17px;height:17px;fill:#fff}
+
+/* 底栏 */
+.navbar{position:absolute;left:0;right:0;bottom:0;padding:7px 16px 9px;z-index:25;pointer-events:none}
+.navbar .inner{display:flex;justify-content:space-around;padding:7px;border-radius:var(--r-pill);pointer-events:auto}
+.navbar .item{display:flex;flex-direction:column;align-items:center;gap:2px;padding:5px 13px;border-radius:var(--r-pill);cursor:pointer;color:var(--text3)}
+.navbar .item.on{color:var(--accent);background:rgba(var(--accent-rgb),.16)}
+.navbar .item svg{width:20px;height:20px;fill:currentColor}
+.navbar .item span{font-size:9.5px;font-weight:550}
+
+/* 抽屉 */
+.scrim{position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:30}
+.sheet{position:absolute;left:0;right:0;bottom:0;z-index:31;border-radius:var(--r-xl) var(--r-xl) 0 0;padding:10px 16px 24px;animation:up .35s cubic-bezier(.2,.8,.2,1)}
+@keyframes up{from{transform:translateY(100%)}}
+.sheet .handle{width:36px;height:4px;border-radius:var(--r-pill);background:var(--text3);opacity:.4;margin:0 auto 12px}
+.sheet .sh-head{display:flex;align-items:center;margin-bottom:12px}
+.sheet .sh-head .t{font-size:16px;font-weight:650;flex:1}
+.sheet .sh-head .new{display:flex;align-items:center;gap:4px;color:var(--accent);font-size:13px;font-weight:550;cursor:pointer}
+.sheet .sh-head .new svg{width:15px;height:15px;fill:currentColor}
+.conv{display:flex;align-items:center;gap:11px;padding:11px 12px;border-radius:var(--r-md);cursor:pointer;margin-bottom:6px}
+.conv.on{background:rgba(var(--accent-rgb),.14)}
+.conv .ci{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;background:linear-gradient(145deg,#FF6B9D,#C44CE0)}
+.conv .ct{flex:1;min-width:0}
+.conv .ct .ttl{font-size:14px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.conv.on .ct .ttl{color:var(--accent)}
+.conv .ct .ts{font-size:10.5px;color:var(--text3);margin-top:1px}
+.conv .op{display:flex;gap:2px}
+.conv .op .o{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:var(--text3);cursor:pointer}
+.conv .op .o svg{width:15px;height:15px;fill:currentColor}
+.conv .op .o.del:hover{color:#FF453A}
+
+/* 说明 */
+.notes{max-width:760px;margin:30px auto 0;display:flex;flex-direction:column;gap:14px}
+.note{border-radius:var(--r-xl);padding:18px 20px}
+.note h3{font-size:14.5px;font-weight:650;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.note h3 .p{font:600 10px var(--mono);color:var(--accent);background:rgba(var(--accent-rgb),.14);padding:3px 8px;border-radius:var(--r-pill)}
+.note ul{list-style:none}
+.note li{font-size:13px;line-height:19px;color:var(--text2);padding:4px 0 4px 18px;position:relative}
+.note li::before{content:"";position:absolute;left:3px;top:12px;width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.note li b{color:var(--text);font-weight:550}
+.foot{text-align:center;margin-top:26px;font-size:12px;color:var(--text3)}
+</style>
+</head>
+<body>
+<div class="mesh"><span class="b1"></span><span class="b2"></span><span class="b3"></span></div>
+
+<div class="page">
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo">C</div>
+      <div><h1>聊天界面重设计</h1><div class="sub">紫罗兰主色 · iOS Liquid Glass · 亮/暗双模</div></div>
+    </div>
+    <div class="seg" id="accentSeg">
+      <button data-a="iris">冰蓝</button>
+      <button class="on" data-a="violet">紫罗兰</button>
+      <button data-a="mint">薄荷</button>
+    </div>
+    <div class="toggle" id="themeToggle"><span id="tl">暗色 · 点击切换</span></div>
+  </div>
+
+  <div class="phones">
+    <!-- ① 欢迎态 -->
+    <div class="phone">
+      <div class="cap">① 欢迎态 · 空对话</div>
+      <div class="screen">
+        <div class="island"></div>
+        <div class="statusbar"><span>9:41</span><div class="r">
+          <svg width="16" height="10" viewBox="0 0 17 11" fill="none"><path d="M2 8v1M5 6v3M8 4v5M11 2v7M14 0v9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <div class="bat"><i></i></div></div></div>
+
+        <div class="topbar-chat glass">
+          <div class="row">
+            <div class="av ai">凛</div>
+            <div class="meta"><div class="name">凛 <span class="dot"></span></div><div class="role">傲娇大小姐 · 在线</div></div>
+            <div class="ic-btn"><svg viewBox="0 0 24 24"><path d="M4 4h16v4a8 8 0 0 1-16 0V4z"/></svg></div>
+          </div>
+        </div>
+
+        <div class="welcome">
+          <div class="big-av">凛</div>
+          <div class="n">凛</div>
+          <div class="r">傲娇大小姐</div>
+          <div class="desc">嘴硬心软的财阀千金。看似难以接近，其实很在意你。</div>
+          <div class="suggest">
+            <div class="s">和我打个招呼</div>
+            <div class="s">今天过得怎么样</div>
+            <div class="s">讲个故事给我听</div>
+          </div>
+        </div>
+
+        <div class="inputbar">
+          <div class="row glass">
+            <div class="add"><svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg></div>
+            <div class="field"><span class="ph">和凛说点什么…</span></div>
+            <div class="send"><svg viewBox="0 0 24 24"><path d="M3 20.5 21 12 3 3.5 3 10l13 2-13 2z"/></svg></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ② 对话中 -->
+    <div class="phone">
+      <div class="cap">② 对话中 · 气泡 / 思考 / 代码 / 附件</div>
+      <div class="screen">
+        <div class="island"></div>
+        <div class="statusbar"><span>9:41</span><div class="r">
+          <svg width="16" height="10" viewBox="0 0 17 11" fill="none"><path d="M2 8v1M5 6v3M8 4v5M11 2v7M14 0v9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <div class="bat"><i></i></div></div></div>
+
+        <div class="topbar-chat glass">
+          <div class="row">
+            <div class="av ai">凛</div>
+            <div class="meta"><div class="name">凛 <span class="dot"></span></div><div class="role">傲娇大小姐</div></div>
+            <div class="seg-mini"><button class="on">☁ 云端</button><button>📱 本地</button></div>
+            <div class="ic-btn"><svg viewBox="0 0 24 24"><path d="M12.9 2.6a2 2 0 0 0-2.1.5L8 6H6a4 4 0 0 0-4 4v4a4 4 0 0 0 4 4h2l2.8 2.9A2 2 0 0 0 15 19.4V4.6a2 2 0 0 0-2.1-2z"/></svg></div>
+            <div class="ic-btn on"><svg viewBox="0 0 24 24"><path d="M21 7H3a1 1 0 0 0-1 1v2a9 9 0 0 0 18 0V8a1 1 0 0 0-1-1z"/></svg></div>
+            <div class="ic-btn"><svg viewBox="0 0 24 24"><path d="M4 4h16v4a8 8 0 0 1-16 0V4z"/></svg></div>
+          </div>
+        </div>
+
+        <div class="scroll">
+        <div class="msgs">
+          <div class="date-sep"><span>今天</span></div>
+
+          <div class="msg ai">
+            <div class="av ai">凛</div>
+            <div class="body">
+              <div class="sender">凛</div>
+              <div class="bubble ai">哼，你总算来了。我还以为你把我忘了呢……才、才不是在等你呢！</div>
+              <div class="time">9:41</div>
+            </div>
+          </div>
+
+          <div class="msg user">
+            <div class="body">
+              <div class="bubble user">当然没有啦，今天一直在忙。对了，帮我写个 Python 倒计时？</div>
+              <div class="time">9:42 · 已读</div>
+            </div>
+            <div class="av user">我</div>
+          </div>
+
+          <div class="msg ai">
+            <div class="av ai">凛</div>
+            <div class="body">
+              <div class="bubble ai">
+                <div class="think open" onclick="this.classList.toggle('open')">
+                  <div class="th-head"><svg viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-4 12.7V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.3A7 7 0 0 0 12 2z"/></svg>思考过程<svg class="arr" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6z"/></svg></div>
+                  <div class="th-body">用户要一个 Python 倒计时。用 time.sleep 循环即可，加 \r 原地刷新输出更干净。给个简洁可运行的例子。</div>
+                </div>
+                ……行吧，看在你这么诚恳的份上。喏，给你写好了，别再让我动手了啊：
+                <div class="code">
+                  <div class="c-head"><span class="lang">PYTHON</span><span class="cp"><svg viewBox="0 0 24 24"><path d="M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/></svg>复制</span></div>
+<pre><span class="k">import</span> <span class="fn">time</span>
+
+<span class="k">def</span> <span class="fn">countdown</span>(n):
+    <span class="k">while</span> n &gt; <span class="n">0</span>:
+        <span class="fn">print</span>(<span class="s">f"倒计时 {n} 秒"</span>, end=<span class="s">"\r"</span>)
+        time.<span class="fn">sleep</span>(<span class="n">1</span>)
+        n -= <span class="n">1</span>
+    <span class="fn">print</span>(<span class="s">"时间到！          "</span>)</pre>
+                </div>
+              </div>
+              <div class="actions">
+                <div class="chip done"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>已复制</div>
+                <div class="chip"><svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3z"/></svg>朗读</div>
+                <div class="chip"><svg viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z"/></svg>重生成</div>
+              </div>
+              <div class="time">9:43</div>
+            </div>
+          </div>
+
+          <div class="msg user">
+            <div class="body">
+              <div class="bubble user">完美！看看这张图能不能识别</div>
+              <div class="time">9:44</div>
+            </div>
+            <div class="av user">我</div>
+          </div>
+
+          <div class="msg ai">
+            <div class="av ai">凛</div>
+            <div class="body">
+              <div class="bubble ai">
+                <div class="attach"><div class="img" style="background:linear-gradient(145deg,#34C7BE,#0A84FF)"></div></div>
+                哼，还挺好看的。是张风景照吧？……我才没有仔细看呢。
+              </div>
+              <div class="time">9:44</div>
+            </div>
+          </div>
+
+          <div class="msg ai">
+            <div class="av ai">凛</div>
+            <div class="body">
+              <div class="bubble ai typing"><i></i><i></i><i></i></div>
+            </div>
+          </div>
+        </div>
+        </div>
+
+        <!-- 字幕条 -->
+        <div class="sub glass">
+          <div class="jp">ふん、やっと来たのね。</div>
+          <div class="cn">哼，你总算来了。</div>
+        </div>
+
+        <div class="inputbar">
+          <div class="att-row">
+            <div class="att"><div class="thumb"></div><div class="nm">风景.jpg</div><div class="x"><svg viewBox="0 0 24 24"><path d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg></div></div>
+          </div>
+          <div class="row glass">
+            <div class="add"><svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg></div>
+            <div class="field">再来一个例子呗</div>
+            <div class="send"><svg viewBox="0 0 24 24"><path d="M3 20.5 21 12 3 3.5 3 10l13 2-13 2z"/></svg></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ③ 会话抽屉 -->
+    <div class="phone">
+      <div class="cap">③ 会话记录抽屉</div>
+      <div class="screen">
+        <div class="island"></div>
+        <div class="statusbar"><span>9:41</span><div class="r">
+          <svg width="16" height="10" viewBox="0 0 17 11" fill="none"><path d="M2 8v1M5 6v3M8 4v5M11 2v7M14 0v9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          <div class="bat"><i></i></div></div></div>
+
+        <div class="topbar-chat glass">
+          <div class="row">
+            <div class="av ai">凛</div>
+            <div class="meta"><div class="name">凛 <span class="dot"></span></div><div class="role">傲娇大小姐</div></div>
+            <div class="ic-btn"><svg viewBox="0 0 24 24"><path d="M4 4h16v4a8 8 0 0 1-16 0V4z"/></svg></div>
+          </div>
+        </div>
+
+        <div class="scroll"><div class="msgs">
+          <div class="msg ai"><div class="av ai">凛</div><div class="body"><div class="bubble ai">哼，你总算来了……</div></div></div>
+          <div class="msg user"><div class="body"><div class="bubble user">当然没有啦</div></div><div class="av user">我</div></div>
+        </div></div>
+
+        <div class="scrim"></div>
+        <div class="sheet glass">
+          <div class="handle"></div>
+          <div class="sh-head">
+            <div class="t">对话记录</div>
+            <div class="new"><svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>新建对话</div>
+          </div>
+          <div class="conv on">
+            <div class="ci">凛</div>
+            <div class="ct"><div class="ttl">今天的 Python 倒计时</div><div class="ts">07-29 09:44 · 8 条消息</div></div>
+            <div class="op"><div class="o"><svg viewBox="0 0 24 24"><path d="M3 17.2V21h3.8L17 10.8 13.2 7 3 17.2zM20.7 7.1a1 1 0 0 0 0-1.4l-2.4-2.4a1 1 0 0 0-1.4 0L15 5.2 18.8 9l1.9-1.9z"/></svg></div><div class="o del"><svg viewBox="0 0 24 24"><path d="M6 7h12l-1 14H7L6 7zm3-3h6l1 2H8l1-2z"/></svg></div></div>
+          </div>
+          <div class="conv">
+            <div class="ci">凛</div>
+            <div class="ct"><div class="ttl">周末去哪里玩</div><div class="ts">07-27 20:15 · 15 条消息</div></div>
+            <div class="op"><div class="o"><svg viewBox="0 0 24 24"><path d="M3 17.2V21h3.8L17 10.8 13.2 7 3 17.2zM20.7 7.1a1 1 0 0 0 0-1.4l-2.4-2.4a1 1 0 0 0-1.4 0L15 5.2 18.8 9l1.9-1.9z"/></svg></div><div class="o del"><svg viewBox="0 0 24 24"><path d="M6 7h12l-1 14H7L6 7zm3-3h6l1 2H8l1-2z"/></svg></div></div>
+          </div>
+          <div class="conv">
+            <div class="ci">凛</div>
+            <div class="ct"><div class="ttl">新对话</div><div class="ts">07-25 14:02 · 3 条消息</div></div>
+            <div class="op"><div class="o"><svg viewBox="0 0 24 24"><path d="M3 17.2V21h3.8L17 10.8 13.2 7 3 17.2zM20.7 7.1a1 1 0 0 0 0-1.4l-2.4-2.4a1 1 0 0 0-1.4 0L15 5.2 18.8 9l1.9-1.9z"/></svg></div><div class="o del"><svg viewBox="0 0 24 24"><path d="M6 7h12l-1 14H7L6 7zm3-3h6l1 2H8l1-2z"/></svg></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <div class="note glass">
+      <h3>聊天界面重设计要点 <span class="p">紫罗兰</span></h3>
+      <ul>
+        <li><b>气泡</b>：用户=品牌色实心（带光晕）、AI=品牌色调玻璃；暗色模式下 AI 气泡不再使用中性灰，而是带当前主色的半透明玻璃，17dp 不对称大圆角尾尖</li>
+        <li><b>去灰留玻璃</b>：顶栏 / 输入栏 / 抽屉等玻璃容器改用带品牌色调的边框与微 tint 背景，文字次要色从冷灰调整为暖灰紫调，避免暗色下发闷</li>
+        <li><b>深度思考</b>：品牌色调玻璃容器，可点击展开/折叠，箭头旋转；流式时默认展开、完成后折叠</li>
+        <li><b>代码块</b>：独立深色面板（亮暗皆然）+ 语法高亮 + 语言标签 + 复制按钮，与正文气泡区分</li>
+        <li><b>图片附件</b>：圆角缩略图嵌入气泡；输入栏上方附件预览条可单独移除</li>
+        <li><b>欢迎态</b>：大头像 + 角色简介 + 推荐话题药丸，空对话不再空旷</li>
+        <li><b>操作胶囊</b>：复制 / 朗读 / 重生成（仅 AI），复制后变绿「已复制」</li>
+        <li><b>字幕条</b>：TTS 朗读时浮于输入栏上方，中日双语</li>
+        <li><b>会话抽屉</b>：玻璃底部弹层 + 遮罩，列表项含头像/标题/时间/消息数，重命名·删除</li>
+        <li><b>顶栏</b>：头像+在线点+角色名/定位，云端/本地分段，思考·会话·更多图标</li>
+      </ul>
+    </div>
+  </div>
+  <div class="foot">暗色模式已去灰：AI 气泡与玻璃容器均带品牌色调 · 顶部可切冰蓝/薄荷与亮暗 · 确认后即可按此重写 ChatScreen.kt</div>
+</div>
+
+<script>
+const html=document.documentElement;
+document.getElementById('accentSeg').addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;
+  document.querySelectorAll('#accentSeg button').forEach(x=>x.classList.toggle('on',x===b));
+  html.dataset.accent=b.dataset.a;
+});
+document.getElementById('themeToggle').addEventListener('click',()=>{
+  const dark=html.dataset.theme==='dark';
+  html.dataset.theme=dark?'light':'dark';
+  document.getElementById('tl').textContent=(dark?'亮色':'暗色')+' · 点击切换';
+});
+</script>
+</body>
+</html>

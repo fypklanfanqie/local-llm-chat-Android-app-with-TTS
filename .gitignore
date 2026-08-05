@@ -25,6 +25,10 @@ app/src/main/jniLibs/*/libllama_jni.so
 
 # Backup / legacy files
 _elf_backup/
+backup/
+
+# Claude Code internal
+.claude/
 
 # Python cache
 __pycache__/

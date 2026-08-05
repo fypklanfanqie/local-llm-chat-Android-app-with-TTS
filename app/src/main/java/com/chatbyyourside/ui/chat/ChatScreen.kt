@@ -1,0 +1,1505 @@
+package com.chatbyyourside.ui.chat
+
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.automirrored.outlined.VolumeUp
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import android.widget.Toast
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import com.chatbyyourside.data.model.TtsLanguage
+import coil.compose.AsyncImage
+import com.chatbyyourside.AppContainer
+import com.chatbyyourside.data.model.AttachedFile
+import com.chatbyyourside.data.model.ChatProviderType
+import com.chatbyyourside.data.model.Conversation
+import com.chatbyyourside.data.model.DisplayMessage
+import com.chatbyyourside.data.model.MessageSegment
+import com.chatbyyourside.data.repository.ChatBackgroundConfig
+import com.chatbyyourside.perfmon.PerformanceGlassOverlay
+import com.chatbyyourside.ui.glass.GlassSegmented
+import com.chatbyyourside.ui.navigation.ClampedImeBottomPadding
+import com.chatbyyourside.ui.glass.LocalBackdropState
+import com.chatbyyourside.ui.glass.MonogramAvatar
+import com.chatbyyourside.ui.glass.frostedGlass
+import com.chatbyyourside.ui.glass.liquidGlass
+import com.chatbyyourside.ui.applySystemBarIcons
+import com.chatbyyourside.ui.theme.GlassShapes
+import com.chatbyyourside.ui.theme.LocalDarkTheme
+import kotlinx.coroutines.launch
+import java.io.File
+
+// ===== 设计 Token：iMessage 风圆角 / 尺寸系统 =====
+private val BubbleRadius = 18.dp
+private val BubbleTailRadius = 5.dp
+private val AiAvatarSize = 38.dp
+private val UserAvatarSize = 30.dp
+private val SuccessGreen = Color(0xFF34C759)
+
+/**
+ * 聊天界面玻璃方案 · C 实体卡片：高不透明度玻璃面，最大化文字可读性。
+ *
+ * 用户上传照片背景时 [frostedGlass] 的真实背板采样会被关闭（LocalBackdropState = null），
+ * 玻璃退化为纯半透明色块--没有真实模糊可用，故照片上只能靠提高不透明度保证文字可读。
+ * tint 主题感知：亮色用白底、暗色用深底，配 scheme.onSurface 文字在两种主题下都高对比
+ * （旧实现暗色下也是白底 + 浅色 onSurface 文字，对比极低）。阴影统一 14dp，与底栏 dock 协调。
+ */
+private data class ChatGlassScheme(
+    val aiTint: Color,
+    val inputTint: Color,
+    val topBarTint: Color,
+    val chipTint: Color,
+    val photoScrimBase: Float,
+    val blur: Dp,
+    val shadow: Dp,
+)
+
+private val ChatGlassSchemeLight = ChatGlassScheme(
+    aiTint = Color.White.copy(alpha = 0.94f),
+    inputTint = Color.White.copy(alpha = 0.92f),
+    topBarTint = Color.White.copy(alpha = 0.92f),
+    chipTint = Color.White.copy(alpha = 0.70f),
+    photoScrimBase = 0.50f,
+    blur = 8.dp,
+    shadow = 14.dp,
+)
+
+private val ChatGlassSchemeDark = ChatGlassScheme(
+    aiTint = Color(0xFF1E2029).copy(alpha = 0.94f),
+    inputTint = Color(0xFF181A22).copy(alpha = 0.92f),
+    topBarTint = Color(0xFF181A22).copy(alpha = 0.92f),
+    chipTint = Color(0xFF181A22).copy(alpha = 0.70f),
+    photoScrimBase = 0.70f,
+    blur = 8.dp,
+    shadow = 14.dp,
+)
+
+@Composable
+private fun chatGlass(): ChatGlassScheme =
+    if (LocalDarkTheme.current) ChatGlassSchemeDark else ChatGlassSchemeLight
+
+@Composable
+fun ChatScreen(
+    container: AppContainer,
+    bottomBarHeight: Dp = 0.dp,
+    onBack: () -> Unit,
+    onNavigateToCharacters: () -> Unit,
+) {
+    val app = LocalContext.current.applicationContext as com.chatbyyourside.ChatApp
+    val viewModel: ChatViewModel = viewModel(
+        factory = viewModelFactory { initializer { ChatViewModel(app, container) } }
+    )
+    val state by viewModel.uiState.collectAsState()
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+
+    // 自动滚动到底部：消息数量变化或最后一条内容增长（流式输出）时触发。
+    // 仅在已贴近底部时跟随，避免流式输出时把用户向上翻看历史的操作强制拉回底部。
+    // 用 scrollToItem（瞬时，非动画）：animateScrollToItem 在流式期间 lastContent 频繁变化会导致
+    // LaunchedEffect 反复取消/重启，动画被中断后 LazyColumn layoutInfo 可能不一致，造成跳顶。
+    var didInitialScroll by remember { mutableStateOf(false) }
+    var userAtBottom by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val lastIdx = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val total = info.totalItemsCount
+            Triple(lastIdx, total, listState.isScrollInProgress)
+        }.collect { (lastIdx, total, isScrolling) ->
+            if (total > 0 && !isScrolling) {
+                userAtBottom = lastIdx >= total - 2
+            }
+        }
+    }
+
+    val messagesSize = state.messages.size
+    val lastContent = state.messages.lastOrNull()?.content
+    LaunchedEffect(messagesSize, lastContent) {
+        if (state.messages.isEmpty()) return@LaunchedEffect
+        kotlinx.coroutines.delay(16)
+        val totalItems = listState.layoutInfo.totalItemsCount
+        if (totalItems <= 0) return@LaunchedEffect
+        val atBottom = !didInitialScroll || userAtBottom
+        if (atBottom && !listState.isScrollInProgress) {
+            listState.scrollToItem(totalItems - 1)
+            didInitialScroll = true
+        }
+    }
+
+    val context = LocalContext.current
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        uris.forEach { uri ->
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            viewModel.addImage(uri.toString())
+        }
+    }
+
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            val name = queryDisplayName(context, uri) ?: "附件"
+            viewModel.addFile(uri.toString(), name)
+        }
+    }
+
+    val isLocal = state.activeProvider == ChatProviderType.LOCAL
+    val liquidGlassEnabled by container.settingsRepository.liquidGlass.collectAsState(initial = true)
+
+    val bgConfig by container.chatBackgroundRepository.config.collectAsState(
+        initial = ChatBackgroundConfig(enabled = false, paths = emptyList())
+    )
+    val bgUrls = remember(bgConfig) { container.chatBackgroundRepository.effectiveUrls(bgConfig) }
+    // 有照片背景 → 整页是深色画面，系统状态栏/导航栏图标切白保证可读；
+    // 无照片（透出浅色极光底）→ 保持亮色主题的深色图标。
+    val hasPhotoBg = bgUrls.isNotEmpty()
+    applySystemBarIcons(light = hasPhotoBg)
+    val bgCount = bgUrls.size
+    var bgIndex by remember { mutableIntStateOf(0) }
+    LaunchedEffect(bgCount) {
+        if (bgCount <= 0) return@LaunchedEffect
+        if (bgIndex >= bgCount) bgIndex = 0
+        while (true) {
+            kotlinx.coroutines.delay(8000)
+            bgIndex = (bgIndex + 1) % bgCount
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Transparent)
+    ) {
+        ChatBackground(urls = bgUrls, bgIndex = bgIndex)
+
+        // 开照片背景时背板仍只有极光，玻璃面板采样会出现「玻璃里是 mesh、外面是照片」的错位，
+        // 这里对整页玻璃回退半透明叠层，保持视觉一致。
+        val chatBackdrop = if (bgUrls.isNotEmpty()) null else LocalBackdropState.current
+        CompositionLocalProvider(LocalBackdropState provides chatBackdrop) {
+        // statusBarsPadding 下移避开状态栏，再补 20dp：顶栏与状态栏留出 ~26dp 呼吸空间，
+        // 不再「贴」在背景图片顶部（符合现代 AI 聊天应用的沉浸式间距）。
+        // 底部预留 bottomBarHeight（dock 高度，含导航栏 inset）+ IME 钳制：无键盘时交互内容
+        // 止于 dock 之上，键盘弹出时随键盘上移；背景层（ChatBackground）独立铺满整屏不被裁。
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .padding(top = 20.dp, bottom = bottomBarHeight)
+                .then(ClampedImeBottomPadding(WindowInsets.ime, PaddingValues(bottom = bottomBarHeight))),
+        ) {
+            ChatTopBar(
+                name = state.characterName,
+                role = state.characterRole,
+                imageUrl = state.characterImage,
+                activeProvider = state.activeProvider,
+                ttsLanguage = state.ttsLanguage,
+                conversationCount = state.conversations.size,
+                deepThinkingEnabled = state.deepThinkingEnabled,
+                onBack = onBack,
+                onClickCharacter = onNavigateToCharacters,
+                onSwitchProvider = { viewModel.switchProvider(it) },
+                onToggleLang = { viewModel.toggleTtsLanguage() },
+                onToggleDeepThinking = { viewModel.toggleDeepThinking() },
+                onOpenConversations = { viewModel.toggleConversationSheet(true) },
+            )
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.type == PointerEventType.Press) {
+                                    focusManager.clearFocus()
+                                }
+                            }
+                        }
+                    },
+            ) {
+                if (state.showWelcome) {
+                    WelcomeState(
+                        name = state.characterName,
+                        role = state.characterRole,
+                        imageUrl = state.characterImage,
+                        onSuggest = { text ->
+                            viewModel.updateInputText(text)
+                            viewModel.sendMessage()
+                        },
+                    )
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        contentPadding = PaddingValues(vertical = 10.dp),
+                    ) {
+                        items(state.messages, key = { it.id }) { msg ->
+                            MessageBubble(
+                                message = msg,
+                                state = state,
+                                characterImage = state.characterImage,
+                                characterName = state.characterName,
+                                onTts = { viewModel.playTts(msg) },
+                            )
+                        }
+                        if (state.showTyping) {
+                            item {
+                                TypingIndicator(
+                                    imageUrl = state.characterImage,
+                                    name = state.characterName,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                val ttsActive = state.ttsLoadingIndex >= 0 || state.ttsPlayingIndex >= 0
+                val showTtsSub = ttsActive && (state.ttsSubtitleCn.isNotBlank() || state.ttsSubtitleJp.isNotBlank())
+                val showSwitchSub = state.showSwitchSubtitle && (state.subtitleCn.isNotBlank() || state.subtitleJp.isNotBlank())
+                if (showTtsSub || showSwitchSub) {
+                    SubtitleBar(
+                        jp = if (showTtsSub) state.ttsSubtitleJp else state.subtitleJp,
+                        cn = if (showTtsSub) state.ttsSubtitleCn else state.subtitleCn,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(12.dp),
+                    )
+                }
+            }
+
+            state.errorMessage?.let { error ->
+                Snackbar(
+                    modifier = Modifier.padding(8.dp),
+                    action = {
+                        TextButton(onClick = { viewModel.clearError() }) { Text("关闭") }
+                    }
+                ) { Text(error) }
+            }
+
+            ChatInputBar(
+                text = state.inputText,
+                isStreaming = state.isStreaming,
+                images = state.uploadedImages,
+                files = state.uploadedFiles,
+                onTextChange = { viewModel.updateInputText(it) },
+                onSend = { viewModel.sendMessage() },
+                onPickImage = { imagePicker.launch(arrayOf("image/*")) },
+                onPickFile = { filePicker.launch(arrayOf("*/*")) },
+                onRemoveImage = { viewModel.removeImage(it) },
+                onRemoveFile = { viewModel.removeFile(it) },
+            )
+        }
+        }
+
+        if (isLocal) {
+            PerformanceGlassOverlay(
+                container = container,
+                liquidGlassEnabled = liquidGlassEnabled,
+            )
+        }
+
+        if (state.showConversationSheet) {
+            ConversationSheet(
+                conversations = state.conversations,
+                activeConversationId = state.activeConversationId,
+                onNew = { viewModel.newConversation() },
+                onSwitch = { viewModel.switchConversation(it) },
+                onRename = { id, title -> viewModel.renameConversation(id, title) },
+                onDelete = { viewModel.deleteConversation(it) },
+                onDismiss = { viewModel.toggleConversationSheet(false) },
+            )
+        }
+    }
+}
+
+/** 聊天头像：有立绘用图，否则 monogram 渐变首字。 */
+@Composable
+private fun ChatAvatar(
+    imageUrl: String,
+    name: String,
+    modifier: Modifier = Modifier,
+    size: Dp = AiAvatarSize,
+) {
+    if (imageUrl.isNotBlank()) {
+        AsyncImage(
+            model = imageUrl,
+            contentDescription = name,
+            modifier = modifier.size(size).clip(CircleShape),
+            contentScale = ContentScale.Crop,
+        )
+    } else {
+        MonogramAvatar(text = name, modifier = modifier, size = size)
+    }
+}
+
+/**
+ * 聊天背景轮播：每 8 秒切换一张背景图，Crossfade 过渡 + scrim 保证内容可读。
+ * 背景铺满整屏：通讯 Tab 已在全屏层（不预留底栏），背景自然延伸到状态栏 / 浮动 dock /
+ * 系统导航栏背后、直达屏幕最底部（dock 作为浮层叠在最上），不再露出浅色极光底。
+ * 无背景图时不绘制，透出根 MeshBackground 的玻璃底。
+ */
+@Composable
+private fun ChatBackground(urls: List<String>, bgIndex: Int) {
+    if (urls.isEmpty()) return
+    val url = urls.getOrNull(bgIndex) ?: urls.first()
+    Box(modifier = Modifier.fillMaxSize()) {
+        Crossfade(targetState = url, animationSpec = tween(1500), label = "bgCrossfade") { current ->
+            val model: Any = if (current.startsWith("/")) File(current) else current
+            AsyncImage(
+                model = model,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+        }
+        // 纵向渐变 scrim：顶部加深保证白色状态栏图标可读，底部加深让 dock / 输入区与背景融合；
+        // 中段按 ChatGlassScheme.photoScrimBase 压暗（方案 C：亮 0.50 / 暗 0.70），繁忙照片上也保证文字可读。
+        val base = chatGlass().photoScrimBase
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.Black.copy(alpha = (base + 0.26f).coerceAtMost(0.85f)),
+                            Color.Black.copy(alpha = base),
+                            Color.Black.copy(alpha = base),
+                            Color.Black.copy(alpha = (base + 0.16f).coerceAtMost(0.85f)),
+                        ),
+                    )
+                )
+        )
+    }
+}
+
+/**
+ * 欢迎态：大头像 + 角色名/定位 + 简介 + 推荐话题药丸（点击即发送）。
+ */
+@Composable
+private fun WelcomeState(
+    name: String,
+    role: String,
+    imageUrl: String,
+    onSuggest: (String) -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val glass = chatGlass()
+    val suggestions = remember { listOf("和我打个招呼", "今天过得怎么样", "讲个故事给我听") }
+    Box(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 28.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            ChatAvatar(
+                imageUrl = imageUrl,
+                name = name,
+                size = 96.dp,
+                modifier = Modifier
+                    .shadow(
+                        24.dp, RoundedCornerShape(32.dp), clip = false,
+                        ambientColor = Color(0xFFC44CE0).copy(alpha = 0.30f),
+                        spotColor = Color(0xFF7C5CFF).copy(alpha = 0.45f),
+                    )
+                    .clip(RoundedCornerShape(32.dp)),
+            )
+            Spacer(Modifier.height(14.dp))
+            Text(
+                name.ifBlank { "未选择角色" },
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = scheme.onBackground,
+            )
+            if (role.isNotBlank()) {
+                Text(role, color = scheme.onSurfaceVariant, fontSize = 13.sp)
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (name.isBlank()) "去角色页选择一位，开始对话吧" else "开始和 $name 对话吧",
+                color = scheme.onSurfaceVariant,
+                fontSize = 12.5.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            Spacer(Modifier.height(18.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                suggestions.forEach { s ->
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .liquidGlass(
+                                GlassShapes.pill,
+                                shadowElevation = 6.dp,
+                                blurRadius = glass.blur,
+                                fillBrush = Brush.linearGradient(
+                                    listOf(glass.inputTint, glass.chipTint),
+                                ),
+                            )
+                            .clickable { onSuggest(s) }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(s, color = scheme.onSurface, fontSize = 12.5.sp, maxLines = 1)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 玻璃顶栏：头像+在线点+角色名/定位 + 云端/本地分段 + 思考/会话/更多图标。
+ */
+@Composable
+private fun ChatTopBar(
+    name: String,
+    role: String,
+    imageUrl: String,
+    activeProvider: ChatProviderType,
+    ttsLanguage: com.chatbyyourside.data.model.TtsLanguage,
+    conversationCount: Int,
+    deepThinkingEnabled: Boolean,
+    onBack: () -> Unit,
+    onClickCharacter: () -> Unit,
+    onSwitchProvider: (ChatProviderType) -> Unit,
+    onToggleLang: () -> Unit,
+    onToggleDeepThinking: () -> Unit,
+    onOpenConversations: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val glass = chatGlass()
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .liquidGlass(GlassShapes.cardSmall, shadowElevation = glass.shadow, tint = glass.topBarTint, blurRadius = glass.blur)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        IconBubble(
+            icon = Icons.AutoMirrored.Outlined.ArrowBack,
+            contentDescription = "返回",
+            onClick = onBack,
+        )
+        Spacer(Modifier.width(2.dp))
+
+        // 头像 + 角色信息（点击进角色页）
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .clip(GlassShapes.cardSmall)
+                .clickable(onClick = onClickCharacter)
+                .padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box {
+                ChatAvatar(imageUrl = imageUrl, name = name, size = AiAvatarSize)
+                // 在线点
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(SuccessGreen)
+                        .border(BorderStroke(2.dp, scheme.surface), CircleShape),
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text(
+                    name.ifBlank { "未选择角色" },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = scheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    role.ifBlank { "角色" },
+                    color = scheme.onSurfaceVariant,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        GlassSegmented(
+            options = ChatProviderType.values().map {
+                it to "${it.icon} ${if (it == ChatProviderType.CLOUD) "云端" else "本地"}"
+            },
+            selected = activeProvider,
+            onSelect = onSwitchProvider,
+        )
+
+        IconBubble(
+            icon = Icons.Outlined.Psychology,
+            contentDescription = "深度思考",
+            highlighted = deepThinkingEnabled,
+            onClick = onToggleDeepThinking,
+        )
+        IconBubble(
+            icon = Icons.AutoMirrored.Outlined.Chat,
+            contentDescription = "会话记录",
+            badge = conversationCount.takeIf { it > 0 },
+            onClick = onOpenConversations,
+        )
+        LangBubble(
+            lang = ttsLanguage,
+            contentDescription = "语音语言：${ttsLanguage.label}",
+            onClick = {
+                val next = if (ttsLanguage == TtsLanguage.ZH) TtsLanguage.JA else TtsLanguage.ZH
+                onToggleLang()
+                Toast.makeText(context, "语音语言已切换至${next.label}", Toast.LENGTH_SHORT).show()
+            },
+        )
+    }
+}
+
+/** 圆形玻璃图标按钮，可选高亮 / 数字角标。 */
+@Composable
+private fun IconBubble(
+    icon: ImageVector,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+    highlighted: Boolean = false,
+    badge: Int? = null,
+    onClick: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Box(
+        modifier = modifier
+            .size(34.dp)
+            .clip(CircleShape)
+            .then(
+                if (highlighted) Modifier.background(scheme.primary.copy(alpha = 0.16f))
+                else Modifier.frostedGlass(CircleShape, shadowElevation = 4.dp, borderWidth = 1.dp, blurRadius = 16.dp)
+            )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = if (highlighted) scheme.primary else scheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
+        )
+        if (badge != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .size(16.dp)
+                    .clip(CircleShape)
+                    .background(scheme.primary),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "$badge",
+                    color = scheme.onPrimary,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+    }
+}
+
+/** 圆形玻璃文字按钮：顶栏 TTS 语言切换，显示当前语言字符（中/日），点击切换并 toast 提示。 */
+@Composable
+private fun LangBubble(
+    lang: TtsLanguage,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Box(
+        modifier = modifier
+            .size(34.dp)
+            .clip(CircleShape)
+            .background(scheme.primary.copy(alpha = 0.16f))
+            .clickable(onClick = onClick)
+            .semantics(mergeDescendants = true) { this.contentDescription = contentDescription },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            lang.displayChar,
+            color = scheme.primary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
+@Composable
+private fun MessageBubble(
+    message: DisplayMessage,
+    state: ChatUiState,
+    characterImage: String,
+    characterName: String,
+    onTts: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val glass = chatGlass()
+    val isUser = message.role == "user"
+    val clipboard = LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+    LaunchedEffect(copied) {
+        if (copied) { kotlinx.coroutines.delay(1200); copied = false }
+    }
+    // 气泡：用户=紫罗兰实心 + 紫辉光（iOS 用户气泡）；AI=磨砂玻璃（采样模糊背板）
+    val bubbleShape: Shape = if (isUser) {
+        RoundedCornerShape(topStart = BubbleRadius, topEnd = BubbleRadius, bottomStart = BubbleRadius, bottomEnd = BubbleTailRadius)
+    } else {
+        RoundedCornerShape(topStart = BubbleRadius, topEnd = BubbleRadius, bottomStart = BubbleTailRadius, bottomEnd = BubbleRadius)
+    }
+    val bubbleContentColor = if (isUser) scheme.onPrimary else scheme.onSurface
+
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val maxBubbleWidth = maxWidth * 0.82f
+        Row(
+            modifier = Modifier.align(if (isUser) Alignment.CenterEnd else Alignment.CenterStart),
+            verticalAlignment = Alignment.Top,
+        ) {
+            if (!isUser) {
+                ChatAvatar(imageUrl = characterImage, name = characterName, size = AiAvatarSize)
+                Spacer(Modifier.width(8.dp))
+            }
+
+            Column(
+                modifier = Modifier.widthIn(max = maxBubbleWidth),
+                horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = maxBubbleWidth)
+                        .then(
+                            if (isUser) Modifier
+                                .shadow(
+                                    14.dp, bubbleShape, clip = false,
+                                    ambientColor = Color(0xFF6E4DFF).copy(alpha = 0.15f),
+                                    spotColor = Color(0xFF7C5CFF).copy(alpha = 0.35f),
+                                )
+                                .background(scheme.primary, bubbleShape)
+                            else Modifier.frostedGlass(
+                                bubbleShape,
+                                tint = glass.aiTint,
+                                borderWidth = 1.dp,
+                                blurRadius = glass.blur,
+                                shadowElevation = glass.shadow,
+                            )
+                        ),
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        message.segments.forEach { seg ->
+                            when (seg) {
+                                is MessageSegment.Text -> {
+                                    if (!message.isStreaming && seg.content.contains('$')) {
+                                        MathView(
+                                            seg.content,
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                        )
+                                    } else {
+                                        Text(
+                                            seg.content,
+                                            color = bubbleContentColor,
+                                            fontSize = 14.5.sp,
+                                            lineHeight = 21.sp,
+                                        )
+                                    }
+                                }
+                                is MessageSegment.Code -> CodeBlockView(seg)
+                                is MessageSegment.Science -> ScienceBlockView(seg)
+                                is MessageSegment.Think -> ThinkBlockView(seg)
+                            }
+                        }
+                        if (message.images.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier.padding(top = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                message.images.forEach { uri ->
+                                    AsyncImage(
+                                        model = uri,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(72.dp).clip(RoundedCornerShape(12.dp)),
+                                        contentScale = ContentScale.Crop,
+                                    )
+                                }
+                            }
+                        }
+                        if (message.files.isNotEmpty()) {
+                            Column(
+                                modifier = Modifier.padding(top = 6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                message.files.forEach { file ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .background(scheme.surface.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                                            .padding(horizontal = 8.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Icon(Icons.Outlined.Description, contentDescription = null, tint = bubbleContentColor.copy(alpha = 0.7f), modifier = Modifier.size(14.dp))
+                                        Text(
+                                            file.name,
+                                            color = bubbleContentColor.copy(alpha = 0.85f),
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            modifier = Modifier.weight(1f).padding(start = 6.dp),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        if (message.isStreaming) {
+                            StreamingCursor(color = bubbleContentColor)
+                        }
+                    }
+                }
+                // 操作胶囊：复制 / 朗读 / 重生成（仅 AI 且非流式）
+                if (!message.isStreaming) {
+                    Row(
+                        modifier = Modifier.padding(top = 3.dp, start = 4.dp, end = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ActionChip(
+                            icon = Icons.Outlined.ContentCopy,
+                            label = if (copied) "已复制" else "复制",
+                            done = copied,
+                            onClick = {
+                                val text = messageCopyText(message)
+                                if (text.isNotBlank()) {
+                                    clipboard.setText(AnnotatedString(text))
+                                    copied = true
+                                }
+                            },
+                        )
+                        if (!isUser && state.ttsEnabled) {
+                            ActionChip(
+                                icon = Icons.AutoMirrored.Outlined.VolumeUp,
+                                label = "朗读",
+                                onClick = onTts,
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (isUser) {
+                Spacer(Modifier.width(8.dp))
+                MonogramAvatar(text = "我", size = UserAvatarSize)
+            }
+        }
+    }
+}
+
+/** 操作胶囊：复制 / 朗读 / 重生成。 */
+@Composable
+private fun ActionChip(
+    icon: ImageVector,
+    label: String,
+    modifier: Modifier = Modifier,
+    done: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val glass = chatGlass()
+    Row(
+        modifier = modifier
+            .frostedGlass(GlassShapes.pill, tint = glass.chipTint, borderWidth = 1.dp, shadowElevation = 1.dp, blurRadius = glass.blur)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            icon,
+            contentDescription = label,
+            tint = if (done) SuccessGreen else scheme.onSurfaceVariant,
+            modifier = Modifier.size(12.dp),
+        )
+        Spacer(Modifier.width(3.dp))
+        Text(
+            label,
+            color = if (done) SuccessGreen else scheme.onSurfaceVariant,
+            fontSize = 10.5.sp,
+        )
+    }
+}
+
+@Composable
+private fun CodeBlockView(seg: MessageSegment.Code) {
+    val dark = LocalDarkTheme.current
+    var folded by remember { mutableStateOf(false) }
+    var copied by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    LaunchedEffect(copied) {
+        if (copied) { kotlinx.coroutines.delay(1200); copied = false }
+    }
+    Surface(
+        color = if (dark) Color(0xFF0C0E14) else Color(0xFF1E1E2E),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+    ) {
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    seg.language.uppercase().ifBlank { "CODE" },
+                    color = Color(0xFF9aa5ce),
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(seg.rawCode))
+                        copied = true
+                    },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Text(if (copied) "✓ 已复制" else "复制", color = if (copied) SuccessGreen else Color(0xFF9aa5ce), fontSize = 10.sp)
+                }
+                TextButton(
+                    onClick = { folded = !folded },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Text(if (folded) "展开" else "折叠", color = Color(0xFF9aa5ce), fontSize = 10.sp)
+                }
+            }
+            if (!folded) {
+                seg.lines.forEach { line ->
+                    Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 0.dp)) {
+                        line.forEach { token ->
+                            Text(token.text, color = Color(android.graphics.Color.parseColor(token.color)), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScienceBlockView(seg: MessageSegment.Science) {
+    var copied by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    LaunchedEffect(copied) {
+        if (copied) { kotlinx.coroutines.delay(1200); copied = false }
+    }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+    ) {
+        Column(modifier = Modifier.padding(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    seg.language.uppercase().ifBlank { "FORMULA" },
+                    color = Color(0xFF4EC9B0),
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(seg.rawCode))
+                        copied = true
+                    },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                ) {
+                    Text(if (copied) "✓ 已复制" else "复制", color = if (copied) SuccessGreen else MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
+                }
+            }
+            seg.lines.forEach { line ->
+                Row {
+                    line.forEach { token ->
+                        val color = Color(android.graphics.Color.parseColor(token.color))
+                        val baseline = when (token.format) {
+                            "sub" -> androidx.compose.ui.text.style.BaselineShift.Subscript
+                            "sup" -> androidx.compose.ui.text.style.BaselineShift.Superscript
+                            else -> androidx.compose.ui.text.style.BaselineShift.None
+                        }
+                        Text(token.text, color = color, fontSize = 14.sp, style = TextStyle(baselineShift = baseline))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThinkBlockView(seg: MessageSegment.Think) {
+    val scheme = MaterialTheme.colorScheme
+    var folded by remember(seg.streaming) { mutableStateOf(!seg.streaming) }
+    Surface(
+        color = scheme.primary.copy(alpha = 0.10f),
+        shape = RoundedCornerShape(13.dp),
+        border = BorderStroke(1.dp, scheme.primary.copy(alpha = 0.22f)),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(13.dp))
+                    .clickable { folded = !folded }
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Outlined.Psychology,
+                    contentDescription = null,
+                    tint = scheme.primary,
+                    modifier = Modifier.size(13.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    if (seg.streaming) "思考中…" else "思考过程",
+                    color = scheme.primary,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(if (folded) "▸" else "▾", color = scheme.primary, fontSize = 12.sp)
+            }
+            if (!folded && seg.content.isNotEmpty()) {
+                Text(
+                    seg.content,
+                    color = scheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubtitleBar(jp: String, cn: String, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        color = if (LocalDarkTheme.current) Color.White.copy(alpha = 0.10f) else Color.White.copy(alpha = 0.75f),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, scheme.primary.copy(alpha = 0.25f)),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            if (jp.isNotBlank()) {
+                Text(jp, color = scheme.onSurface, fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium)
+            }
+            if (cn.isNotBlank()) {
+                Text(cn, color = scheme.onSurfaceVariant, fontSize = 12.sp, lineHeight = 17.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TypingIndicator(imageUrl: String, name: String) {
+    val glass = chatGlass()
+    Row(verticalAlignment = Alignment.Top) {
+        ChatAvatar(imageUrl = imageUrl, name = name, size = AiAvatarSize)
+        Spacer(Modifier.width(8.dp))
+        Box(
+            modifier = Modifier.frostedGlass(
+                RoundedCornerShape(
+                    topStart = BubbleRadius, topEnd = BubbleRadius,
+                    bottomStart = BubbleTailRadius, bottomEnd = BubbleRadius,
+                ),
+                tint = glass.aiTint,
+                borderWidth = 1.dp,
+                blurRadius = glass.blur,
+                shadowElevation = glass.shadow,
+            ),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                repeat(3) { i ->
+                    val alpha by rememberInfiniteTransition().animateFloat(
+                        initialValue = 0.2f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(400, delayMillis = i * 150, easing = LinearEasing),
+                            repeatMode = RepeatMode.Reverse,
+                        ),
+                        label = "typing$i",
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = alpha), CircleShape),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StreamingCursor(color: Color) {
+    val alpha by rememberInfiniteTransition().animateFloat(
+        initialValue = 0.2f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(500, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "cursor",
+    )
+    Text("|", color = color.copy(alpha = alpha), fontSize = 14.sp)
+}
+
+@Composable
+private fun ChatInputBar(
+    text: String,
+    isStreaming: Boolean,
+    images: List<String>,
+    files: List<AttachedFile>,
+    onTextChange: (String) -> Unit,
+    onSend: () -> Unit,
+    onPickImage: () -> Unit,
+    onPickFile: () -> Unit,
+    onRemoveImage: (Int) -> Unit,
+    onRemoveFile: (Int) -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val glass = chatGlass()
+    // 导航栏 inset 已由外层交互 Column 的 bottom = bottomBarHeight（含导航栏 inset）+ IME 钳制
+    // 统一预留，此处不再重复加 windowInsetsPadding(navigationBars)，避免输入行被多顶一个导航栏高度。
+    Column {
+        // 附件预览
+        if (images.isNotEmpty() || files.isNotEmpty()) {
+            Column(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (images.isNotEmpty()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        images.forEachIndexed { idx, uri ->
+                            Box(
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(RoundedCornerShape(12.dp)),
+                            ) {
+                                AsyncImage(
+                                    model = uri,
+                                    contentDescription = null,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop,
+                                )
+                                IconButton(
+                                    onClick = { onRemoveImage(idx) },
+                                    modifier = Modifier.align(Alignment.TopEnd).size(20.dp),
+                                ) {
+                                    Icon(Icons.Outlined.Close, contentDescription = "移除", tint = Color.White, modifier = Modifier.size(14.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+                files.forEachIndexed { idx, file ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .frostedGlass(GlassShapes.cardSmall, shadowElevation = 0.dp)
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Outlined.Description, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                        Text(
+                            file.name,
+                            color = scheme.onSurfaceVariant,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                        )
+                        IconButton(onClick = { onRemoveFile(idx) }, modifier = Modifier.size(20.dp)) {
+                            Icon(Icons.Outlined.Close, contentDescription = "移除", tint = scheme.error, modifier = Modifier.size(14.dp))
+                        }
+                    }
+                }
+            }
+        }
+
+        // 胶囊输入行：[+图片][📎文件] 输入框 [圆形发送]
+        Row(
+            modifier = Modifier
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .fillMaxWidth()
+                .liquidGlass(
+                    RoundedCornerShape(26.dp),
+                    shadowElevation = glass.shadow,
+                    tint = glass.inputTint,
+                    blurRadius = glass.blur,
+                    fillBrush = Brush.linearGradient(
+                        listOf(glass.inputTint, glass.chipTint),
+                    ),
+                )
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Box(
+                modifier = Modifier.size(40.dp).clickable(onClick = onPickImage),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Outlined.Add, contentDescription = "添加图片", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            }
+            Box(
+                modifier = Modifier.size(40.dp).clickable(onClick = onPickFile),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Outlined.AttachFile, contentDescription = "添加文件", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            }
+            BasicTextField(
+                value = text,
+                onValueChange = onTextChange,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(vertical = 8.dp),
+                textStyle = TextStyle(color = scheme.onSurface, fontSize = 14.5.sp, lineHeight = 20.sp),
+                singleLine = false,
+                maxLines = 4,
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(scheme.primary),
+                decorationBox = { inner ->
+                    if (text.isEmpty()) {
+                        Text("输入消息…", color = scheme.onSurfaceVariant, fontSize = 14.5.sp)
+                    }
+                    inner()
+                },
+            )
+            // 圆形发送按钮
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .shadow(
+                        10.dp, CircleShape, clip = false,
+                        ambientColor = Color(0xFF6E4DFF).copy(alpha = 0.20f),
+                        spotColor = Color(0xFF7C5CFF).copy(alpha = 0.45f),
+                    )
+                    .clip(CircleShape)
+                    .background(if (isStreaming) scheme.surfaceVariant else scheme.primary)
+                    .clickable(enabled = !isStreaming, onClick = onSend),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Outlined.Send,
+                    contentDescription = "发送",
+                    tint = if (isStreaming) scheme.onSurfaceVariant else scheme.onPrimary,
+                    modifier = Modifier.size(17.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 从 content URI 查询显示文件名 */
+private fun queryDisplayName(context: android.content.Context, uri: android.net.Uri): String? {
+    return try {
+        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst() && !c.isNull(0)) c.getString(0) else null
+        }
+    } catch (e: Exception) {
+        null
+    }
+}
+
+/** 时间戳格式化为「MM-dd HH:mm」 */
+private fun formatConversationTime(ts: Long): String =
+    java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(ts))
+
+/**
+ * 提取消息可复制纯文本：拼接 Text / Code / Science 段，跳过 Think。
+ * 结果为空时回退到原始 [DisplayMessage.content]。
+ */
+private fun messageCopyText(message: DisplayMessage): String {
+    val built = buildString {
+        message.segments.forEach { seg ->
+            when (seg) {
+                is MessageSegment.Text -> append(seg.content)
+                is MessageSegment.Code -> {
+                    if (isNotEmpty()) append("\n")
+                    append(seg.rawCode)
+                    append("\n")
+                }
+                is MessageSegment.Science -> {
+                    if (isNotEmpty()) append("\n")
+                    append(seg.rawCode)
+                    append("\n")
+                }
+                is MessageSegment.Think -> { /* 跳过思考过程 */ }
+            }
+        }
+    }.trim()
+    return built.ifBlank { message.content }
+}
+
+/**
+ * 会话管理抽屉：玻璃底部弹层 + 遮罩，列出当前角色的全部会话，可新建 / 切换 / 重命名 / 删除。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ConversationSheet(
+    conversations: List<Conversation>,
+    activeConversationId: Long?,
+    onNew: () -> Unit,
+    onSwitch: (Long) -> Unit,
+    onRename: (Long, String) -> Unit,
+    onDelete: (Long) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var renaming by remember { mutableStateOf<Conversation?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    var deleting by remember { mutableStateOf<Conversation?>(null) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = Color.Transparent,
+        shape = GlassShapes.sheet,
+        dragHandle = { GlassDragHandle() },
+    ) {
+        Column(
+            modifier = Modifier
+                .frostedGlass(GlassShapes.sheet, tint = scheme.surfaceContainerHigh.copy(alpha = 0.95f))
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp)
+                .windowInsetsPadding(WindowInsets.navigationBars),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("对话记录", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = scheme.onSurface)
+                TextButton(onClick = onNew) {
+                    Icon(Icons.Outlined.Add, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("新建对话", color = scheme.primary)
+                }
+            }
+            if (conversations.isEmpty()) {
+                Text(
+                    "暂无对话，点右上角「新建对话」开始",
+                    color = scheme.onSurfaceVariant,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(vertical = 24.dp),
+                )
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.heightIn(max = 420.dp),
+                ) {
+                    items(conversations, key = { it.id }) { conv ->
+                        ConversationItem(
+                            conversation = conv,
+                            isActive = conv.id == activeConversationId,
+                            onSwitch = { onSwitch(conv.id) },
+                            onRename = {
+                                renaming = conv
+                                renameText = conv.title
+                            },
+                            onDelete = { deleting = conv },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    renaming?.let { conv ->
+        AlertDialog(
+            onDismissRequest = { renaming = null },
+            containerColor = scheme.surfaceContainerHigh,
+            title = { Text("重命名对话", color = scheme.onSurface) },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    singleLine = true,
+                    textStyle = TextStyle(color = scheme.onSurface, fontSize = 14.sp),
+                    colors = TextFieldDefaults.colors(
+                        cursorColor = scheme.primary,
+                        focusedIndicatorColor = scheme.primary,
+                        unfocusedIndicatorColor = scheme.outline,
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onRename(conv.id, renameText)
+                    renaming = null
+                }) { Text("确定", color = scheme.primary) }
+            },
+            dismissButton = {
+                TextButton(onClick = { renaming = null }) { Text("取消", color = scheme.onSurfaceVariant) }
+            },
+        )
+    }
+
+    deleting?.let { conv ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            containerColor = scheme.surfaceContainerHigh,
+            title = { Text("删除对话", color = scheme.onSurface) },
+            text = { Text("确定删除「${conv.title.ifBlank { "新对话" }}」？该对话的全部消息将被清除。", color = scheme.onSurfaceVariant) },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDelete(conv.id)
+                    deleting = null
+                }) { Text("删除", color = scheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleting = null }) { Text("取消", color = scheme.onSurfaceVariant) }
+            },
+        )
+    }
+}
+
+@Composable
+private fun GlassDragHandle() {
+    Box(
+        modifier = Modifier
+            .padding(vertical = 10.dp)
+            .size(width = 36.dp, height = 4.dp)
+            .clip(RoundedCornerShape(50))
+            .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)),
+        contentAlignment = Alignment.Center,
+    ) {}
+}
+
+@Composable
+private fun ConversationItem(
+    conversation: Conversation,
+    isActive: Boolean,
+    onSwitch: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        color = if (isActive) scheme.primary.copy(alpha = 0.14f) else Color.Transparent,
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onSwitch() }
+                .padding(horizontal = 12.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    conversation.title.ifBlank { "新对话" },
+                    color = if (isActive) scheme.primary else scheme.onSurface,
+                    fontSize = 14.sp,
+                    fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    formatConversationTime(conversation.updatedAt),
+                    color = scheme.onSurfaceVariant,
+                    fontSize = 10.5.sp,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            IconButton(onClick = onRename, modifier = Modifier.size(30.dp)) {
+                Icon(Icons.Outlined.Edit, contentDescription = "重命名", tint = scheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+            }
+            IconButton(onClick = onDelete, modifier = Modifier.size(30.dp)) {
+                Icon(Icons.Outlined.Delete, contentDescription = "删除", tint = scheme.error, modifier = Modifier.size(16.dp))
+            }
+        }
+    }
+}

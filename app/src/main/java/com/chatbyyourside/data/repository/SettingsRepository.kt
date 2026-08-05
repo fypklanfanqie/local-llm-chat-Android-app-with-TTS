@@ -1,0 +1,178 @@
+package com.chatbyyourside.data.repository
+
+import com.chatbyyourside.data.local.SettingsStore
+import com.chatbyyourside.data.model.ApiConfig
+import com.chatbyyourside.data.model.Character
+import com.chatbyyourside.data.model.ChatProviderType
+import com.chatbyyourside.data.model.ThemeMode
+import com.chatbyyourside.data.model.TtsConfig
+import com.chatbyyourside.data.model.TtsLanguage
+import com.chatbyyourside.data.model.VoicePair
+import com.chatbyyourside.config.AppConfig
+import com.chatbyyourside.config.Characters
+import com.chatbyyourside.llm.backend.BackendPreference
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * 设置仓库
+ * 封装 SettingsStore，提供同步获取当前值的便捷方法
+ */
+class SettingsRepository(private val store: SettingsStore) {
+
+    /** 主题模式（默认跟随系统）。 */
+    val themeMode: Flow<ThemeMode> = store.themeMode
+
+    val apiConfig: Flow<ApiConfig> = store.apiConfig
+    val ttsConfig: Flow<TtsConfig> = store.ttsConfig
+    val ttsLanguage: Flow<TtsLanguage> = store.ttsLanguage
+    val ttsVolume: Flow<Int> = store.ttsVolume
+    val ttsVoiceMap: Flow<Map<String, VoicePair>> = store.ttsVoiceMap
+    val activeCharacter: Flow<String> = store.activeCharacter
+    val customCharacters: Flow<List<Character>> = store.customCharacters
+    val volume: Flow<Int> = store.volume
+    val musicFavorites: Flow<Set<String>> = store.musicFavorites
+    val musicRepeatMode: Flow<Int> = store.musicRepeatMode
+    /** 随机播放开关（音乐页）。 */
+    val musicShuffle: Flow<Boolean> = store.musicShuffle
+    val activeProvider: Flow<ChatProviderType> = store.activeProvider
+    val activeLocalModelId: Flow<String?> = store.activeLocalModelId
+    val llmContextLen: Flow<Int> = store.llmContextLen
+    val llmThreads: Flow<Int> = store.llmThreads
+    val llmTemperature: Flow<Float> = store.llmTemperature
+    val llmMaxTokens: Flow<Int> = store.llmMaxTokens
+    val llmBackend: Flow<BackendPreference> = store.llmBackend
+    val llmCpuBoost: Flow<Boolean> = store.llmCpuBoost
+    /** CPU lookahead 投机解码开关（默认关）。仅 MNN CPU 后端生效，改值需重载模型。 */
+    val llmLookahead: Flow<Boolean> = store.llmLookahead
+    /** 深度思考模式开关（本地 + 云端通用）。 */
+    val deepThinking: Flow<Boolean> = store.deepThinking
+    /** 性能浮窗液态玻璃开关（默认开）。 */
+    val liquidGlass: Flow<Boolean> = store.liquidGlass
+    /** 推理参数是否相对上次成功加载已变更（供设置页展示"将自动重载"横幅）*/
+    val llmConfigChanged: Flow<Boolean> = store.llmConfigChanged
+
+    // ===== 角色问候（角色主动消息，仅云端可用）=====
+    /** 角色问候开关。 */
+    val greetingEnabled: Flow<Boolean> = store.greetingEnabled
+    /** 主动发消息的角色 id 集合（可多选）。 */
+    val greetingCharacterIds: Flow<Set<String>> = store.greetingCharacterIds
+    /** 每天主动消息条数。 */
+    val greetingDailyCount: Flow<Int> = store.greetingDailyCount
+    /** 当日配额（日期 -> 已发条数）。 */
+    val greetingQuota: Flow<Pair<String, Int>> = store.greetingQuota
+
+    suspend fun setThemeMode(mode: ThemeMode) = store.setThemeMode(mode)
+
+    suspend fun setApiConfig(config: ApiConfig) = store.setApiConfig(config)
+    suspend fun setTtsConfig(config: TtsConfig) = store.setTtsConfig(config)
+    suspend fun setTtsLanguage(lang: TtsLanguage) = store.setTtsLanguage(lang)
+    suspend fun setTtsVolume(vol: Int) = store.setTtsVolume(vol)
+    suspend fun setTtsVoiceMap(map: Map<String, VoicePair>) = store.setTtsVoiceMap(map)
+    suspend fun setActiveCharacter(id: String) = store.setActiveCharacter(id)
+    val activeConversations: Flow<Map<String, Long>> = store.activeConversations
+    suspend fun setActiveConversation(characterId: String, conversationId: Long) =
+        store.setActiveConversation(characterId, conversationId)
+    suspend fun clearActiveConversation(characterId: String) = store.clearActiveConversation(characterId)
+    suspend fun getActiveConversationNow(characterId: String): Long? =
+        withTimeoutOrNull(DATASTORE_TIMEOUT_MS) { activeConversations.first() }?.get(characterId)
+    suspend fun setCustomCharacters(list: List<Character>) = store.setCustomCharacters(list)
+    suspend fun updateCustomCharacters(transform: (List<Character>) -> List<Character>) =
+        store.updateCustomCharacters(transform)
+    suspend fun setVolume(vol: Int) = store.setVolume(vol)
+    suspend fun toggleMusicFavorite(key: String) = store.toggleMusicFavorite(key)
+    suspend fun setMusicRepeatMode(mode: Int) = store.setMusicRepeatMode(mode)
+    suspend fun setMusicShuffle(enabled: Boolean) = store.setMusicShuffle(enabled)
+    suspend fun setActiveProvider(type: ChatProviderType) = store.setActiveProvider(type)
+    suspend fun setActiveLocalModelId(id: String?) = store.setActiveLocalModelId(id)
+    suspend fun setLlmParams(
+        contextLen: Int? = null,
+        threads: Int? = null,
+        temperature: Float? = null,
+        maxTokens: Int? = null,
+    ) = store.setLlmParams(contextLen, threads, temperature, maxTokens)
+
+    suspend fun setLlmBackend(preference: BackendPreference) = store.setLlmBackend(preference)
+
+    suspend fun setLlmCpuBoost(enabled: Boolean) = store.setLlmCpuBoost(enabled)
+
+    suspend fun setLlmLookahead(enabled: Boolean) = store.setLlmLookahead(enabled)
+
+    suspend fun setDeepThinking(enabled: Boolean) = store.setDeepThinking(enabled)
+
+    suspend fun setLiquidGlass(enabled: Boolean) = store.setLiquidGlass(enabled)
+
+    suspend fun setGreetingEnabled(enabled: Boolean) = store.setGreetingEnabled(enabled)
+    suspend fun setGreetingCharacterIds(ids: Set<String>) = store.setGreetingCharacterIds(ids)
+    suspend fun setGreetingDailyCount(count: Int) = store.setGreetingDailyCount(count)
+    suspend fun setGreetingQuota(date: String, count: Int) = store.setGreetingQuota(date, count)
+
+    /** 一次成功推理后写回本次生效的用户配置，使 [llmConfigChanged] 归 false */
+    suspend fun acknowledgeLlmConfig(
+        threads: Int, contextLen: Int, backend: BackendPreference, lookahead: Boolean, temperature: Float,
+    ) = store.acknowledgeLlmConfig(threads, contextLen, backend, lookahead, temperature)
+
+    /** 同步获取当前 API 配置（阻塞读取 Flow 首值，5s 超时返回默认配置）。
+     *  国产 ROM（MIUI/EMUI/ColorOS）的电池优化可能拦截 DataStore 文件 I/O 导致 .first() 永久挂起；
+     *  withTimeoutOrNull 保证 UI 不卡死。 */
+    suspend fun getApiConfigNow(): ApiConfig = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        apiConfig.first()
+    } ?: ApiConfig(baseUrl = "", apiKey = "", model = "")
+
+    suspend fun getTtsConfigNow(): TtsConfig = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        ttsConfig.first()
+    } ?: TtsConfig(apiKey = "", appId = "", accessKey = "")
+
+    suspend fun getTtsLanguageNow(): TtsLanguage = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        ttsLanguage.first()
+    } ?: TtsLanguage.ZH
+
+    suspend fun getTtsVoiceMapNow(): Map<String, VoicePair> = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        ttsVoiceMap.first()
+    } ?: emptyMap()
+
+    suspend fun getActiveProviderNow(): ChatProviderType = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        activeProvider.first()
+    } ?: ChatProviderType.CLOUD
+
+    suspend fun getActiveLocalModelIdNow(): String? = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        activeLocalModelId.first()
+    }  // 超时返回 null（无模型），上游 LocalChatProvider 会抛出「未选择模型」
+
+    suspend fun getDeepThinkingNow(): Boolean = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        deepThinking.first()
+    } ?: false
+
+    /** 同步获取活跃角色（5s 超时回退默认角色），供 CharacterRepository 使用 */
+    suspend fun getActiveCharacterNow(): String = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        activeCharacter.first()
+    } ?: Characters.DEFAULT_CHARACTER_ID
+
+    /** 同步获取自定义角色（5s 超时返回空列表，等同无自定义角色） */
+    suspend fun getCustomCharactersNow(): List<Character> = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        customCharacters.first()
+    } ?: emptyList()
+
+    // ===== 角色问候同步读取（供 GreetingWorker 用）=====
+    suspend fun getGreetingEnabledNow(): Boolean = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        greetingEnabled.first()
+    } ?: false
+
+    suspend fun getGreetingCharacterIdsNow(): Set<String> = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        greetingCharacterIds.first()
+    } ?: emptySet()
+
+    suspend fun getGreetingDailyCountNow(): Int = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        greetingDailyCount.first()
+    } ?: AppConfig.Greeting.DEFAULT_DAILY_COUNT
+
+    suspend fun getGreetingQuotaNow(): Pair<String, Int> = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        greetingQuota.first()
+    } ?: "" to 0
+
+    companion object {
+        /** DataStore .first() 超时阈值（ms）。国产 ROM 文件 I/O 被拦截时避免永久挂起。 */
+        private const val DATASTORE_TIMEOUT_MS = 5000L
+    }
+}

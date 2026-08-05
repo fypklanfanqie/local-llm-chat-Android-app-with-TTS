@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>聊天界面 UI 方案预览 · Chat by your side</title>
+<style>
+  /* ===================== Iris 色板 ===================== */
+  :root {
+    --iris: #7C5CFF;
+    --iris-light: #6E4DFF;
+    --iris-bright: #A99BFF;
+    --mint: #34C7BE;
+    --success: #34C759;
+
+    /* 默认 = 方案 B（推荐）。会被 JS 按所选方案/明暗覆盖 */
+    --ai-tint: rgba(255,255,255,0.82);
+    --ai-text: #0B0C10;
+    --input-tint: rgba(255,255,255,0.82);
+    --top-tint: rgba(255,255,255,0.80);
+    --chip-tint: rgba(255,255,255,0.55);
+    --scrim: 0.42;
+    --blur: 22px;
+    --shadow: 14px;
+    --text-shadow: 0 1px 2px rgba(0,0,0,0.16);
+    --user-tint: linear-gradient(135deg, #7C5CFF, #6E4DFF);
+    --on-user: #ffffff;
+
+    --bg-aurora-light:
+      radial-gradient(circle at 18% 22%, rgba(124,92,255,0.24), transparent 42%),
+      radial-gradient(circle at 82% 18%, rgba(169,155,255,0.20), transparent 42%),
+      radial-gradient(circle at 70% 78%, rgba(52,199,190,0.18), transparent 42%),
+      radial-gradient(circle at 25% 80%, rgba(255,160,200,0.14), transparent 42%),
+      linear-gradient(135deg, #F2F3F8, #E6DEFF);
+    --bg-aurora-dark:
+      radial-gradient(circle at 18% 22%, rgba(124,92,255,0.32), transparent 42%),
+      radial-gradient(circle at 82% 18%, rgba(58,42,111,0.32), transparent 42%),
+      radial-gradient(circle at 70% 78%, rgba(52,199,190,0.19), transparent 42%),
+      radial-gradient(circle at 25% 80%, rgba(196,76,224,0.19), transparent 42%),
+      linear-gradient(135deg, #07080C, #12141B);
+
+    /* “繁忙照片”用高对比多色径向渐变模拟，离线可用，足以检验文字可读性 */
+    --bg-photo-light:
+      radial-gradient(circle at 20% 28%, #ff9a6b, transparent 38%),
+      radial-gradient(circle at 78% 22%, #ffd166, transparent 40%),
+      radial-gradient(circle at 62% 68%, #7C5CFF, transparent 42%),
+      radial-gradient(circle at 30% 78%, #34C7BE, transparent 40%),
+      radial-gradient(circle at 88% 88%, #ff6b9d, transparent 40%),
+      linear-gradient(135deg, #fff7ef, #ffe9f3);
+    --bg-photo-dark:
+      radial-gradient(circle at 20% 28%, #6b2a8a, transparent 40%),
+      radial-gradient(circle at 78% 22%, #1c3a6e, transparent 42%),
+      radial-gradient(circle at 62% 68%, #4a1d6e, transparent 42%),
+      radial-gradient(circle at 30% 78%, #0d4a47, transparent 40%),
+      radial-gradient(circle at 88% 88%, #5a1840, transparent 40%),
+      linear-gradient(135deg, #05060a, #0a0b10);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Roboto, sans-serif;
+    background: #0b0c10;
+    color: #e8eaf0;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 360px 1fr;
+    gap: 28px;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 28px 24px 60px;
+  }
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #a8aec0; font-size: 13px; margin-bottom: 22px; line-height: 1.6; }
+
+  /* ===================== 控制面板 ===================== */
+  .panel {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 18px;
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+  .panel h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #a8aec0;
+    margin: 0 0 12px;
+    font-weight: 600;
+  }
+  .btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .btn {
+    flex: 1 1 auto;
+    min-width: 80px;
+    padding: 9px 10px;
+    border-radius: 12px;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.05);
+    color: #e8eaf0;
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: center;
+  }
+  .btn:hover { background: rgba(255,255,255,0.10); }
+  .btn.active {
+    background: rgba(124,92,255,0.28);
+    border-color: rgba(169,155,255,0.6);
+    color: #fff;
+  }
+
+  .scheme-list { display: flex; flex-direction: column; gap: 8px; }
+  .scheme-card {
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(255,255,255,0.10);
+    background: rgba(255,255,255,0.04);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .scheme-card:hover { background: rgba(255,255,255,0.08); }
+  .scheme-card.active {
+    border-color: rgba(169,155,255,0.7);
+    background: rgba(124,92,255,0.18);
+    box-shadow: 0 0 0 1px rgba(169,155,255,0.3) inset;
+  }
+  .scheme-card .name { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .badge {
+    font-size: 10px; padding: 2px 7px; border-radius: 999px;
+    background: rgba(52,199,89,0.25); color: #7ee29a; border: 1px solid rgba(52,199,89,0.4);
+    letter-spacing: 0.04em;
+  }
+  .scheme-card .desc { font-size: 12px; color: #a8aec0; margin-top: 4px; line-height: 1.5; }
+
+  /* 参数读出 */
+  .readout {
+    font-family: "SF Mono", "JetBrains Mono", Consolas, monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    color: #c9cdd9;
+    background: rgba(0,0,0,0.3);
+    border-radius: 10px;
+    padding: 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .readout .k { color: #A99BFF; }
+  .readout .v { color: #7ee29a; }
+
+  .hint { font-size: 11.5px; color: #8a90a2; line-height: 1.6; margin-top: 10px; }
+  .hint b { color: #c9cdd9; }
+
+  /* ===================== 手机预览框 ===================== */
+  .stage {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+  }
+  .phone {
+    width: 390px;
+    max-width: 100%;
+    height: 780px;
+    border-radius: 44px;
+    background: #000;
+    padding: 12px;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.6), 0 0 0 2px rgba(255,255,255,0.06);
+    position: relative;
+  }
+  .screen {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    border-radius: 34px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-aurora-light); /* 由 JS 切换 */
+    isolation: isolate;
+  }
+  /* 照片层（仅 photo 背景时可见，可被方案 E 模糊） */
+  .photo-layer {
+    position: absolute; inset: 0; z-index: 0;
+    background: var(--bg-photo-light);
+    opacity: 0; /* aurora 时隐藏 */
+    transition: opacity 0.3s, filter 0.3s;
+  }
+  .screen.bg-photo-light .photo-layer { opacity: 1; background: var(--bg-photo-light); }
+  .screen.bg-photo-dark  .photo-layer { opacity: 1; background: var(--bg-photo-dark); }
+  .screen.blur-photo .photo-layer { filter: blur(18px) brightness(0.9); transform: scale(1.08); }
+
+  /* scrim 层 */
+  .scrim {
+    position: absolute; inset: 0; z-index: 1;
+    background: linear-gradient(
+      to bottom,
+      rgba(0,0,0, calc(var(--scrim) + 0.20)) 0%,
+      rgba(0,0,0, var(--scrim)) 22%,
+      rgba(0,0,0, var(--scrim)) 75%,
+      rgba(0,0,0, calc(var(--scrim) + 0.12)) 100%
+    );
+    pointer-events: none;
+  }
+
+  /* 状态栏 */
+  .statusbar {
+    position: relative; z-index: 2;
+    height: 44px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 22px;
+    color: #fff; font-size: 13px; font-weight: 600;
+    flex: 0 0 auto;
+  }
+  .statusbar .right { display: flex; gap: 6px; align-items: center; font-size: 11px; }
+
+  /* 顶栏（玻璃） */
+  .topbar {
+    position: relative; z-index: 2;
+    margin: 0 12px 6px;
+    border-radius: 22px;
+    padding: 8px 10px;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--top-tint);
+    backdrop-filter: blur(var(--blur));
+    -webkit-backdrop-filter: blur(var(--blur));
+    border: 1px solid rgba(255,255,255,0.18);
+    box-shadow: 0 8px var(--shadow) rgba(0,0,0,0.18);
+    flex: 0 0 auto;
+  }
+  .topbar .avatar {
+    width: 30px; height: 30px; border-radius: 50%;
+    background: linear-gradient(135deg,#7C5CFF,#34C7BE);
+    flex: 0 0 auto;
+    box-shadow: 0 0 0 2px rgba(255,255,255,0.25);
+  }
+  .topbar .meta { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; flex: 1 1 auto; }
+  .topbar .meta .n { font-size: 13.5px; font-weight: 600; color: #fff; text-shadow: var(--text-shadow); }
+  .topbar .meta .r { font-size: 10.5px; color: rgba(255,255,255,0.85); text-shadow: var(--text-shadow); }
+  .seg {
+    display: flex; background: rgba(255,255,255,0.22); border-radius: 999px; padding: 2px;
+    border: 1px solid rgba(255,255,255,0.18);
+  }
+  .seg span { font-size: 10.5px; padding: 3px 8px; border-radius: 999px; color: rgba(255,255,255,0.9); }
+  .seg span.on { background: var(--iris); color: #fff; box-shadow: 0 2px 6px rgba(124,92,255,0.5); }
+  .ico-btn {
+    width: 26px; height: 26px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.16); color: #fff; font-size: 13px;
+    border: 1px solid rgba(255,255,255,0.16);
+  }
+
+  /* 消息列表 */
+  .messages {
+    position: relative; z-index: 2;
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 6px 12px 8px;
+    display: flex; flex-direction: column; gap: 12px;
+    scrollbar-width: thin;
+  }
+  .msg { display: flex; gap: 8px; align-items: flex-end; }
+  .msg.user { justify-content: flex-end; }
+  .av {
+    width: 26px; height: 26px; border-radius: 50%; flex: 0 0 auto;
+    background: linear-gradient(135deg,#7C5CFF,#34C7BE);
+    box-shadow: 0 0 0 2px rgba(255,255,255,0.2);
+    font-size: 11px; color: #fff; display: flex; align-items: center; justify-content: center;
+  }
+  .bubble {
+    max-width: 74%;
+    padding: 9px 13px;
+    font-size: 13.5px;
+    line-height: 1.5;
+    border-radius: 18px;
+  }
+  .bubble.ai {
+    background: var(--ai-tint);
+    backdrop-filter: blur(var(--blur));
+    -webkit-backdrop-filter: blur(var(--blur));
+    border: 1px solid rgba(255,255,255,0.22);
+    box-shadow: 0 4px var(--shadow) rgba(0,0,0,0.16);
+    color: var(--ai-text);
+    border-bottom-left-radius: 6px;
+  }
+  .bubble.user {
+    background: var(--user-tint);
+    color: var(--on-user);
+    border-bottom-right-radius: 6px;
+    box-shadow: 0 6px 14px rgba(110,77,255,0.35);
+  }
+  .bubble .code {
+    margin: 8px 0 2px;
+    background: #0C0E14;
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 8px 10px;
+    font-family: "SF Mono", Consolas, monospace;
+    font-size: 11.5px;
+    color: #c9cdfd;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .chip-row { display: flex; gap: 6px; margin-top: 5px; padding: 0 4px; }
+  .chip {
+    font-size: 10.5px; padding: 3px 8px; border-radius: 999px;
+    background: var(--chip-tint);
+    backdrop-filter: blur(var(--blur));
+    -webkit-backdrop-filter: blur(var(--blur));
+    border: 1px solid rgba(255,255,255,0.2);
+    color: #fff; text-shadow: var(--text-shadow);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.12);
+  }
+
+  /* 输入栏（玻璃胶囊） */
+  .inputbar {
+    position: relative; z-index: 2;
+    margin: 6px 12px 8px;
+    border-radius: 26px;
+    padding: 6px;
+    display: flex; align-items: flex-end; gap: 4px;
+    background: var(--input-tint);
+    backdrop-filter: blur(var(--blur));
+    -webkit-backdrop-filter: blur(var(--blur));
+    border: 1px solid rgba(255,255,255,0.22);
+    box-shadow: 0 8px var(--shadow) rgba(0,0,0,0.2);
+    flex: 0 0 auto;
+  }
+  .inputbar .plus {
+    width: 34px; height: 34px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    color: rgba(255,255,255,0.95); text-shadow: var(--text-shadow); font-size: 18px;
+  }
+  .inputbar .field {
+    flex: 1; min-height: 34px; display: flex; align-items: center;
+    color: rgba(255,255,255,0.95); text-shadow: var(--text-shadow);
+    font-size: 13.5px; padding: 0 4px;
+  }
+  .inputbar .field .ph { color: rgba(255,255,255,0.7); }
+  .send {
+    width: 34px; height: 34px; border-radius: 50%;
+    background: var(--iris); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 15px;
+    box-shadow: 0 4px 10px rgba(124,92,255,0.5);
+    flex: 0 0 auto;
+  }
+
+  /* 底栏 dock（固定参考样式，不随方案变化） */
+  .dock-wrap { position: relative; z-index: 2; padding: 0 16px 14px; flex: 0 0 auto; }
+  .dock {
+    border-radius: 28px;
+    padding: 8px;
+    display: flex; justify-content: space-around; gap: 4px;
+    background: rgba(255,255,255,0.08);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
+    border: 1px solid rgba(255,255,255,0.16);
+    box-shadow: 0 8px 14px rgba(0,0,0,0.22);
+  }
+  .dock-item {
+    width: 56px; padding: 5px 0; border-radius: 16px;
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    color: rgba(255,255,255,0.7); font-size: 9.5px;
+  }
+  .dock-item.on {
+    background: rgba(124,92,255,0.20);
+    color: #A99BFF;
+  }
+  .dock-item .ic { font-size: 16px; }
+
+  .legend {
+    font-size: 12px; color: #a8aec0; text-align: center; line-height: 1.6;
+    max-width: 390px;
+  }
+  .legend b { color: #e8eaf0; }
+</style>
+</head>
+<body>
+<div class="layout">
+
+  <!-- ============ 左侧控制面板 ============ -->
+  <div class="controls">
+    <h1>聊天界面 UI 方案预览</h1>
+    <div class="sub">
+      当前聊天界面透明度过高，用户上传背景后文字看不清。下方提供几套方案，
+      请在右侧手机框中预览并点选一套。<b>底栏 dock 的样式全程不变</b>，作为“可读性基准”参照。
+    </div>
+
+    <div class="panel">
+      <h2>背景</h2>
+      <div class="btn-row" id="bg-row">
+        <button class="btn active" data-bg="aurora-light">极光·亮</button>
+        <button class="btn" data-bg="aurora-dark">极光·暗</button>
+        <button class="btn" data-bg="photo-light">繁忙照片·亮</button>
+        <button class="btn" data-bg="photo-dark">繁忙照片·暗</button>
+      </div>
+      <div class="hint">“繁忙照片”模拟用户上传的高对比背景，是检验可读性的最苛刻场景。</div>
+    </div>
+
+    <div class="panel">
+      <h2>方案</h2>
+      <div class="scheme-list" id="scheme-list"></div>
+    </div>
+
+    <div class="panel">
+      <h2>当前参数（对应 Kotlin <code style="color:#A99BFF">ChatGlassScheme</code>）</h2>
+      <div class="readout" id="readout"></div>
+      <div class="hint">
+        <b>说明：</b>真机中玻璃面会采样预模糊的极光背板做真实模糊；但用户上传照片时背板采样被关闭，
+        玻璃退化为<b>纯半透明色块</b>——所以照片上必须靠<b>提高不透明度</b>保证可读，而非靠模糊。
+        方案 E 另辟蹊径：直接把照片本身模糊，可用 <code>RenderEffect</code>（API 31+）实现。
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 右侧手机预览 ============ -->
+  <div class="stage">
+    <div class="phone">
+      <div class="screen bg-aurora-light" id="screen">
+        <div class="photo-layer"></div>
+        <div class="scrim"></div>
+
+        <div class="statusbar">
+          <span>9:41</span>
+          <span class="right">●●● 5G ▮</span>
+        </div>
+
+        <!-- 顶栏 -->
+        <div class="topbar">
+          <div class="avatar"></div>
+          <div class="meta">
+            <span class="n">林</span>
+            <span class="r">现代侠客 · 在线</span>
+          </div>
+          <div class="seg"><span class="on">云端</span><span>本地</span></div>
+          <div class="ico-btn">💭</div>
+          <div class="ico-btn">☰</div>
+        </div>
+
+        <!-- 消息 -->
+        <div class="messages">
+          <div class="msg ai">
+            <div class="av">林</div>
+            <div>
+              <div class="bubble ai">
+                这段 Kotlin 的问题在 <b>alreadyHasAssistant</b>：它判断的是“列表里是否<em>存在过</em>任何 assistant 消息”，
+                而不是“本次回复是否已被数据库回填”。所以第 2 条回复一完成就会把 streaming 气泡删掉、又没补上 assistant，
+                导致回复短暂消失。
+                <div class="code">val alreadyHasAssistant =
+    msgs.any { it.role == "assistant"
+        && it.id != "streaming" }</div>
+              </div>
+              <div class="chip-row"><span class="chip">复制</span><span class="chip">朗读</span></div>
+            </div>
+          </div>
+
+          <div class="msg user">
+            <div class="bubble user">那怎么修？给我一个干净的改法。</div>
+          </div>
+
+          <div class="msg ai">
+            <div class="av">林</div>
+            <div>
+              <div class="bubble ai">
+                只看<b>最后一条非 streaming 消息</b>：如果它是 assistant 且 content 与刚生成的 response 完全一致，
+                才说明数据库 Flow 已经抢先回填了本次回复——这时只移除 streaming 避免重复；否则原地替换为同步构建的 assistant。
+                这样第 2+ 条回复也不会闪没了。
+              </div>
+              <div class="chip-row"><span class="chip">复制</span><span class="chip">朗读</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 输入栏 -->
+        <div class="inputbar">
+          <div class="plus">＋</div>
+          <div class="plus">📎</div>
+          <div class="field"><span class="ph">输入消息…</span></div>
+          <div class="send">➤</div>
+        </div>
+
+        <!-- dock（固定基准） -->
+        <div class="dock-wrap">
+          <div class="dock">
+            <div class="dock-item on"><span class="ic">💬</span>聊天</div>
+            <div class="dock-item"><span class="ic">👤</span>角色</div>
+            <div class="dock-item"><span class="ic">🎵</span>音乐</div>
+            <div class="dock-item"><span class="ic">📦</span>模型</div>
+            <div class="dock-item"><span class="ic">⚙</span>设置</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="legend">
+      <b>底栏 dock</b> 始终保持原样（tint 0.08 / 选中 0.20 / 阴影 14dp），作为可读性参照。
+      对比各方案下气泡、顶栏、输入栏与 dock 的视觉协调度。
+    </div>
+  </div>
+</div>
+
+<script>
+  // ============ 方案定义（明/暗双模）============
+  const schemes = {
+    A: {
+      name: "A · 现状（基线，仅对比）",
+      desc: "当前透明度：白 0.55，照片上文字难辨。仅用于对比，不建议选。",
+      light: { ai:"rgba(255,255,255,0.55)", input:"rgba(255,255,255,0.55)", top:"rgba(255,255,255,0.50)", chip:"rgba(255,255,255,0.35)", scrim:0.18, blur:18, shadow:"4px", ts:"none", aiText:"#0B0C10" },
+      dark:  { ai:"rgba(255,255,255,0.55)", input:"rgba(255,255,255,0.55)", top:"rgba(255,255,255,0.50)", chip:"rgba(255,255,255,0.35)", scrim:0.50, blur:18, shadow:"4px", ts:"none", aiText:"#E8EAF0" },
+    },
+    B: {
+      name: "B · 清透 Iris（推荐）",
+      desc: "主题感知：亮色白底 0.82 / 暗色深底 0.80。保留玻璃质感，照片上也可读，与 dock 阴影一致。",
+      light: { ai:"rgba(255,255,255,0.82)", input:"rgba(255,255,255,0.82)", top:"rgba(255,255,255,0.80)", chip:"rgba(255,255,255,0.55)", scrim:0.42, blur:22, shadow:"14px", ts:"0 1px 2px rgba(0,0,0,0.16)", aiText:"#0B0C10" },
+      dark:  { ai:"rgba(30,32,41,0.80)", input:"rgba(24,26,34,0.80)", top:"rgba(24,26,34,0.78)", chip:"rgba(24,26,34,0.55)", scrim:0.62, blur:22, shadow:"14px", ts:"0 1px 2px rgba(0,0,0,0.30)", aiText:"#E8EAF0" },
+    },
+    C: {
+      name: "C · 实体卡片",
+      desc: "最高不透明度 0.94，可读性最强，玻璃感最弱。适合极繁杂背景。",
+      light: { ai:"rgba(255,255,255,0.94)", input:"rgba(255,255,255,0.92)", top:"rgba(255,255,255,0.92)", chip:"rgba(255,255,255,0.70)", scrim:0.50, blur:8, shadow:"14px", ts:"none", aiText:"#0B0C10" },
+      dark:  { ai:"rgba(30,32,41,0.94)", input:"rgba(24,26,34,0.92)", top:"rgba(24,26,34,0.92)", chip:"rgba(24,26,34,0.70)", scrim:0.70, blur:8, shadow:"14px", ts:"none", aiText:"#E8EAF0" },
+    },
+    D: {
+      name: "D · 深色磨砂（iOS Dark）",
+      desc: "亮/暗都用深色玻璃 + 浅色字，统一深色观感，弱化背景干扰。",
+      light: { ai:"rgba(30,32,41,0.78)", input:"rgba(24,26,34,0.78)", top:"rgba(24,26,34,0.78)", chip:"rgba(24,26,34,0.55)", scrim:0.55, blur:24, shadow:"14px", ts:"0 1px 2px rgba(0,0,0,0.30)", aiText:"#E8EAF0" },
+      dark:  { ai:"rgba(30,32,41,0.78)", input:"rgba(24,26,34,0.78)", top:"rgba(24,26,34,0.78)", chip:"rgba(24,26,34,0.55)", scrim:0.65, blur:24, shadow:"14px", ts:"0 1px 2px rgba(0,0,0,0.30)", aiText:"#E8EAF0" },
+    },
+    E: {
+      name: "E · 模糊照片底（真·dock 同款）",
+      desc: "直接模糊照片本身 + 中等不透明度 0.62。最贴近 dock 的“磨砂”观感，真机需 RenderEffect(API 31+)。",
+      light: { ai:"rgba(255,255,255,0.62)", input:"rgba(255,255,255,0.62)", top:"rgba(255,255,255,0.60)", chip:"rgba(255,255,255,0.45)", scrim:0.28, blur:22, shadow:"14px", ts:"0 1px 2px rgba(0,0,0,0.10)", aiText:"#0B0C10" },
+      dark:  { ai:"rgba(30,32,41,0.62)", input:"rgba(24,26,34,0.62)", top:"rgba(24,26,34,0.60)", chip:"rgba(24,26,34,0.45)", scrim:0.40, blur:22, shadow:"14px", ts:"0 1px 2px rgba(0,0,0,0.24)", aiText:"#E8EAF0" },
+    },
+  };
+
+  const order = ["A","B","C","D","E"];
+  const recommended = "B";
+  let curScheme = "B";
+  let curBg = "aurora-light";
+
+  const screen = document.getElementById("screen");
+  const readout = document.getElementById("readout");
+
+  // 渲染方案卡片
+  const list = document.getElementById("scheme-list");
+  order.forEach(key => {
+    const s = schemes[key];
+    const card = document.createElement("div");
+    card.className = "scheme-card" + (key === curScheme ? " active" : "");
+    card.dataset.key = key;
+    card.innerHTML = `<div class="name">${s.name}${key===recommended?' <span class="badge">推荐</span>':''}</div><div class="desc">${s.desc}</div>`;
+    card.addEventListener("click", () => { curScheme = key; apply(); });
+    list.appendChild(card);
+  });
+
+  // 背景按钮
+  document.querySelectorAll("#bg-row .btn").forEach(b => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll("#bg-row .btn").forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+      curBg = b.dataset.bg;
+      apply();
+    });
+  });
+
+  function isDark(bg) { return bg === "aurora-dark" || bg === "photo-dark"; }
+  function isPhoto(bg) { return bg.startsWith("photo"); }
+
+  function apply() {
+    // 卡片高亮
+    document.querySelectorAll(".scheme-card").forEach(c => {
+      c.classList.toggle("active", c.dataset.key === curScheme);
+    });
+
+    // 背景类
+    screen.className = "screen bg-" + curBg + (curScheme === "E" ? " blur-photo" : "");
+
+    // 非照片背景时，screen 自身用极光渐变；照片时 photo-layer 负责
+    if (!isPhoto(curBg)) {
+      screen.style.background = isDark(curBg) ? "var(--bg-aurora-dark)" : "var(--bg-aurora-light)";
+    } else {
+      screen.style.background = isDark(curBg) ? "#05060a" : "#fff7ef";
+    }
+
+    // 应用方案变量（按明暗取值）
+    const dark = isDark(curBg);
+    const v = schemes[curScheme][dark ? "dark" : "light"];
+    const root = document.documentElement.style;
+    root.setProperty("--ai-tint", v.ai);
+    root.setProperty("--ai-text", v.aiText);
+    root.setProperty("--input-tint", v.input);
+    root.setProperty("--top-tint", v.top);
+    root.setProperty("--chip-tint", v.chip);
+    root.setProperty("--scrim", v.scrim);
+    root.setProperty("--blur", v.blur + "px");
+    root.setProperty("--shadow", v.shadow);
+    root.setProperty("--text-shadow", v.ts);
+
+    // 参数读出
+    const dp = (px) => (parseFloat(px)).toFixed(0); // 预览 px ≈ 真机 dp（视觉近似）
+    readout.innerHTML =
+`<span class="k">scheme</span>      = <span class="v">"${curScheme}"</span>  (${schemes[curScheme].name.split("·")[0].trim()})
+<span class="k">mode</span>        = <span class="v">${dark ? "dark" : "light"}</span>   bg = <span class="v">${curBg}</span>
+
+<span class="k">aiTint</span>       = <span class="v">${v.ai}</span>
+<span class="k">inputTint</span>    = <span class="v">${v.input}</span>
+<span class="k">topBarTint</span>   = <span class="v">${v.top}</span>
+<span class="k">chipTint</span>     = <span class="v">${v.chip}</span>
+<span class="k">photoScrim</span>   = <span class="v">${v.scrim}</span>
+<span class="k">blur</span>         = <span class="v">${v.blur}dp</span>
+<span class="k">shadow</span>       = <span class="v">${dp(v.shadow)}dp</span>
+<span class="k">textShadow</span>    = <span class="v">${v.ts === "none" ? "none" : "on (photo bg)"}</span>
+<span class="k">blurPhotoBg</span>   = <span class="v">${curScheme === "E" ? "true (RenderEffect)" : "false"}</span>`;
+  }
+
+  apply();
+</script>
+</body>
+</html>

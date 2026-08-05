@@ -21,5 +21,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "RhodesIslandTerminal"
+rootProject.name = "ChatByYourSide"
 include(":app")

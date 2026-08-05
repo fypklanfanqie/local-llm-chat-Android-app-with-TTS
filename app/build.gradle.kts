@@ -6,8 +6,17 @@ plugins {
     id("com.google.devtools.ksp") version "2.0.0-1.0.21"
 }
 
+// 项目目录含中文，CMake 3.22.1 向中文路径写产物（.so 输出目录）会崩溃，
+// 故把 buildDir 重定向到 ASCII 路径。仅在该 ASCII 路径已存在（即本机已构建过）时重定向，
+// 其他克隆者使用默认 buildDir，避免硬编码路径导致他人构建失败。
+// （native 库已预编译入 jniLibs，Gradle 不再调 CMake，默认 buildDir 对他人安全。）
+val redirectBuildDir = file("D:/ai-build/chatbyyourside/app-build")
+if (redirectBuildDir.parentFile?.exists() == true) {
+    layout.buildDirectory.set(redirectBuildDir)
+}
+
 android {
-    namespace = "com.rhodesisland.terminal"
+    namespace = "com.chatbyyourside"
     compileSdk = 34
     // 与 local.properties 的 ndk.dir(D:\android-ndk-r27c)对齐，版本 27.2.12479018。
     // 否则 AGP 报 [CXX1104]：ndk.dir 版本与 android.ndkVersion 默认值(26.x)不一致。
@@ -19,7 +28,7 @@ android {
     val mnnDir: String? = providers.gradleProperty("MNN_DIR").orNull
 
     defaultConfig {
-        applicationId = "com.rhodesisland.terminal"
+        applicationId = "com.chatbyyourside"
         minSdk = 24
         targetSdk = 34
         versionCode = 1
@@ -31,25 +40,19 @@ android {
         // 仅打包 arm64-v8a：与预编译 MNN/QNN 库架构一致，避免其它 ABI 编译/缺失失败
         ndk { abiFilters.add("arm64-v8a") }
 
-        // 把预编译目录传给 CMake。CMake 始终启用（cpu_sys_jni 必须编译）。
-        externalNativeBuild {
-            cmake {
-                val args = mutableListOf(
-                    // cpu_affinity_jni.cpp / mnn_jni.cpp 引入 C++（std::vector/string），
-                    // 用 c++_shared 与已随包的 libc++_shared.so 保持一致，避免静态 libc++
-                    // 与其它 .so 的共享 libc++ 产生重复符号 / 状态分裂。
-                    // MNN 的 libMNN.so 同为 c++_shared 构建，三者共用同一份 libc++_shared.so。
-                    "-DANDROID_STL=c++_shared",
-                )
-                if (!mnnDir.isNullOrBlank()) args += "-DMNN_DIR=${mnnDir}"
-                arguments += args
-            }
-        }
+        // 只保留应用实际支持的语言，剔除依赖库中未使用的多语言资源
+        resourceConfigurations += listOf("zh", "zh-rCN", "en")
+
+        // native 库改为预编译放入 jniLibs（见 android.externalNativeBuild 处说明），不再经 Gradle 调 CMake。
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            isDebuggable = false
+            // 测试期间先用 debug 签名；正式发布前请配置 release signingConfig
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -77,26 +80,35 @@ android {
         }
     }
 
-    // CMake 始终启用：cpu_sys_jni（CPU 频率/拓扑只读 JNI）必须编译，mnn_jni 需 MNN_DIR。
-    // MNN_DIR 指向 MNN 预编译目录（含 include/ 与 lib/libMNN.so）。
-    // CMake 参数在 defaultConfig.externalNativeBuild.cmake 中传递。
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
-    }
+    // native 库（libmnn_jni.so / libcpu_sys_jni.so）已预编译并放入 src/main/jniLibs/arm64-v8a。
+    // 不再用 Gradle externalNativeBuild 调 CMake：项目目录含中文，CMake 3.22.1 在此环境会
+    // STATUS_STACK_BUFFER_OVERRUN 崩溃。如需重编 native，用 cpp/CMakeLists.txt 手动编译：
+    //   cmake -G Ninja -DCMAKE_SYSTEM_NAME=Android -DANDROID_ABI=arm64-v8a \
+    //     -DANDROID_NDK=D:/android-ndk-r27c \
+    //     -DCMAKE_TOOLCHAIN_FILE=D:/android-ndk-r27c/build/cmake/android.toolchain.cmake \
+    //     -DANDROID_STL=c++_shared -DMNN_DIR=D:/mnn-matched \
+    //     -S app/src/main/cpp -B <ASCII-build-dir> && ninja -C <ASCII-build-dir>
+    // 然后把生成的 .so 拷入 jniLibs/arm64-v8a。
 
     packaging {
+        // 裁剪较老的 QNN skeleton：骁龙 8 Gen 2+ 对应 V73/V75/V79。
+        // 若目标设备更老，请移除对应 exclude，否则 NPU 会回退 CPU/GPU。
+        jniLibs {
+            excludes += listOf(
+                "lib/arm64-v8a/libQnnHtpV68Skel.so",
+                "lib/arm64-v8a/libQnnHtpV69Skel.so"
+            )
+        }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
 
-    // 角色语音 wav / BGM mp3 不压缩：MediaPlayer 经 AssetFileDescriptor 播放需要未压缩资源
-    // （openFd 对压缩资源会抛 IOException）。noCompress 保证零拷贝路径可用。
+    // androidResources：旧的 assets/music（wav/mp3）已随重构删除，音乐改走网易云外链 + 本地文件，
+    // 不再需要 noCompress 保留未压缩音频。覆盖默认值并清空，使 WebP 立绘能被 ZIP 压缩以减小 APK。
+    // 若日后重新向 assets 放入 wav 供 MediaPlayer openFd 零拷贝播放，再加回 noCompress += "wav"。
     androidResources {
-        noCompress += listOf("wav", "mp3")
+        noCompress.clear()
     }
 }
 
@@ -105,6 +117,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.lifecycle.process)
     implementation(libs.androidx.activity.compose)
 
     // Compose
@@ -138,7 +151,8 @@ dependencies {
 
     // Media3
     implementation(libs.androidx.media3.exoplayer)
-    implementation(libs.androidx.media3.ui)
+    // media3-ui 未使用（无 PlayerView/StyledPlayerView），移除以减小体积
+    // implementation(libs.androidx.media3.ui)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)
@@ -148,4 +162,7 @@ dependencies {
 
     // Liquid Glass (QmDeve frosted glass overlay with refraction + dispersion + blur)
     implementation(libs.liquidglass.core)
+
+    // WorkManager (角色问候：后台定时主动发消息，跨重启存活)
+    implementation(libs.androidx.work.runtime.ktx)
 }
