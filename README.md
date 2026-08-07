@@ -8,7 +8,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <p align="center">
-  <img src="docs/preview/chat-redesign-iris.png" width="280" alt="Chat UI preview · 聊天界面预览" />
+<img width="1080" height="2400" alt="Screenshot_2026-08-07-18-20-00-514_com chatbyyou" src="https://github.com/user-attachments/assets/12a05e87-fce0-4485-a3dd-179fec9db647" />
+
 </p>
 
 ---
@@ -17,11 +18,13 @@
 
 - **液态玻璃 / 毛玻璃 UI** · **Liquid / frosted-glass UI**
   参考 [Cresto](https://github.com/Nevodev/Cresto) 的 Glasense 设计语言：冰蓝 Iris 主色 + 中性毛玻璃叠层 + 动态渐变网格背景。
-  An Iris-tinted liquid-glass design language with frosted-glass layering and a dynamic gradient mesh background.
+  An Iris-tinted liquid-glass design language with frosted-glass layering and a dynamic gradient mesh background.<img width="1080" height="2400" alt="Screenshot_2026-08-07-18-20-03-339_com chatbyyou" src="https://github.com/user-attachments/assets/9db045f9-e7e0-4792-ad6b-8fe6ef6cead8" />
 
-- **20 位原创人设** · **20 original character archetypes**
+
+- **50位原创人设** · **20 original character archetypes**
   男女混合的热门原型（傲娇、病娇、学姐、管家、霸总、骑士、反派……），每位带完整人格 system prompt；支持新建 / 导入 / 导出自定义角色。所有角色均为原创原型，无任何第三方版权角色。
   Mixed-gender archetypes (tsundere, yandere, kouhai, butler, CEO, knight, villain…) each with a full system prompt. Create / import / export custom characters. All characters are original — no third-party copyrighted characters.
+<img width="1080" height="2400" alt="Screenshot_2026-08-07-18-20-04-991_com chatbyyou" src="https://github.com/user-attachments/assets/2f6457c6-96e5-4184-b3a7-c41dd0eb36b7" />
 
 - **云端 + 本地双引擎** · **Cloud + local dual engine**
   云端 OpenAI 兼容 API（SSE 流式）与本地 MNN 离线推理一键切换，对话按角色独立保存。
@@ -30,10 +33,13 @@
 - **TTS 语音合成** · **Text-to-speech**
   火山引擎豆包语音合成 + 声音复刻，角色消息一键朗读。
   Volcengine Doubao TTS with voice cloning — read any character message aloud in one tap.
+  
 
 - **音乐播放** · **Music playback**
   网易云音乐搜索在线播放 + 本地音乐导入，支持进度 / 音量 / 歌词。
   Online playback via Netease Cloud Music search plus local file import, with seek / volume / lyrics.
+  <img width="1080" height="2400" alt="Screenshot_2026-08-07-18-20-11-452_com chatbyyou" src="https://github.com/user-attachments/assets/d62e5ac6-a109-4b40-8f8c-72362400f228" />
+
 
 - **多模态对话** · **Multimodal chat**
   图片（最多 3 张）、PDF（前 6 页）、纯文本文件直连多模态模型。
