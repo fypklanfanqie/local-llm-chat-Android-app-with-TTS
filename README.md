@@ -1,5 +1,4 @@
-# Chat by your side · 伴你聊
-
+# Chat by your side · 语畔拾光
 > 一款苹果风液态玻璃 UI 的安卓 AI 角色扮演聊天应用 · An Apple-style liquid-glass AI roleplay chat app for Android
 
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0.0-7F52FF?logo=kotlin)](https://kotlinlang.org)
