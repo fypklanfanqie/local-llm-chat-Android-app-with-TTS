@@ -5,6 +5,7 @@ import android.os.SystemClock
 import android.util.Log
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
+import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.metrics.CompletionReason
 import com.chatbyyourside.llm.metrics.InferenceTelemetry
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
@@ -172,6 +173,8 @@ class MnnBackend(
         onToken: (String) -> Boolean,
         batchMaxBytes: Int = InferenceBackend.DEFAULT_BATCH_MAX_BYTES,
         batchMaxMs: Int = InferenceBackend.DEFAULT_BATCH_MAX_MS,
+        downgradeReasons: List<String> = emptyList(),
+        executionControl: GenerationExecutionControl? = null,
     ): NativeGenerationSummary? = mutex.withLock {
         if (handle == 0L) throw IllegalStateException("MNN 后端未加载模型")
         currentCoroutineContext().ensureActive()
@@ -182,8 +185,9 @@ class MnnBackend(
         currentTps = 0f
         genStartTime = SystemClock.elapsedRealtime()
         isGenerating = true
+        val generationId = "${mode.name.lowercase()}-${generationCounter.incrementAndGet()}"
         telemetry.beginGeneration(
-            generationId = "${mode.name.lowercase()}-${generationCounter.incrementAndGet()}",
+            generationId = generationId,
             requestedMode = null,   // Task 6 解析性能模式后回填
             effectiveMode = null,
             backend = backendType,
@@ -200,9 +204,7 @@ class MnnBackend(
         // 批处理后回调携带 native 实时 gen_len（真实 token 数），token 数与回调（批次）次数解耦：
         // tokenCount=gen_len 供实时 tps；callbackCount=批次次数入快照。
         var callbackCount = 0
-        // 先复位 abort 再装 onToken：若复位在装回调之后，装回调与复位之间收到 stopGeneration
-        // (abort=true) 会被复位覆盖，取消信号丢失、生成本应停止却跑到结束。
-        MnnBridge.abort = false
+        // abort/stop reason 由整次 BackendManager 请求的 control 管理；本后端绝不在 fallback 时复位。
         MnnBridge.onToken = { token, generatedTokens ->
             callbackCount++
             callbackBytes += token.toByteArray(Charsets.UTF_8).size.toLong()
@@ -223,6 +225,7 @@ class MnnBackend(
                 currentTps = if (elapsed > 0f) currentTps else null,
                 nowElapsedMs = nowElapsed,
             )
+            executionControl?.onProgress(generationId, tokenCount, nowElapsed)
             val cont = onToken(token)
             if (!cont) {
                 policyStopped = true
@@ -233,17 +236,25 @@ class MnnBackend(
         var completedNormally = false
         var parsed: NativeGenerationSummary? = null
         try {
-            // native 不再返回完整回复，只回紧凑 GenerationSummary JSON；文本走流式回调。
-            val summaryJson = bridge.nativeGenerateStream(
-                handle, messagesJson, maxTokens, temperature, topP, repeatPenalty, enableThinking,
-                batchMaxBytes, batchMaxMs,
-            )
-            completedNormally = true
-            parsed = NativeGenerationSummary.parse(summaryJson)
-            if (parsed == null) {
-                Log.e(TAG, "native GenerationSummary 解析失败: ${summaryJson.take(200)}")
+            // 第二次检查关闭 ensureActive() -> JNI 之间的取消窗口；请求级终止已确定时不再启动新 JNI。
+            currentCoroutineContext().ensureActive()
+            if (executionControl?.reason() != null) {
+                MnnBridge.abort = true
+                completedNormally = true
+                null
+            } else {
+                // native 不再返回完整回复，只回紧凑 GenerationSummary JSON；文本走流式回调。
+                val summaryJson = bridge.nativeGenerateStream(
+                    handle, messagesJson, maxTokens, temperature, topP, repeatPenalty, enableThinking,
+                    batchMaxBytes, batchMaxMs,
+                )
+                completedNormally = true
+                parsed = NativeGenerationSummary.parse(summaryJson)
+                if (parsed == null) {
+                    Log.e(TAG, "native GenerationSummary 解析失败: ${summaryJson.take(200)}")
+                }
+                parsed
             }
-            parsed   // try/finally 表达式的值 = 摘要（供 BackendManager 指标上报）
         } finally {
             val cancelled = MnnBridge.abort
             MnnBridge.onToken = null
@@ -255,24 +266,31 @@ class MnnBackend(
             val nativeMetrics = parsed?.toMetricsArray() ?: runCatching {
                 if (handle != 0L) bridge.nativeGetMetrics(handle) else null
             }.getOrNull()
-            // 完成原因优先级：策略截断 > 用户取消 > 后端失败 > 摘要原因（MAX_TOKENS/BACKEND_FAILURE/
-            // USER_CANCEL/EOS）。native best-effort 原因由摘要承载，Kotlin 侧有更高优先级推导。
+            // 请求级 token 预算以最终 native genLen 再对齐一次，覆盖末批/异常路径中回调未完整发布的情况。
+            if (nativeMetrics != null && nativeMetrics.size > 4) {
+                executionControl?.onProgress(
+                    generationId = generationId,
+                    generatedTokens = nativeMetrics[4].toInt(),
+                    progressElapsedMs = SystemClock.elapsedRealtime(),
+                )
+            }
+            val stopReason = executionControl?.reason()
+            // 完成原因优先级：策略截断 > 请求级终止 > 用户取消 > 后端失败 > 摘要原因。
             val completionReason = when {
                 policyStopped -> CompletionReason.POLICY_TRUNCATION
+                stopReason != null -> stopReason
                 cancelled -> CompletionReason.USER_CANCEL
                 !completedNormally || parsed == null -> CompletionReason.BACKEND_FAILURE
-                else -> when (parsed.completionReason) {
-                    CompletionReason.MAX_TOKENS.name -> CompletionReason.MAX_TOKENS
-                    CompletionReason.BACKEND_FAILURE.name -> CompletionReason.BACKEND_FAILURE
-                    CompletionReason.USER_CANCEL.name -> CompletionReason.USER_CANCEL
-                    else -> CompletionReason.EOS
-                }
+                // NativeGenerationSummary.parse 已严格拒绝未知 reason，此处完整恢复所有合法枚举，
+                // 不能把 TIMEOUT/THERMAL_STOP 等误记成 EOS。
+                else -> CompletionReason.valueOf(parsed.completionReason)
             }
             lastTurnRecord = telemetry.finalize(
                 nowElapsedMs = SystemClock.elapsedRealtime(),
                 completionReason = completionReason,
                 nativeMetrics = nativeMetrics,
                 configHash = loadedConfigPath?.let { it.hashCode().toString(16) },
+                downgradeReasons = downgradeReasons,
             )
             // 汇总日志：tps + 摘要实测复用/前缀/批处理指标，便于核对多轮前缀复用与回调削减是否生效。
             if (parsed != null) {
@@ -308,7 +326,7 @@ class MnnBackend(
         if (handle != 0L) runCatching { bridge.nativeStop(handle) }
     }
 
-    /** 非挂起中断（供 BackendManager.cancel 等非 suspend 调用方） */
+    /** 非挂起中断：仅设置全局 abort/nativeStop，不持有完成原因（原因归请求级 control 所有）。 */
     fun cancelNow() {
         MnnBridge.abort = true
         if (handle != 0L) runCatching { bridge.nativeStop(handle) }

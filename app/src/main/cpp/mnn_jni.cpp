@@ -720,6 +720,10 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStream(
         error_message = json_escape(e.what());
     }
 
+    // prefill 是 MNN 单次阻塞调用，期间无法安全跨线程释放/中断；watchdog 只置 Kotlin abort。
+    // response 一返回立即检查，保证 timeout/cancel 不再额外 decode 1 token。
+    stop_requested = stop_requested || should_abort(env);
+
     // prefill 后、decode 前的 KV 长度：中断时据此回滚生成的 token，使下一轮前缀仍命中缓存。
     size_t kv_before_decode = 0;
     try { kv_before_decode = llm->getCurrentHistory(); } catch (...) {}

@@ -4,10 +4,14 @@ import android.content.Context
 import android.util.Log
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
+import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.backend.MnnBackend.MnnMode
+import com.chatbyyourside.llm.metrics.CompletionReason
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 后端管理器（统一推理管理器）
@@ -29,6 +33,8 @@ class BackendManager(
     private val cpuBoostController: CpuBoostController,
 ) {
     private val selector = BackendSelector(context)
+    /** 整次请求（加载 + fallback + JNI）串行，防新请求改写旧请求共享的 abort/lifecycle 状态。 */
+    private val generationMutex = Mutex()
     private val mnnCpuBackend = MnnBackend(context, MnnMode.CPU, cpuBoostController)
     private val mnnGpuBackend = MnnBackend(context, MnnMode.GPU_OPENCL, cpuBoostController)
     private val mnnNpuBackend = MnnBackend(context, MnnMode.NPU_QNN, cpuBoostController)
@@ -186,17 +192,24 @@ class BackendManager(
         onToken: (String) -> Boolean,
         batchMaxBytes: Int = InferenceBackend.DEFAULT_BATCH_MAX_BYTES,
         batchMaxMs: Int = InferenceBackend.DEFAULT_BATCH_MAX_MS,
-    ): GenerationResult {
+        downgradeReasons: List<String> = emptyList(),
+        executionControl: GenerationExecutionControl? = null,
+    ): GenerationResult = generationMutex.withLock {
         val order = backendOrder(preference)
         Log.i(TAG, "后端尝试顺序: $order (pref=$preference)")
         var lastError: Exception? = null
         // 各后端失败原因（display 名 + 诊断信息），全失败时汇总报错，定位部分芯片「所有后端加载失败」根因。
         val failureReasons = mutableListOf<String>()
         reloadedThisCall = false
-        generating = true
+        synchronized(lifecycleLock) {
+            generating = true
+            // LocalChatProvider 在调用本方法前已注册 request control：提前取消体现在 reason；否则清上轮残留 abort。
+            MnnBridge.abort = executionControl?.reason() != null
+        }
         try {
             for (type in order) {
                 if (isSessionFailed(type)) continue
+                if (executionControl?.canTryNextBackend() == false) break
 
                 // 切到此后端前，释放可能驻留的其他后端模型，避免两套模型同时占内存
                 releaseOthers(keep = type)
@@ -221,6 +234,10 @@ class BackendManager(
                     continue
                 }
 
+                if (executionControl?.canTryNextBackend() == false) break
+                val attemptMaxTokens = executionControl?.remainingTokens() ?: maxTokens
+                if (attemptMaxTokens <= 0) break
+
                 try {
                     val backend = backendFor(type)
                     // 提前标记当前后端：供性能浮窗在生成中查询此后端的 native 指标（tps 等）。
@@ -229,19 +246,45 @@ class BackendManager(
                     // MNN 后端用模型自带 chat 模板格式化消息列表。
                     // 返回 GenerationSummary（文本走流式回调，调用方累加），透传流式批处理参数。
                     val summary = backend.generateStreamMessages(
-                        messages, maxTokens, temperature, topP, repeatPenalty, enableThinking, onToken,
-                        batchMaxBytes, batchMaxMs,
+                        messages, attemptMaxTokens, temperature, topP, repeatPenalty, enableThinking, onToken,
+                        batchMaxBytes, batchMaxMs, downgradeReasons, executionControl,
                     )
-                    return GenerationResult(summary, type, reloadedThisCall)
+                    return@withLock GenerationResult(
+                        summary = summary,
+                        usedBackend = type,
+                        reloaded = reloadedThisCall,
+                        completionReason = executionControl?.reason()
+                            ?: (backend as? MnnBackend)?.lastTurnRecord?.completionReason
+                            ?: summary?.completionReason?.let(CompletionReason::valueOf),
+                    )
                 } catch (ce: CancellationException) {
                     throw ce
                 } catch (e: Exception) {
+                    if (executionControl != null && executionControl.remainingTokens() < maxTokens) {
+                        // 已有可见输出后禁止透明换后端，否则两个模型的 delta 会拼成一条且 KV/语义均失配。
+                        executionControl.requestStop(CompletionReason.BACKEND_FAILURE)
+                    }
+                    if (executionControl?.canTryNextBackend() == false) {
+                        return@withLock GenerationResult(
+                            usedBackend = type,
+                            reloaded = reloadedThisCall,
+                            completionReason = executionControl.reason(),
+                        )
+                    }
                     Log.w(TAG, "$type 生成失败，尝试下一后端: ${e.message}")
                     failureReasons += "${type.displayName}: 生成失败 - ${e.message}"
                     markSessionFailed(type)
                     lastError = e
                     runCatching { releaseBackend(type) }
                 }
+            }
+
+            executionControl?.reason()?.let { reason ->
+                return@withLock GenerationResult(
+                    usedBackend = lastUsedBackend,
+                    reloaded = reloadedThisCall,
+                    completionReason = reason,
+                )
             }
 
             // 所有后端均失败：汇总各后端原因详细报错（替代空洞「所有后端均初始化失败」），便于定位部分芯片失败根因。
@@ -255,6 +298,7 @@ class BackendManager(
             val pending: Boolean
             synchronized(lifecycleLock) {
                 generating = false
+                MnnBridge.abort = false
                 pending = releasePending
                 releasePending = false
             }
@@ -271,8 +315,9 @@ class BackendManager(
         mnnNpuBackend.stopGeneration()
     }
 
-    /** 非挂起中断：直接设置所有 MNN 后端的 abort 标志（供 ChatProvider.cancel 等非 suspend 调用方） */
+    /** 非挂起中断：原因由请求级 control 先行写入；这里只在活跃生成期发布 abort，不释放 native。 */
     fun cancel() {
+        if (!generating) return
         mnnCpuBackend.cancelNow()
         mnnGpuBackend.cancelNow()
         mnnNpuBackend.cancelNow()
@@ -390,6 +435,8 @@ class BackendManager(
         val usedBackend: BackendType,
         /** 本次推理是否触发了模型(重新)加载（冷启动首条 / 配置变更 / 后端切换均为 true）。 */
         val reloaded: Boolean = false,
+        /** 请求级明确终止原因（跨后端 fallback）；优先于单 attempt 摘要。 */
+        val completionReason: CompletionReason? = null,
     )
 
     companion object {

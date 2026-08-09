@@ -59,6 +59,7 @@ enum class CompletionReason {
  * @param callbackBytes 回调累计 UTF-8 字节数（用于核对流式拼接完整性）。
  * @param currentTps 当前解码速度（tokens/s，回调线程算出）；首 token 前为 null。
  * @param startedElapsedMs 生成起始 SystemClock.elapsedRealtime（ms）。
+ * @param lastProgressElapsedMs 最近一次真实 token 进度的 elapsedRealtime；prefill 前等于 started。
  */
 data class InferenceSnapshot(
     val generationId: String,
@@ -71,6 +72,7 @@ data class InferenceSnapshot(
     val callbackBytes: Long,
     val currentTps: Float?,
     val startedElapsedMs: Long,
+    val lastProgressElapsedMs: Long,
 )
 
 /**
@@ -217,6 +219,7 @@ private class ActiveGeneration(
     var callbackCount: Int = 0
     var callbackBytes: Long = 0L
     var lastTps: Float? = null
+    var lastProgressElapsedMs: Long = startedElapsedMs
 
     fun snapshot(stage: InferenceStage): InferenceSnapshot = InferenceSnapshot(
         generationId = generationId,
@@ -229,6 +232,7 @@ private class ActiveGeneration(
         callbackBytes = callbackBytes,
         currentTps = lastTps,
         startedElapsedMs = startedElapsedMs,
+        lastProgressElapsedMs = lastProgressElapsedMs,
     )
 }
 
@@ -282,6 +286,7 @@ class InferenceTelemetry {
         g.callbackCount = callbackCount
         g.callbackBytes = callbackBytes
         g.lastTps = currentTps
+        g.lastProgressElapsedMs = nowElapsedMs
         snapshotRef.set(g.snapshot(InferenceStage.DECODE))
     }
 

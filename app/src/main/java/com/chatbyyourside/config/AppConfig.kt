@@ -31,11 +31,10 @@ object AppConfig {
         // （配合 LocalChatProvider 的 system prompt 输出规范 + onToken 剧本标记截断兜底）。0.8 保留角色
         // 语气多样性的同时显著降低跑偏概率。
         const val DEFAULT_TEMPERATURE = 0.8f
-        // 输出不设硬性上限：默认生成到模型自然结束（EOS），不再截断在 1024。
-        // MAX_TOKENS_UNLIMITED 是传给 native 的「实际上限」，远大于正常回复，仅作循环边界保护；
-        // 真正的终止靠 EOS + onToken 多角色剧本截断兜底（防小模型「上头」无限生成，正常聊天不触发）。
+        // 缺省输出上限 2048：只影响 DataStore 中尚无 llm_max_tokens 键的新安装/未设置用户。
+        // 已存储值不迁移、不覆盖；65536 仍保留为设置页显式高级选项「不限」（native 硬循环边界）。
         const val MAX_TOKENS_UNLIMITED = 65536
-        const val DEFAULT_MAX_TOKENS = MAX_TOKENS_UNLIMITED
+        const val DEFAULT_MAX_TOKENS = 2048
         const val DEFAULT_TOP_P = 0.9f
         // 1.2（非 1.1）：小模型无重复惩罚时会逐字复读角色卡循环；mixed_samplers 现已含 "penalty"
         // 生效（见 mnn_jni.cpp set_config）。1.1 偏弱压不住结构性复读，1.2 在 max_penalty=10 内安全。
@@ -45,8 +44,8 @@ object AppConfig {
     // ===== 聊天历史 =====
     // 每个会话（conversation）最多保留的消息条数；超出按时间修剪最旧消息。
     const val MAX_HISTORY_PER_CONVERSATION = 100
-    // 单次请求喂给模型上下文的最大消息条数（取该会话最近 N 条）。与历史上限一致，即发送全部历史，
-    // 不再人为截断在 20 条；实际进入 KV cache 的内容由 contextLen 自然裁剪（超出部分由模型左截断）。
+    // 单次请求交给 provider 规划的历史候选上限。云端发送最近 N 条；本地由 PromptWindowPlanner
+    // 在候选中保留 system + 最近完整 user/assistant 轮次，预留输出/模板空间，不再依赖模型静默左截断。
     const val MAX_CONTEXT_MESSAGES = 100
 
     // ===== 角色问候（角色主动消息）=====

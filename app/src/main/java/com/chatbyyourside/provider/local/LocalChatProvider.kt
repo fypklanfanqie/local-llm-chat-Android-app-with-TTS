@@ -10,18 +10,29 @@ import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.DEFAULT_MNN_MODELS
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.llm.CpuBoostController
+import com.chatbyyourside.llm.GenerationExecutionControl
+import com.chatbyyourside.llm.GenerationSafetyPolicy
 import com.chatbyyourside.llm.IncrementalScriptDetector
 import com.chatbyyourside.llm.InferenceThreadOptimizer
+import com.chatbyyourside.llm.PromptWindowPlanner
+import com.chatbyyourside.llm.PromptWindowResult
 import com.chatbyyourside.llm.ThermalMonitor
 import com.chatbyyourside.llm.backend.BackendManager
 import com.chatbyyourside.llm.backend.BackendType
+import com.chatbyyourside.llm.metrics.CompletionReason
+import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.perfmon.BackendType as PerfmonBackendType
 import com.chatbyyourside.provider.ChatProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 本地聊天 Provider
@@ -46,7 +57,17 @@ class LocalChatProvider(
     // threadOptimizer 须先于 thermalMonitor 初始化（thermalMonitor 的 bigCoreCountProvider 引用它）。
     private val threadOptimizer = InferenceThreadOptimizer()
     private val thermalMonitor = ThermalMonitor(context) { threadOptimizer.getBigCoreCount() }
+    private val promptWindowPlanner = PromptWindowPlanner()
 
+    @Volatile
+    private var previousPromptAnchor: String? = null
+    /** 当前整次本地生成的请求级控制面；CAS 清理避免旧请求 finally 抹掉新请求。 */
+    private val activeExecutionControl = AtomicReference<GenerationExecutionControl?>(null)
+    /** 上一轮可复用的实测 assistant token 数；仅在原始文本精确匹配时用于下一轮估算。 */
+    @Volatile
+    private var measuredAssistantText: String? = null
+    @Volatile
+    private var measuredAssistantTokens: Int = 0
     @Volatile
     private var thermalMonitoringStarted = false
 
@@ -159,6 +180,37 @@ class LocalChatProvider(
                     msg.copy(content = msg.content + RESPONSE_GUIDE)
                 } else msg
             }
+            // Task 5：先在保留 modelContent 的原始消息上规划窗口（估算用 modelContent ?: content），
+            // 再把选中 assistant 的原始模型文本映射到 content 喂 MNN。绝不摘要/改写历史文本。
+            val measuredText = measuredAssistantText
+            val knownTokenCounts = if (measuredText != null && measuredAssistantTokens > 0) {
+                enhancedMessages.mapIndexedNotNull { index, message ->
+                    val raw = message.modelContent ?: message.content
+                    if (message.role == "assistant" && raw == measuredText) index to measuredAssistantTokens else null
+                }.toMap()
+            } else emptyMap()
+            val promptResult = promptWindowPlanner.plan(
+                messages = enhancedMessages,
+                admittedContextTokens = contextLen,
+                requestedOutputTokens = maxTokens,
+                previousAnchor = previousPromptAnchor,
+                knownMessageTokenCounts = knownTokenCounts,
+            )
+            val promptPlan = when (promptResult) {
+                is PromptWindowResult.Success -> promptResult.plan
+                is PromptWindowResult.AdmissionFailure -> throw com.chatbyyourside.llm.PromptAdmissionException(promptResult)
+            }
+            val modelMessages = promptPlan.messages.map { message ->
+                val raw = message.modelContent ?: message.content
+                message.copy(content = raw, modelContent = null)
+            }
+            if (promptPlan.anchorChanged || promptPlan.downgradeReason != null) {
+                Log.i(
+                    TAG,
+                    "prompt window: input=${promptPlan.estimatedInputTokens} output=${promptPlan.reservedOutputTokens} " +
+                        "anchorChanged=${promptPlan.anchorChanged} reason=${promptPlan.downgradeReason}",
+                )
+            }
             // Task 4 Step 3：本地是**唯一**原始回复累加器——native 不再返回全文，[accumulated] 由
             // 流式 delta 拼接；BackendManager 只带回 GenerationSummary（指标/完成原因）。
             val accumulated = StringBuilder()
@@ -171,43 +223,71 @@ class LocalChatProvider(
             // 原生批处理已削减回调次数，此处再避免每个批次都整串 toString + renderLocalThink；
             // 末批被跳过不影响最终落库（完成路径用 displayText 覆盖流式气泡）。
             var lastRenderMs = 0L
-            val result = backendManager.generate(
-                modelPath = modelPath,
-                messages = enhancedMessages,
-                maxTokens = maxTokens,
-                temperature = temperature,
-                topP = AppConfig.LLM.DEFAULT_TOP_P,
-                repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
-                contextLen = contextLen,
-                threads = effectiveThreads,
-                preference = preference,
-                lookahead = lookahead,
-                enableThinking = deepThinking,
-                onToken = { token ->
-                    if (!truncated) {
-                        accumulated.append(token)
-                        // 兜底截断：增量检测「角色名：」多角色剧本标记 -> 截到标记前并停止。
-                        // 模型遵守 system 规范时不会触发；不遵守时此为硬性防线，避免长篇剧本耗满 maxTokens。
-                        val cutPos = scriptDetector.append(token).cutAbsoluteIndex
-                        if (cutPos != null) {
-                            accumulated.setLength(cutPos)
-                            truncated = true
-                        }
-                        // 折叠包装：补回起始 <think> 使 parseWithThink 能把推理段识别为可折叠 Think 段。
-                        // 流式与最终落库共用同一 [renderLocalThink] 逻辑，保证「输出中可折叠」与
-                        // 「输出完可折叠」一致（修复后者在未见 </think> 时丢失起始 <think> 变纯文本）。
-                        // 首 delta 或渲染节流放行（或截断后强制刷新最终态）时才构造装饰串。
-                        val now = SystemClock.elapsedRealtime()
-                        if (lastRenderMs == 0L || now - lastRenderMs >= RENDER_THROTTLE_MS || truncated) {
-                            lastRenderMs = now
-                            onChunk(renderLocalThink(accumulated.toString(), shouldFoldThink))
+            val safetyPolicy = GenerationSafetyPolicy.forMode(
+                InferencePerformanceMode.DEFAULT,
+                promptPlan.reservedOutputTokens,
+            )
+            val executionControl = GenerationExecutionControl(
+                policy = safetyPolicy,
+                startedElapsedMs = SystemClock.elapsedRealtime(),
+            )
+            activeExecutionControl.set(executionControl)
+            val result = try {
+                coroutineScope {
+                    // 请求级 watchdog：进度由 MnnBackend 回调按真实时间直接写入 control；本协程只判 deadline。
+                    // timeout 先原子锁定原因，再请求全局 abort；绝不跨线程释放 native。
+                    val watchdog = launch {
+                        while (isActive) {
+                            delay(WATCHDOG_POLL_MS)
+                            if (executionControl.completionReason(SystemClock.elapsedRealtime()) == CompletionReason.TIMEOUT) {
+                                Log.w(TAG, "generation watchdog timeout -> request abort")
+                                backendManager.cancel()
+                                break
+                            }
                         }
                     }
-                    // false -> MnnBackend 设 MnnBridge.abort=true -> native stepping 1 token 内停。
-                    // 截断后持续返回 false 确保 abort 生效（native 可能再推 1 个 token 才检测 shouldAbort）。
-                    !truncated
-                },
-            )
+                    try {
+                        backendManager.generate(
+                            modelPath = modelPath,
+                            messages = modelMessages,
+                            maxTokens = promptPlan.reservedOutputTokens,
+                            temperature = temperature,
+                            topP = AppConfig.LLM.DEFAULT_TOP_P,
+                            repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
+                            contextLen = contextLen,
+                            threads = effectiveThreads,
+                            preference = preference,
+                            lookahead = lookahead,
+                            enableThinking = deepThinking,
+                            downgradeReasons = listOfNotNull(promptPlan.downgradeReason),
+                            executionControl = executionControl,
+                            onToken = { token ->
+                                if (!truncated) {
+                                    accumulated.append(token)
+                                    // 兜底截断：增量检测「角色名：」多角色剧本标记 -> 截到标记前并停止。
+                                    val cutPos = scriptDetector.append(token).cutAbsoluteIndex
+                                    if (cutPos != null) {
+                                        accumulated.setLength(cutPos)
+                                        truncated = true
+                                    }
+                                    val now = SystemClock.elapsedRealtime()
+                                    if (lastRenderMs == 0L || now - lastRenderMs >= RENDER_THROTTLE_MS || truncated) {
+                                        lastRenderMs = now
+                                        onChunk(renderLocalThink(accumulated.toString(), shouldFoldThink))
+                                    }
+                                }
+                                // false -> abort + POLICY_TRUNCATION；max-token 由 native 硬边界返回 MAX_TOKENS。
+                                !truncated
+                            },
+                        )
+                    } finally {
+                        watchdog.cancel()
+                    }
+                }
+            } finally {
+                activeExecutionControl.compareAndSet(executionControl, null)
+            }
+            previousPromptAnchor = promptPlan.anchor
 
             // 配置变更检测：本次推理成功后，把"本次生效的"用户配置写回 last_applied，使设置页横幅归位。
             if (result.reloaded) {
@@ -232,6 +312,10 @@ class LocalChatProvider(
             // 原始模型输出（与 native syncPromptCache 逐字节一致）：本地累加器即最终原始文本。
             val modelText = finalRaw
             val record = backendManager.lastTurnRecord()
+            if (modelText.isNotEmpty() && record != null && record.generatedTokens > 0) {
+                measuredAssistantText = modelText
+                measuredAssistantTokens = record.generatedTokens
+            }
             LocalChatResult(
                 displayText = displayText,
                 modelText = modelText,
@@ -241,14 +325,15 @@ class LocalChatProvider(
                     generatedTokens = record?.generatedTokens ?: 0,
                     decodeTps = record?.decodeTps,
                     kvReuse = record?.kvReuse,
-                    completionReason = record?.completionReason,
+                    completionReason = result.completionReason ?: record?.completionReason,
                 ),
             )
         }
     }
 
     override fun cancel() {
-        // 非挂起：设置所有 MNN 后端的 abort 标志，正在运行的一方下一轮检测后退出。
+        // 原因必须先于全局 abort 发布，避免 active backend 先返回而把取消误记成其他原因。
+        activeExecutionControl.get()?.requestStop(CompletionReason.USER_CANCEL)
         backendManager.cancel()
     }
 
@@ -281,6 +366,9 @@ class LocalChatProvider(
 
         /** DataStore .first() 超时阈值（ms）。国产 ROM 文件 I/O 被拦截时避免永久挂起。 */
         private const val DATASTORE_TIMEOUT_MS = 5000L
+
+        /** 仅轮询 Kotlin 原子进度快照；不读取/释放 native。 */
+        private const val WATCHDOG_POLL_MS = 1000L
 
         /** 流式渲染节流（ms）：`<think>` 装饰与 onChunk 仅在该间隔放行时构造（Task 4 Step 6）。
          *  与 ChatViewModel.STREAM_THROTTLE_MS(30) 对齐；首 delta 无条件放行保证即时性。 */

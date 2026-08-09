@@ -1,6 +1,7 @@
 package com.chatbyyourside.llm.backend
 
 import com.chatbyyourside.data.model.ChatMessage
+import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
 
 /**
@@ -94,6 +95,8 @@ interface InferenceBackend {
         onToken: (String) -> Boolean,
         batchMaxBytes: Int = DEFAULT_BATCH_MAX_BYTES,
         batchMaxMs: Int = DEFAULT_BATCH_MAX_MS,
+        downgradeReasons: List<String> = emptyList(),
+        executionControl: GenerationExecutionControl? = null,
     ): NativeGenerationSummary?
 
     /** 流式批处理 Balanced 默认参数（Task 6 性能模式接入前的稳定取值，与设计文档 §流式行一致）。 */

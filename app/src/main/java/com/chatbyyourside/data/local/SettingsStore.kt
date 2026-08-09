@@ -350,6 +350,10 @@ class SettingsStore(private val context: Context) {
         p[Keys.LLM_TEMPERATURE] ?: AppConfig.LLM.DEFAULT_TEMPERATURE
     }
 
+    /**
+     * 缺少偏好键时才使用 2048 新默认；这里只读回退、不写回 DataStore，已有 4096/65536 等
+     * 用户选择原样保留（Task 5 absent-preference-only 约束）。
+     */
     val llmMaxTokens: Flow<Int> = context.settingsDataStore.data.map { p ->
         p[Keys.LLM_MAX_TOKENS] ?: AppConfig.LLM.DEFAULT_MAX_TOKENS
     }

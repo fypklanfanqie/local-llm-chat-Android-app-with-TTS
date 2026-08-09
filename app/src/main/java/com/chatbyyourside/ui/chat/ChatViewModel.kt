@@ -474,12 +474,19 @@ class ChatViewModel(
                 val apiMessages = buildList {
                     add(ChatMessage(role = "system", content = char.systemPrompt))
                     addAll(resolvedHistory.map {
-                        // 云端历史含 <think>（注入的推理），回传前剥离（reasoning 不应回传给对话商）。
-                        // 本地历史优先用 modelContent（模型原始输出，与 syncPromptCache 逐字节一致），
-                        // 保证 KV 前缀复用精确命中；旧消息/用户消息 modelContent 为 null 时回退 content。
-                        val c = if (isCloudProvider) MarkdownParser.stripThink(it.content)
-                            else (it.modelContent ?: it.content)
-                        ChatMessage(role = it.role, content = c, multimodalImages = it.multimodalImages)
+                        if (isCloudProvider) {
+                            // 云端历史含 <think>（注入的推理），回传前剥离（reasoning 不应回传给对话商）。
+                            ChatMessage(
+                                role = it.role,
+                                content = MarkdownParser.stripThink(it.content),
+                                multimodalImages = it.multimodalImages,
+                            )
+                        } else {
+                            // 本地先保留 content + modelContent 原始双字段交给 PromptWindowPlanner：token 估算
+                            // 必须使用 modelContent ?: content；选好窗口后 LocalChatProvider 才把模型可见文本
+                            // 映射到 content，避免规划前丢失真实原文长度并破坏 KV 前缀解释。
+                            it
+                        }
                     })
                 }
 
@@ -530,17 +537,23 @@ class ChatViewModel(
                 // 本地：走 chatTyped 取展示文本 + 模型原始文本（modelContent）；云端：返回展示文本，modelContent=null。
                 val displayResponse: String
                 val modelText: String?
+                var localCompletionReason: com.chatbyyourside.llm.metrics.CompletionReason? = null
                 if (provider is LocalChatProvider) {
                     val localResult = provider.chatTyped(apiMessages, onChunk)
                     displayResponse = localResult.displayText
                     modelText = localResult.modelText
+                    localCompletionReason = localResult.generation?.completionReason
                 } else {
                     displayResponse = provider.chat(apiMessages, onChunk)
                     modelText = null
                 }
 
-                // 流式完成 -> 移除临时 streaming 消息，落库持久化
-                termReason = "完成: $genTokens tokens"
+                // 流式完成 -> 移除临时 streaming 消息，落库持久化；明确区分 timeout/max-token。
+                termReason = when (localCompletionReason) {
+                    com.chatbyyourside.llm.metrics.CompletionReason.TIMEOUT -> "生成超时"
+                    com.chatbyyourside.llm.metrics.CompletionReason.MAX_TOKENS -> "达到生成上限"
+                    else -> "完成: $genTokens chunks"
+                }
                 val assistantMessage = ChatMessage(role = "assistant", content = displayResponse, modelContent = modelText)
                 container.chatRepository.addMessage(charId, convId, assistantMessage)
                 // 刷新会话 updatedAt，把它顶到列表最前

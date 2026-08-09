@@ -42,6 +42,7 @@ class InferenceTelemetryTest {
         assertEquals(0L, snap.callbackBytes)
         assertNull(snap.currentTps)
         assertEquals(1000L, snap.startedElapsedMs)
+        assertEquals(1000L, snap.lastProgressElapsedMs)
         assertTrue(t.isActive)
     }
 
@@ -56,12 +57,14 @@ class InferenceTelemetryTest {
         assertEquals(1, snap.tokenCount)
         assertEquals(3L, snap.callbackBytes)
         assertEquals(5.0f, snap.currentTps!!, 0.0001f)
+        assertEquals(2100L, snap.lastProgressElapsedMs)
 
         t.onDecodeToken(tokenCount = 2, callbackCount = 2, callbackBytes = 7L, currentTps = 9.5f, nowElapsedMs = 2200L)
         snap = t.snapshot()!!
         assertEquals(2, snap.tokenCount)
         assertEquals(7L, snap.callbackBytes)
         assertEquals(9.5f, snap.currentTps!!, 0.0001f)
+        assertEquals(2200L, snap.lastProgressElapsedMs)
     }
 
     @Test
