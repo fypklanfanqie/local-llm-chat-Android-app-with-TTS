@@ -91,13 +91,10 @@ android {
     // 然后把生成的 .so 拷入 jniLibs/arm64-v8a。
 
     packaging {
-        // 裁剪较老的 QNN skeleton：骁龙 8 Gen 2+ 对应 V73/V75/V79。
-        // 若目标设备更老，请移除对应 exclude，否则 NPU 会回退 CPU/GPU。
+        // 标准构建（Task 11）：排除全部 QNN 运行时库。源文件保留在 jniLibs 供未来实验 flavor 使用，
+        // 但标准 APK 不含任何 libQnn*（CI 用 apkanalyzer/unzip 断言）。NPU 不可用 -> 解析为 CPU。
         jniLibs {
-            excludes += listOf(
-                "lib/arm64-v8a/libQnnHtpV68Skel.so",
-                "lib/arm64-v8a/libQnnHtpV69Skel.so"
-            )
+            excludes += listOf("**/libQnn*")
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"

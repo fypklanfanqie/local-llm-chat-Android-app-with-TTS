@@ -67,7 +67,7 @@ class InferenceProfileResolverTest {
         val p = plan(BackendPreference.MNN_NPU, openclHealth = OpenClHealthState.UNKNOWN)
 
         assertTrue(p.attempts.none { it.backend == BackendType.MNN_NPU })
-        assertTrue(p.downgradeReasons.contains(DowngradeReason.UNSUPPORTED_SETTING))
+        assertTrue(p.downgradeReasons.contains(DowngradeReason.QNN_UNAVAILABLE_IN_STANDARD_BUILD))
         assertEquals(RuntimeVariant.CPU_OPTIMIZED, p.attempts.first().variant)
     }
 

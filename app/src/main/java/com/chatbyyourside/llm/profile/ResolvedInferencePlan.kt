@@ -77,8 +77,9 @@ enum class DowngradeReason {
     THERMAL,            // 高温降线程/降模式
     MEMORY,             // 内存准入受限
     OPENCL_UNHEALTHY,   // OpenCL 探测失败或健康记录异常
-    BACKEND_UNAVAILABLE,// 后端/变体不可用（如 QNN 标准版不可用、OpenCL 缺运行时）
-    UNSUPPORTED_SETTING,// 已保存但不再支持的选择（如 MNN_NPU），解析为 CPU
+    BACKEND_UNAVAILABLE,// 后端/变体不可用（如 OpenCL 缺运行时）
+    UNSUPPORTED_SETTING,// 已保存但不再支持的选择，解析为 CPU
+    QNN_UNAVAILABLE_IN_STANDARD_BUILD, // 标准构建不含 QNN 运行时；legacy NPU 偏好解析为 CPU（Task 11）
 }
 
 /**

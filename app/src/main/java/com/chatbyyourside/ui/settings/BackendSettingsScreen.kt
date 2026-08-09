@@ -181,9 +181,7 @@ fun BackendSettingsScreen(
                     }
                     BackendPreference.MNN_CPU -> "兼容性最好，速度最慢"
                     BackendPreference.MNN_GPU -> if (mnnGpuReady) "MNN OpenCL GPU（.mnn 模型）" else "需 libMNN.so + OpenCL 运行时"
-                    BackendPreference.MNN_NPU -> if (mnnNpuReady)
-                        "MNN QNN NPU（需解锁/Root 关 SELinux，否则会崩）"
-                    else "不可用：需骁龙 + libQnnHtp.so + 解锁/Root（SELinux 限制 CDSP）"
+                    BackendPreference.MNN_NPU -> com.chatbyyourside.llm.backend.MnnSupportDetector.QNN_STANDARD_BUILD_UNAVAILABLE
                 }
                 BackendOptionRow(
                     title = entry.displayName,

@@ -738,6 +738,10 @@ git commit -m "feat: persist MNN backend health profiles"
 
 ### Task 10: Add crash-contained OpenCL execution probe
 
+> **Status (2026-08-09):** Steps 1–4 source complete. `backend_probe_jni.cpp` (dlopen libOpenCL.so, no vendor link; resolve symbols, enumerate device, context/queue/buffers, build+run trivial `add1` kernel, verify output, return vendor/device/driver + typed failure JSON). `OpenClProbeService` in `:mnn_probe` (nativeProbe @JvmStatic, writes JSON to cross-process SharedPreferences, stopSelf+killProcess). `OpenClProbeRunner` (main process pending journal -> startService -> poll; timeout/death/malformed as failure; DI probe/clock). AndroidManifest optional `uses-native-library libOpenCL.so` + non-exported service; CMake `libbackend_probe.so`. `MnnSupportDetector.openclAvailable()` stays cheap prerequisite; resolver OpenClHealthState gating from Task 9. androidTest `OpenClProbeServiceTest` (DI success/failure/timeout/death). Provider health-store read of probe results staged (currently uses mnnGpuSupported approximation). `git diff --check` clean. Pending: Step 5 instrumentation on real Adreno/Mali; Step 6 commit done (auto-authorized).
+
+### Task 10: Add crash-contained OpenCL execution probe
+
 **Files:**
 - Create: `app/src/main/cpp/backend_probe_jni.cpp`
 - Create: `app/src/main/java/com/chatbyyourside/llm/backend/OpenClProbeModels.kt`

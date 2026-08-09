@@ -75,8 +75,8 @@ class InferenceProfileResolver(
                     add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_COMPATIBILITY, cpu, contextTokens, lookahead, temperature, topP, repeatPenalty))
                 }
                 BackendPreference.MNN_NPU -> {
-                    // 标准版 QNN 不可用：保留设置但解析为 CPU，显式降级原因。
-                    downgrades += DowngradeReason.UNSUPPORTED_SETTING
+                    // 标准构建不含 QNN 运行时：保留设置但解析为 CPU，显式降级原因（Task 11）。
+                    downgrades += DowngradeReason.QNN_UNAVAILABLE_IN_STANDARD_BUILD
                     add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_OPTIMIZED, cpu, contextTokens, lookahead, temperature, topP, repeatPenalty))
                     add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_COMPATIBILITY, cpu, contextTokens, lookahead, temperature, topP, repeatPenalty))
                 }
