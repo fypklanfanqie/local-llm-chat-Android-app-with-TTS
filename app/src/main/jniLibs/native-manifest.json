@@ -14,13 +14,13 @@
     "16k_pages",
     "opencl_probe"
   ],
-  "note": "Wrapper libmnn_jni.so + libbackend_probe.so rebuilt locally with NDK 26.1.10909125 and 16 KiB p_align (0x4000); libMNN.so/libcpu_sys_jni.so remain the pre-rebuild 4 KiB (0x1000) artifacts pending a full pinned-MNN rebuild in CI. QNN libs in jniLibs are intentionally not listed (excluded from standard packaging, Task 11).",
+  "note": "All standard libs rebuilt locally with NDK 26.1.10909125 against pinned MNN af0142bc; libMNN.so/libcpu_sys_jni.so/libmnn_jni.so/libbackend_probe.so are 16 KiB p_align (0x4000). QNN libs in jniLibs are intentionally not listed (excluded from standard packaging, Task 11).",
   "files": [
     {
       "name": "libMNN.so",
-      "sha256": "8045382f08843f06b70cf67254cdc37994cf43ba2dac2c32543e5542d738c791",
-      "buildId": "42177805c8de803a09c3350705c312d019974a58",
-      "ptLoadAlignment": "0x1000"
+      "sha256": "734abe2f69a5918ead565913fc8644835a7a6777cefbfadb296c927cd6bbe4ec",
+      "buildId": "712c877dcc5a33e856f223bc09e4b70e8a689d7f",
+      "ptLoadAlignment": "0x4000"
     },
     {
       "name": "libc++_shared.so",
@@ -30,9 +30,9 @@
     },
     {
       "name": "libcpu_sys_jni.so",
-      "sha256": "713b5e5aa899344c46638f57872253bf87c95147fa280ed87ab28eb8107b0604",
-      "buildId": "423d1485083ae58ae745617613853e89954a2ffa",
-      "ptLoadAlignment": "0x1000"
+      "sha256": "d32ca729b838dbdfd8b447153b2b992461d55b47e4d3fa7e38e0a214c99b3731",
+      "buildId": "1f741eaf0537becea3ca86b46244caa7f35aa0b4",
+      "ptLoadAlignment": "0x4000"
     },
     {
       "name": "libmnn_jni.so",
