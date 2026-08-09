@@ -35,10 +35,12 @@ class MnnBridge {
     companion object {
         private const val TAG = "MnnBridge"
 
-        /** token 回调（由 C 层 JNI 调用，转发给当前 generateStream 调用方） */
+        /** token 回调（由 C 层 JNI 调用，转发给当前 generateStream 调用方）。
+         *  第二参数为当前真实已生成 token 数（native LlmContext::gen_seq_len），
+         *  批处理后回调次数≠token 数，MnnBackend 据此计算实时 tps。 */
         @Volatile
         @JvmStatic
-        internal var onToken: ((String) -> Unit)? = null
+        internal var onToken: ((String, Int) -> Unit)? = null
 
         /** 中断标志（C 层每轮检查，true 则提前结束） */
         @Volatile
@@ -58,6 +60,20 @@ class MnnBridge {
         @Volatile
         private var mnnLibLoaded = false
 
+        /** 期望的 JNI ABI 版本与钉定 MNN commit（与 native-manifest.json、CMake 编译定义对齐）。 */
+        private const val EXPECTED_JNI_ABI = 1
+        private const val EXPECTED_MNN_COMMIT = "af0142bcc7b76b7a5128373e285683dc04f55f69"
+
+        /** native 回传的运行时信息（库加载后解析一次）。null=握手缺席（旧构建）或解析失败。 */
+        @Volatile
+        internal var runtimeInfo: MnnRuntimeInfo? = null
+            private set
+
+        /** 运行时信息诊断：null=正常；非空=ABI/commit 不符或握手不可用（供 UI/日志展示）。 */
+        @Volatile
+        var runtimeDiagnostic: String? = null
+            private set
+
         init {
             for (lib in LIBS) {
                 try {
@@ -72,25 +88,76 @@ class MnnBridge {
                 }
             }
             Log.i(TAG, "bridgeLoaded=$bridgeLoaded mnnLibLoaded=$mnnLibLoaded")
+            // 加载后立即解析运行时信息，校验 ABI/commit 与本应用期望是否一致。
+            parseRuntimeInfoOnce()
         }
 
-        /** JNI 包装库是否可用（native 调用的前提） */
+        /** 解析 nativeGetRuntimeInfo 并校验 ABI/commit；握手缺席时宽放（不禁用），仅记录诊断。 */
+        private fun parseRuntimeInfoOnce() {
+            if (!bridgeLoaded) return
+            try {
+                val info = MnnRuntimeInfo.fromJson(nativeGetRuntimeInfo()) ?: run {
+                    runtimeDiagnostic = "native 运行时信息解析失败（JSON 为空或格式错误）"
+                    return
+                }
+                runtimeInfo = info
+                runtimeDiagnostic = when {
+                    info.abiVersion != EXPECTED_JNI_ABI ->
+                        "JNI ABI 不匹配：native=${info.abiVersion}, 期望=$EXPECTED_JNI_ABI"
+                    info.mnnCommit != EXPECTED_MNN_COMMIT ->
+                        "MNN commit 不匹配：native=${info.mnnCommit}, 期望=$EXPECTED_MNN_COMMIT"
+                    else -> null
+                }
+                Log.i(TAG, "runtimeInfo abi=${info.abiVersion} commit=${info.mnnCommit} buildId=${info.nativeBuildId} caps=${info.capabilities}")
+            } catch (e: UnsatisfiedLinkError) {
+                // 旧 native 构建无 nativeGetRuntimeInfo 符号——宽放（不禁用 native），仅记录诊断。
+                runtimeDiagnostic = "native 运行时信息不可用（native 构建早于握手协议）"
+                Log.w(TAG, "nativeGetRuntimeInfo 不可用: ${e.message}")
+            } catch (e: Exception) {
+                runtimeDiagnostic = "native 运行时信息解析异常: ${e.message}"
+                Log.w(TAG, "nativeGetRuntimeInfo 解析异常: ${e.message}")
+            }
+        }
+
+        /**
+         * JNI 包装库是否可用（native 调用的前提）。
+         *
+         * 握手缺席（runtimeInfo==null，旧 native 构建或缺库）时宽放，等价于旧逻辑 bridgeLoaded && mnnLibLoaded；
+         * 握手出席时额外要求 ABI 与 commit 均与期望一致——不匹配则视为不兼容 native 栈，禁用 MNN 后端。
+         */
         val nativeAvailable: Boolean
-            get() = bridgeLoaded && mnnLibLoaded
+            get() = bridgeLoaded && mnnLibLoaded && runtimeInfoCompatible()
+
+        private fun runtimeInfoCompatible(): Boolean {
+            val info = runtimeInfo ?: return true
+            return info.abiVersion == EXPECTED_JNI_ABI && info.mnnCommit == EXPECTED_MNN_COMMIT
+        }
 
         /** libMNN.so 是否加载成功 */
         val mnnAvailable: Boolean
             get() = mnnLibLoaded
 
-        /** C 层通过 JNI 调用此方法推送一个 token（按 UTF-8 字符边界切分后的字节） */
+        /**
+         * C 层通过 JNI 调用此方法推送一段批处理文本（按 UTF-8 字符边界切分/聚合后的字节）。
+         * @param bytes 批处理字节（Task 4 StreamBatcher 聚合，非单个 token）
+         * @param generatedTokens 当前真实已生成 token 数（native 实时 gen_seq_len，供浮窗 tps）
+         */
         @JvmStatic
-        fun nativeCallback(bytes: ByteArray) {
-            onToken?.invoke(String(bytes, Charsets.UTF_8))
+        fun nativeCallback(bytes: ByteArray, generatedTokens: Int) {
+            onToken?.invoke(String(bytes, Charsets.UTF_8), generatedTokens)
         }
 
         /** C 层轮询此标志决定是否中断 */
         @JvmStatic
         fun shouldAbort(): Boolean = abort
+
+        /**
+         * 查询 native 运行时信息（JNI ABI 版本、钉定 MNN commit、native build ID、能力集）。
+         * 库加载后由 [parseRuntimeInfoOnce] 解析一次，用于校验 native 栈与本应用期望是否一致。
+         * 对应 C 层 `Java_..._MnnBridge_nativeGetRuntimeInfo`（静态 native，返回稳定 JSON）。
+         */
+        @JvmStatic
+        external fun nativeGetRuntimeInfo(): String
 
         /**
          * 把消息列表序列化为 MNN JNI 可解析的 JSON：
@@ -138,7 +205,7 @@ class MnnBridge {
     ): Long
 
     /**
-     * 流式推理（阻塞，内部逐 token 回调 [nativeCallback]）。
+     * 流式推理（阻塞，内部经 StreamBatcher 批处理回调 [nativeCallback]）。
      * @param handle [nativeCreate] 返回的句柄
      * @param messagesJson 消息列表 JSON（[toMessagesJson]），MNN 据此应用模型自带 chat 模板
      * @param maxTokens 最大生成 token 数
@@ -149,7 +216,11 @@ class MnnBridge {
      *        控制推理模型（Qwen3/R1）chat 模板是否插入 `<think>` 前缀；运行时生效，无需重载。
      *        false 时模型跳过推理直接作答；true 时生成 reasoning 后再作答。
      *        无 enable_thinking 分支的模板（Llama/Gemma）忽略，无害。
-     * @return 完整生成文本的 UTF-8 字节
+     * @param batchMaxBytes 流式批处理缓冲上限（字节）。首个完整可见字符立即回调（首 delta 即时性），
+     *        其余按「字节或时间达标即批量 flush」。Task 6 性能模式接入前用 Balanced 默认 256。
+     * @param batchMaxMs 流式批处理缓冲时间上限（ms）。Balanced 16；Maximum Speed 24–32。
+     * @return 紧凑版本化 GenerationSummary JSON（[NativeGenerationSummary.parse]），**非** 全量文本。
+     *         全量回复不再整份拷贝回 Kotlin；文本由流式回调拼接（provider 是唯一累加器）。
      */
     external fun nativeGenerateStream(
         handle: Long,
@@ -159,7 +230,9 @@ class MnnBridge {
         topP: Float,
         repeatPenalty: Float,
         enableThinking: Boolean,
-    ): ByteArray
+        batchMaxBytes: Int,
+        batchMaxMs: Int,
+    ): String
 
     /** 中断当前生成（下一轮 token 前检测） */
     external fun nativeStop(handle: Long)
@@ -182,4 +255,40 @@ class MnnBridge {
      * 空串表示无错误/上次加载成功。
      */
     external fun nativeGetLastError(): String
+}
+
+/**
+ * Native 运行时信息（由 [MnnBridge.nativeGetRuntimeInfo] 返回的 JSON 解析）。
+ *
+ * 用于加载后握手校验：[abiVersion] 与 [MnnBridge] 期望的 JNI ABI 不符即 native 契约不兼容；
+ * [mnnCommit] 与钉定 commit 不符意味着 native 栈来自不同 MNN 构建。[capabilities] 反映本
+ * libMNN.so 编译期特性（mmap/cached_mmap/reuse_kv/opencl/arm82 等），供上层决定可用功能。
+ *
+ * 用 org.json 解析（与本文件既有风格一致），不引入 kotlinx.serialization 依赖。
+ */
+data class MnnRuntimeInfo(
+    val abiVersion: Int,
+    val mnnCommit: String,
+    val nativeBuildId: String,
+    val capabilities: Set<String>,
+) {
+    companion object {
+        /** 解析 nativeGetRuntimeInfo 的 JSON；格式错误返回 null（由调用方记诊断）。 */
+        fun fromJson(json: String): MnnRuntimeInfo? = try {
+            val o = JSONObject(json)
+            val caps = HashSet<String>()
+            val arr = o.optJSONArray("capabilities")
+            if (arr != null) {
+                for (i in 0 until arr.length()) caps.add(arr.getString(i))
+            }
+            MnnRuntimeInfo(
+                abiVersion = o.optInt("abiVersion", 0),
+                mnnCommit = o.optString("mnnCommit", ""),
+                nativeBuildId = o.optString("nativeBuildId", ""),
+                capabilities = caps,
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
 }

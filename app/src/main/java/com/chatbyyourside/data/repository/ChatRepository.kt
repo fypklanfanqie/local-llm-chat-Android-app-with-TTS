@@ -17,8 +17,6 @@ import kotlinx.serialization.builtins.serializer
  */
 class ChatRepository(private val dao: ChatDao) {
 
-    private val json = Json { ignoreUnknownKeys = true }
-
     fun getHistoryFlow(conversationId: Long): Flow<List<ChatMessage>> =
         dao.getHistory(conversationId).map { entities ->
             // DAO 返回最新 N 条（DESC），反转为 ASC 以便按时间正序展示
@@ -41,40 +39,52 @@ class ChatRepository(private val dao: ChatDao) {
     suspend fun clearHistory(conversationId: Long) {
         dao.clearHistory(conversationId)
     }
-
-    // ===== 转换 =====
-
-    private fun ChatHistoryEntity.toMessage(): ChatMessage = ChatMessage(
-        role = role,
-        content = content,
-        images = decodeStringList(imagesJson),
-        files = decodeFileList(filesJson),
-        fileNames = decodeStringList(fileNamesJson),
-        timestamp = timestamp,
-    )
-
-    private fun ChatMessage.toEntity(characterId: String, conversationId: Long): ChatHistoryEntity = ChatHistoryEntity(
-        characterId = characterId,
-        conversationId = conversationId,
-        role = role,
-        content = content,
-        imagesJson = encodeStringList(images),
-        filesJson = encodeFileList(files),
-        fileNamesJson = encodeStringList(fileNames),
-        timestamp = timestamp,
-    )
-
-    private fun encodeStringList(list: List<String>): String =
-        if (list.isEmpty()) "" else json.encodeToString(ListSerializer(String.serializer()), list)
-
-    private fun decodeStringList(s: String): List<String> =
-        if (s.isBlank()) emptyList()
-        else runCatching { json.decodeFromString(ListSerializer(String.serializer()), s) }.getOrDefault(emptyList())
-
-    private fun encodeFileList(list: List<AttachedFile>): String =
-        if (list.isEmpty()) "" else json.encodeToString(kotlinx.serialization.builtins.ListSerializer(AttachedFile.serializer()), list)
-
-    private fun decodeFileList(s: String): List<AttachedFile> =
-        if (s.isBlank()) emptyList()
-        else runCatching { json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(AttachedFile.serializer()), s) }.getOrDefault(emptyList())
 }
+
+// ===== 转换（顶层 internal，便于单测；纯函数无 Android 依赖）=====
+
+/**
+ * 实体 -> 领域消息。[modelContent] 原样还原；旧行该列为 null，由调用方 `modelContent ?: content` 兼容。
+ */
+internal fun ChatHistoryEntity.toMessage(): ChatMessage = ChatMessage(
+    role = role,
+    content = content,
+    images = decodeStringList(imagesJson),
+    files = decodeFileList(filesJson),
+    fileNames = decodeStringList(fileNamesJson),
+    timestamp = timestamp,
+    modelContent = modelContent,
+)
+
+/**
+ * 领域消息 -> 实体。[modelContent] 持久化（本地助手消息存原始文本）；用户消息/云端消息为 null。
+ * 注：[ChatMessage.multimodalImages] 运行时字段不持久化（仅发送给 API）。
+ */
+internal fun ChatMessage.toEntity(characterId: String, conversationId: Long): ChatHistoryEntity = ChatHistoryEntity(
+    characterId = characterId,
+    conversationId = conversationId,
+    role = role,
+    content = content,
+    imagesJson = encodeStringList(images),
+    filesJson = encodeFileList(files),
+    fileNamesJson = encodeStringList(fileNames),
+    timestamp = timestamp,
+    modelContent = modelContent,
+)
+
+/** 实体字段编解码用的 JSON（宽松：容忍历史行多余/缺失字段）。 */
+private val entityJson = Json { ignoreUnknownKeys = true }
+
+private fun encodeStringList(list: List<String>): String =
+    if (list.isEmpty()) "" else entityJson.encodeToString(ListSerializer(String.serializer()), list)
+
+private fun decodeStringList(s: String): List<String> =
+    if (s.isBlank()) emptyList()
+    else runCatching { entityJson.decodeFromString(ListSerializer(String.serializer()), s) }.getOrDefault(emptyList())
+
+private fun encodeFileList(list: List<AttachedFile>): String =
+    if (list.isEmpty()) "" else entityJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(AttachedFile.serializer()), list)
+
+private fun decodeFileList(s: String): List<AttachedFile> =
+    if (s.isBlank()) emptyList()
+    else runCatching { entityJson.decodeFromString(kotlinx.serialization.builtins.ListSerializer(AttachedFile.serializer()), s) }.getOrDefault(emptyList())

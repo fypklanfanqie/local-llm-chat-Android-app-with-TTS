@@ -20,6 +20,13 @@ data class ChatMessage(
     /** 运行时多模态图片 base64（不含 data: 前缀）。仅发送给 API，不持久化（ChatRepository.toEntity 未映射）。 */
     val multimodalImages: List<String> = emptyList(),
     val timestamp: Long = System.currentTimeMillis(),
+    /**
+     * 模型可见的原始文本（本地 MNN 生成、未经展示层处理的版本，可含 `<think>` 等）。
+     *
+     * - 本地助手消息：`content` 存展示文本、`modelContent` 存原始文本，重放历史时优先用它喂回模型，保证 KV 前缀精确一致。
+     * - 用户消息 / 云端消息 / 旧库行：为 null，回退 `content`（[com.chatbyyourside.data.repository.toMessage] + 调用方 `modelContent ?: content`）。
+     */
+    val modelContent: String? = null,
 )
 
 @Serializable

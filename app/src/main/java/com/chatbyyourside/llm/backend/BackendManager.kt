@@ -5,6 +5,8 @@ import android.util.Log
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.backend.MnnBackend.MnnMode
+import com.chatbyyourside.llm.metrics.InferenceTurnRecord
+import com.chatbyyourside.llm.metrics.NativeGenerationSummary
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -165,6 +167,9 @@ class BackendManager(
      * @param preference 用户后端偏好
      * @param enableThinking 是否启用深度思考。透传给 MNN set_config 的 jinja context `enable_thinking`，
      *        运行时生效（无需重载）：false 时推理模型跳过 `<think>` 推理段直接作答。
+     * @param batchMaxBytes native 流式批处理缓冲上限（字节）；Balanced 默认 256，Task 6 性能模式接入后
+     *        由 [com.chatbyyourside.llm.profile.InferencePerformanceMode] 解析覆盖。
+     * @param batchMaxMs native 流式批处理缓冲时间上限（ms）；Balanced 16。
      */
     suspend fun generate(
         modelPath: String,
@@ -179,6 +184,8 @@ class BackendManager(
         lookahead: Boolean,
         enableThinking: Boolean,
         onToken: (String) -> Boolean,
+        batchMaxBytes: Int = InferenceBackend.DEFAULT_BATCH_MAX_BYTES,
+        batchMaxMs: Int = InferenceBackend.DEFAULT_BATCH_MAX_MS,
     ): GenerationResult {
         val order = backendOrder(preference)
         Log.i(TAG, "后端尝试顺序: $order (pref=$preference)")
@@ -219,11 +226,13 @@ class BackendManager(
                     // 提前标记当前后端：供性能浮窗在生成中查询此后端的 native 指标（tps 等）。
                     // 失败回退时会被下一个成功后端覆盖；全失败时无生成，指标亦无意义。
                     lastUsedBackend = type
-                    // MNN 后端用模型自带 chat 模板格式化消息列表
-                    val text = backend.generateStreamMessages(
+                    // MNN 后端用模型自带 chat 模板格式化消息列表。
+                    // 返回 GenerationSummary（文本走流式回调，调用方累加），透传流式批处理参数。
+                    val summary = backend.generateStreamMessages(
                         messages, maxTokens, temperature, topP, repeatPenalty, enableThinking, onToken,
+                        batchMaxBytes, batchMaxMs,
                     )
-                    return GenerationResult(text, type, reloadedThisCall)
+                    return GenerationResult(summary, type, reloadedThisCall)
                 } catch (ce: CancellationException) {
                     throw ce
                 } catch (e: Exception) {
@@ -271,6 +280,10 @@ class BackendManager(
 
     /** 当前活跃后端的指标（按 [lastUsedBackend] 取） */
     fun getActiveMetrics(): BackendMetrics = backendFor(lastUsedBackend).getBackendMetrics()
+
+    /** 当前活跃后端最近一次生成的遥测记录（Task 2）；供 LocalChatResult 汇总。三类后端均为 MnnBackend。 */
+    fun lastTurnRecord(): InferenceTurnRecord? =
+        (backendFor(lastUsedBackend) as? MnnBackend)?.lastTurnRecord
 
     /** 当前是否有推理在进行（供性能浮窗决定取 native 实时 tps 还是归零）*/
     fun isGenerating(): Boolean = generating
@@ -371,7 +384,9 @@ class BackendManager(
     }
 
     data class GenerationResult(
-        val text: String,
+        /** native 返回的 GenerationSummary（null=摘要解析失败/未走 native）。全文不再整份携带，
+         *  由 LocalChatProvider 作为唯一累加器拼接；此摘要仅供指标/完成原因上报。 */
+        val summary: NativeGenerationSummary? = null,
         val usedBackend: BackendType,
         /** 本次推理是否触发了模型(重新)加载（冷启动首条 / 配置变更 / 后端切换均为 true）。 */
         val reloaded: Boolean = false,

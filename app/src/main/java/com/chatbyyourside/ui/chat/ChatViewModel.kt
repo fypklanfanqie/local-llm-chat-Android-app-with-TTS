@@ -11,6 +11,7 @@ import com.chatbyyourside.config.Characters
 import com.chatbyyourside.data.model.*
 import com.chatbyyourside.data.remote.ChatMessageDto
 import com.chatbyyourside.data.repository.ConversationRepository
+import com.chatbyyourside.provider.local.LocalChatProvider
 import com.chatbyyourside.util.MarkdownParser
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -473,8 +474,11 @@ class ChatViewModel(
                 val apiMessages = buildList {
                     add(ChatMessage(role = "system", content = char.systemPrompt))
                     addAll(resolvedHistory.map {
-                        // 云端历史含 <think>（注入的推理），回传前剥离（reasoning 不应回传给对话商）
-                        val c = if (isCloudProvider) MarkdownParser.stripThink(it.content) else it.content
+                        // 云端历史含 <think>（注入的推理），回传前剥离（reasoning 不应回传给对话商）。
+                        // 本地历史优先用 modelContent（模型原始输出，与 syncPromptCache 逐字节一致），
+                        // 保证 KV 前缀复用精确命中；旧消息/用户消息 modelContent 为 null 时回退 content。
+                        val c = if (isCloudProvider) MarkdownParser.stripThink(it.content)
+                            else (it.modelContent ?: it.content)
                         ChatMessage(role = it.role, content = c, multimodalImages = it.multimodalImages)
                     })
                 }
@@ -490,15 +494,16 @@ class ChatViewModel(
 
                 // 调用 Provider
                 val showThink = _uiState.value.deepThinkingEnabled
-                val provider = container.chatProviderManager.getActiveProvider()
-                val response = provider.chat(apiMessages) { accumulated ->
+                // 流式 UI 节流：见 STREAM_THROTTLE_MS。lastStreamRenderMs 在同一条消息的串行回调内访问，
+                // onChunk 由 nativeGenerateStream 同步回调（同一 IO 线程、一次一个），无需同步。
+                val onChunk: (String) -> Unit = { accumulated ->
                     // 性能浮窗：按 chunk 近似计数 token，实时更新 tok/s 与日志
                     genTokens++
                     val elapsedSec = (SystemClock.elapsedRealtime() - genStart) / 1000f
                     container.performanceCollector.updateTokenRate(if (elapsedSec > 0) genTokens / elapsedSec else 0f)
                     container.performanceCollector.updateLog("已生成 $genTokens tokens")
                     // 节流：仅首块或距上次重渲染 >= STREAM_THROTTLE_MS 时才重解析 Markdown + 重组列表。
-                    // 末块若被跳过，下方完成路径会用完整 response 覆盖并落库，不会丢字。
+                    // 末块若被跳过，下方完成路径会用完整 displayResponse 覆盖并落库，不会丢字。
                     val now = SystemClock.elapsedRealtime()
                     if (genTokens == 1 || now - lastStreamRenderMs >= STREAM_THROTTLE_MS) {
                         lastStreamRenderMs = now
@@ -521,10 +526,22 @@ class ChatViewModel(
                         }
                     }
                 }
+                val provider = container.chatProviderManager.getActiveProvider()
+                // 本地：走 chatTyped 取展示文本 + 模型原始文本（modelContent）；云端：返回展示文本，modelContent=null。
+                val displayResponse: String
+                val modelText: String?
+                if (provider is LocalChatProvider) {
+                    val localResult = provider.chatTyped(apiMessages, onChunk)
+                    displayResponse = localResult.displayText
+                    modelText = localResult.modelText
+                } else {
+                    displayResponse = provider.chat(apiMessages, onChunk)
+                    modelText = null
+                }
 
                 // 流式完成 -> 移除临时 streaming 消息，落库持久化
                 termReason = "完成: $genTokens tokens"
-                val assistantMessage = ChatMessage(role = "assistant", content = response)
+                val assistantMessage = ChatMessage(role = "assistant", content = displayResponse, modelContent = modelText)
                 container.chatRepository.addMessage(charId, convId, assistantMessage)
                 // 刷新会话 updatedAt，把它顶到列表最前
                 container.conversationRepository.touch(convId)
@@ -533,11 +550,11 @@ class ChatViewModel(
                 // 不依赖异步 Room Flow 回填——本地模型 prefill 完成到 DB invalidation 到达之间有可感知
                 // 延迟，若仅移除 streaming 而不补 assistant，用户会看到消息短暂消失（首次对话尤其明显）。
                 val finalShowThink = _uiState.value.deepThinkingEnabled
-                val assistantSrc = if (finalShowThink) response else MarkdownParser.stripThink(response)
+                val assistantSrc = if (finalShowThink) displayResponse else MarkdownParser.stripThink(displayResponse)
                 val assistantDisplay = DisplayMessage(
                     id = "msg-assistant-${assistantMessage.timestamp}",
                     role = "assistant",
-                    content = response,
+                    content = displayResponse,
                     segments = MarkdownParser.parseWithThink(assistantSrc, isStreaming = false),
                     sender = state.characterName.ifEmpty { "AI" },
                 )
@@ -551,7 +568,7 @@ class ChatViewModel(
                     val lastNonStream = msgs.lastOrNull { it.id != "streaming" }
                     val backfilled = lastNonStream != null &&
                         lastNonStream.role == "assistant" &&
-                        lastNonStream.content == response
+                        lastNonStream.content == displayResponse
                     if (streamIdx >= 0) {
                         if (backfilled) msgs.removeAt(streamIdx)
                         else msgs[streamIdx] = assistantDisplay

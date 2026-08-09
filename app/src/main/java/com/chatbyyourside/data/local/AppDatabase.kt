@@ -2,6 +2,7 @@ package com.chatbyyourside.data.local
 
 import android.content.Context
 import androidx.room.*
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.chatbyyourside.config.AppConfig
 import kotlinx.coroutines.flow.Flow
 
@@ -40,6 +41,11 @@ data class ChatHistoryEntity(
     val filesJson: String = "",     // JSON 数组
     val fileNamesJson: String = "", // JSON 数组
     val timestamp: Long,
+    /**
+     * 模型可见原始文本（Task 3）。本地助手消息存原始版本，重放历史时优先取它喂回模型，保证 KV 前缀精确；
+     * 旧库行 / 用户消息 / 云端消息为 null，调用方回退 [content]。v2->v3 迁移新增列，默认 null。
+     */
+    val modelContent: String? = null,
 )
 
 @Dao
@@ -131,7 +137,7 @@ interface ConversationDao {
 
 @Database(
     entities = [ChatHistoryEntity::class, ConversationEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -142,6 +148,18 @@ abstract class AppDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
+        /**
+         * v2 -> v3：为 chat_history 新增可空列 modelContent（模型可见原始文本）。
+         *
+         * 旧行该列为 null，调用方以 `modelContent ?: content` 兼容。此路径不再用
+         * fallbackToDestructiveMigration——历史消息含不可重建的用户对话，破坏性迁移会清空全部聊天记录。
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE chat_history ADD COLUMN modelContent TEXT")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 // 双重检查锁定：避免两个并发首次调用各建一个 RoomDatabase 实例，
@@ -150,7 +168,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "rhodes_chat.db"
-                ).fallbackToDestructiveMigration().build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_2_3).build().also { INSTANCE = it }
             }
         }
     }

@@ -1,6 +1,7 @@
 package com.chatbyyourside.llm.backend
 
 import com.chatbyyourside.data.model.ChatMessage
+import com.chatbyyourside.llm.metrics.NativeGenerationSummary
 
 /**
  * 推理后端抽象接口
@@ -67,11 +68,21 @@ interface InferenceBackend {
      *
      * MNN 后端把 [messages] 交给 MNN，由模型自带 chat 模板格式化（支持 Qwen/Llama/Gemma/Phi 等多模板）。
      *
+     * 本方法**不累积**完整回复：每个 delta 经 [onToken] 实时转发，[onToken] 返回 false 表示策略
+     * 截断（后端设 abort、记 [completionReason] 为 POLICY_TRUNCATION）。完整回复由调用方
+     * [com.chatbyyourside.provider.local.LocalChatProvider] 作为唯一累加器拼接。
+     *
      * @param messages 完整对话历史（system + user/assistant 轮次）
      * @param enableThinking 是否启用深度思考。经 set_config 注入 jinja context `enable_thinking`，
      *        控制推理模型（Qwen3/R1）chat 模板是否生成 `<think>` 推理段；运行时生效，无需重载模型。
      *        无该分支的模板（Llama/Gemma）忽略，无害。
-     * @return 完整生成文本
+     * @param onToken 流式回调；返回 false 触发策略截断（abort + POLICY_TRUNCATION）。
+     * @param batchMaxBytes native 流式批处理缓冲上限（字节）。首个完整可见字符立即回调，
+     *        其余按字节或时间达标批量 flush（首 delta 即时性 + 回调次数削减）。Task 6 性能模式
+     *        接入前用 Balanced 默认 256。
+     * @param batchMaxMs native 流式批处理缓冲时间上限（ms）。Balanced 16；Maximum Speed 24–32。
+     * @return native 返回的紧凑版本化 GenerationSummary（[NativeGenerationSummary.parse] 校验过的；
+     *         解析失败/未走 native 返回 null）
      */
     suspend fun generateStreamMessages(
         messages: List<ChatMessage>,
@@ -81,7 +92,15 @@ interface InferenceBackend {
         repeatPenalty: Float,
         enableThinking: Boolean,
         onToken: (String) -> Boolean,
-    ): String
+        batchMaxBytes: Int = DEFAULT_BATCH_MAX_BYTES,
+        batchMaxMs: Int = DEFAULT_BATCH_MAX_MS,
+    ): NativeGenerationSummary?
+
+    /** 流式批处理 Balanced 默认参数（Task 6 性能模式接入前的稳定取值，与设计文档 §流式行一致）。 */
+    companion object {
+        const val DEFAULT_BATCH_MAX_BYTES = 256
+        const val DEFAULT_BATCH_MAX_MS = 16
+    }
 
     /** 中断当前生成（非阻塞，下一轮 token 前检测） */
     suspend fun stopGeneration()
@@ -122,13 +141,14 @@ enum class BackendPreference(val storageKey: String, val displayName: String) {
 /**
  * 后端性能指标。
  * @param tokensPerSecond 当前生成速度（tokens/s）
- * @param gpuUtilization GPU/NPU 占用率近似值 0..1（CPU 后端恒为 0）
+ * @param gpuUtilization GPU/NPU 占用率近似值 0..1；不可用时为 null（CPU 后端恒为 null，
+ *        OpenCL/QNN 后端目前亦无可靠读取口径，统一以 null 表示 N/A，不再使用 0.85f 假值）
  * @param memoryUsedMB 占用内存近似值（MB）
  * @param backendName 来源后端名
  */
 data class BackendMetrics(
     val tokensPerSecond: Float,
-    val gpuUtilization: Float,
+    val gpuUtilization: Float?,
     val memoryUsedMB: Long,
     val backendName: String,
 )

@@ -110,6 +110,14 @@ android {
     androidResources {
         noCompress.clear()
     }
+
+    // 单元测试：对调用到 Android 桩（SystemClock/Context 等）的纯 Kotlin 代码返回默认值，
+    // 避免抛 "Method ... not mocked"。遥测统计等纯逻辑仍走真实实现。
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -165,4 +173,13 @@ dependencies {
 
     // WorkManager (角色问候：后台定时主动发消息，跨重启存活)
     implementation(libs.androidx.work.runtime.ktx)
+
+    // Testing（Task 2 遥测基线）
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.androidx.room.testing)
+    testImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.room.testing)
 }

@@ -1,6 +1,7 @@
 package com.chatbyyourside.provider.local
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.config.Characters
@@ -9,6 +10,7 @@ import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.DEFAULT_MNN_MODELS
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.llm.CpuBoostController
+import com.chatbyyourside.llm.IncrementalScriptDetector
 import com.chatbyyourside.llm.InferenceThreadOptimizer
 import com.chatbyyourside.llm.ThermalMonitor
 import com.chatbyyourside.llm.backend.BackendManager
@@ -60,10 +62,23 @@ class LocalChatProvider(
 
     override val type: ChatProviderType = ChatProviderType.LOCAL
 
+    /** ChatProvider 接口：返回展示文本（本地历史精确复用走 [chatTyped] 取 modelText）。 */
     override suspend fun chat(
         messages: List<ChatMessage>,
         onChunk: (String) -> Unit,
-    ): String {
+    ): String = chatTyped(messages, onChunk).displayText
+
+    /**
+     * 本地聊天（类型化结果，Task 3 Step 4）：分离展示文本与模型原始文本。
+     *
+     * - [LocalChatResult.displayText]：经 `<think>` 折叠装饰的展示文本，存 `content`、驱动 UI。
+     * - [LocalChatResult.modelText]：模型原始输出（与 native `syncPromptCache()` 逐字节一致），存 `modelContent`，
+     *   重放本地历史时优先取它喂回 MNN，保证 KV 前缀复用精确命中。展示装饰永不进入 toMessagesJson。
+     */
+    suspend fun chatTyped(
+        messages: List<ChatMessage>,
+        onChunk: (String) -> Unit,
+    ): LocalChatResult {
         // 1. 确保模型已选定并解析路径（MNN 目录的 config.json）
         val activeModelId = settings.getActiveLocalModelIdNow()
         if (activeModelId.isNullOrBlank()) {
@@ -144,8 +159,18 @@ class LocalChatProvider(
                     msg.copy(content = msg.content + RESPONSE_GUIDE)
                 } else msg
             }
+            // Task 4 Step 3：本地是**唯一**原始回复累加器——native 不再返回全文，[accumulated] 由
+            // 流式 delta 拼接；BackendManager 只带回 GenerationSummary（指标/完成原因）。
             val accumulated = StringBuilder()
             var truncated = false  // onToken 截断后置位，后续 token 不再累积、持续返回 false 让 native abort
+            // 增量剧本检测（Task 4 Step 5）：每 token 只扫新增区间 + 最长角色名重叠窗口（O(1) 空间、
+            // 无重扫），替代旧实现每块对全文 [indexOf] 的 O(n²)。cutAbsoluteIndex 与 [accumulated] 下标
+            // 对齐（同序从空喂入）。
+            val scriptDetector = IncrementalScriptDetector(SCRIPT_NAMES)
+            // Task 4 Step 6：`<think>` 装饰仅在渲染节流放行时进行（首 delta 必发保证即时性）。
+            // 原生批处理已削减回调次数，此处再避免每个批次都整串 toString + renderLocalThink；
+            // 末批被跳过不影响最终落库（完成路径用 displayText 覆盖流式气泡）。
+            var lastRenderMs = 0L
             val result = backendManager.generate(
                 modelPath = modelPath,
                 messages = enhancedMessages,
@@ -161,18 +186,22 @@ class LocalChatProvider(
                 onToken = { token ->
                     if (!truncated) {
                         accumulated.append(token)
-                        // 兜底截断：累积文本出现「角色名：」多角色剧本标记 -> 截到标记前并停止。
+                        // 兜底截断：增量检测「角色名：」多角色剧本标记 -> 截到标记前并停止。
                         // 模型遵守 system 规范时不会触发；不遵守时此为硬性防线，避免长篇剧本耗满 maxTokens。
-                        val cutPos = findScriptCutPosition(accumulated)
-                        if (cutPos >= 0) {
+                        val cutPos = scriptDetector.append(token).cutAbsoluteIndex
+                        if (cutPos != null) {
                             accumulated.setLength(cutPos)
                             truncated = true
                         }
                         // 折叠包装：补回起始 <think> 使 parseWithThink 能把推理段识别为可折叠 Think 段。
                         // 流式与最终落库共用同一 [renderLocalThink] 逻辑，保证「输出中可折叠」与
                         // 「输出完可折叠」一致（修复后者在未见 </think> 时丢失起始 <think> 变纯文本）。
-                        val raw = accumulated.toString()
-                        onChunk(renderLocalThink(raw, shouldFoldThink))
+                        // 首 delta 或渲染节流放行（或截断后强制刷新最终态）时才构造装饰串。
+                        val now = SystemClock.elapsedRealtime()
+                        if (lastRenderMs == 0L || now - lastRenderMs >= RENDER_THROTTLE_MS || truncated) {
+                            lastRenderMs = now
+                            onChunk(renderLocalThink(accumulated.toString(), shouldFoldThink))
+                        }
                     }
                     // false -> MnnBackend 设 MnnBridge.abort=true -> native stepping 1 token 内停。
                     // 截断后持续返回 false 确保 abort 生效（native 可能再推 1 个 token 才检测 shouldAbort）。
@@ -192,14 +221,29 @@ class LocalChatProvider(
 
             Log.i(TAG, "生成完成，使用后端: ${result.usedBackend.displayName}")
 
-            // 优先使用流式累积的文本，否则回退 native 返回值，再回退占位文案。
+            // 本地是唯一累加器：全文来自流式拼接（native 不再返回全文），空则占位文案。
             // 折叠包装落库：与流式展示共用同一 [renderLocalThink] 逻辑，使历史消息重新渲染时仍可折叠
             // （修复「输出中可折叠、输出完不可折叠」--之前未见 </think> 时落库不补起始 <think>，
             // parseWithThink 失配变纯文本）。被 max_tokens 截断在思考中途时保留未闭合 <think>，
             // 半截思考仍可折叠查看、不泄漏到正文。
             val finalRaw = accumulated.toString()
             val finalText = renderLocalThink(finalRaw, shouldFoldThink)
-            finalText.ifBlank { result.text.ifBlank { "(本地模型未生成回复)" } }
+            val displayText = finalText.ifBlank { "(本地模型未生成回复)" }
+            // 原始模型输出（与 native syncPromptCache 逐字节一致）：本地累加器即最终原始文本。
+            val modelText = finalRaw
+            val record = backendManager.lastTurnRecord()
+            LocalChatResult(
+                displayText = displayText,
+                modelText = modelText,
+                generation = GenerationSummary(
+                    backend = result.usedBackend,
+                    reloaded = result.reloaded,
+                    generatedTokens = record?.generatedTokens ?: 0,
+                    decodeTps = record?.decodeTps,
+                    kvReuse = record?.kvReuse,
+                    completionReason = record?.completionReason,
+                ),
+            )
         }
     }
 
@@ -238,6 +282,10 @@ class LocalChatProvider(
         /** DataStore .first() 超时阈值（ms）。国产 ROM 文件 I/O 被拦截时避免永久挂起。 */
         private const val DATASTORE_TIMEOUT_MS = 5000L
 
+        /** 流式渲染节流（ms）：`<think>` 装饰与 onChunk 仅在该间隔放行时构造（Task 4 Step 6）。
+         *  与 ChatViewModel.STREAM_THROTTLE_MS(30) 对齐；首 delta 无条件放行保证即时性。 */
+        private const val RENDER_THROTTLE_MS = 30L
+
         /** 本地小模型输出规范：约束单角色简短回复、禁剧本格式。追加到 system prompt（仅本地）。
          *  针对小模型角色扮演「上头」编多角色剧本并无限生成的根因（见 .claude/plans/fix-llm-not-stopping.md）。 */
         private const val RESPONSE_GUIDE = "\n\n【输出规范（严格遵守）】\n" +
@@ -252,20 +300,6 @@ class LocalChatProvider(
          */
         private val SCRIPT_NAMES: List<String> = buildList {
             addAll(Characters.ALL.values.map { it.name })
-        }
-
-        /**
-         * 兜底截断：检测 [text] 中最早出现的「角色名＋全角冒号」剧本标记，返回其起始下标（截到此处）。
-         * 只匹配全角冒号「：」--半角「:」易误伤时间 10:30 / 比例 1:2；全角冒号在正常单角色回复里
-         * 极稀有，误伤概率极低。无标记返回 -1。
-         */
-        private fun findScriptCutPosition(text: CharSequence): Int {
-            var earliest = -1
-            for (name in SCRIPT_NAMES) {
-                val idx = text.indexOf("$name：")
-                if (idx >= 0 && (earliest < 0 || idx < earliest)) earliest = idx
-            }
-            return earliest
         }
 
         /**

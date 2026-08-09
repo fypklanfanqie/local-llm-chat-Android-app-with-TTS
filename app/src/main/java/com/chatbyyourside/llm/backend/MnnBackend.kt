@@ -5,6 +5,10 @@ import android.os.SystemClock
 import android.util.Log
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
+import com.chatbyyourside.llm.metrics.CompletionReason
+import com.chatbyyourside.llm.metrics.InferenceTelemetry
+import com.chatbyyourside.llm.metrics.InferenceTurnRecord
+import com.chatbyyourside.llm.metrics.NativeGenerationSummary
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -12,6 +16,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * MNN 推理后端（[InferenceBackend] 实现）
@@ -61,6 +66,16 @@ class MnnBackend(
     private var currentTps: Float = 0f
     private var genStartTime: Long = 0L
     private var tokenCount: Int = 0
+    /** 流式回调累计 UTF-8 字节数（核对拼接完整性 / Task 4 流式批处理用）。 */
+    private var callbackBytes: Long = 0L
+    /** 每次生成的递增序号，用于遥测 generationId。 */
+    private val generationCounter = AtomicInteger(0)
+    /** 遥测原子存储：onToken 写实时快照供 overlay 读取，finally 写最终记录。 */
+    private val telemetry = InferenceTelemetry()
+    /** 最近一次生成的最终遥测记录（供 Task 9 健康库等消费；本任务仅产出与日志）。 */
+    @Volatile
+    var lastTurnRecord: InferenceTurnRecord? = null
+        private set
 
     override val backendType: BackendType = when (mode) {
         MnnMode.CPU -> BackendType.MNN_CPU
@@ -155,59 +170,119 @@ class MnnBackend(
         repeatPenalty: Float,
         enableThinking: Boolean,
         onToken: (String) -> Boolean,
-    ): String = mutex.withLock {
+        batchMaxBytes: Int = InferenceBackend.DEFAULT_BATCH_MAX_BYTES,
+        batchMaxMs: Int = InferenceBackend.DEFAULT_BATCH_MAX_MS,
+    ): NativeGenerationSummary? = mutex.withLock {
         if (handle == 0L) throw IllegalStateException("MNN 后端未加载模型")
         currentCoroutineContext().ensureActive()
 
         val messagesJson = MnnBridge.toMessagesJson(messages)
         tokenCount = 0
+        callbackBytes = 0L
         currentTps = 0f
         genStartTime = SystemClock.elapsedRealtime()
         isGenerating = true
+        telemetry.beginGeneration(
+            generationId = "${mode.name.lowercase()}-${generationCounter.incrementAndGet()}",
+            requestedMode = null,   // Task 6 解析性能模式后回填
+            effectiveMode = null,
+            backend = backendType,
+            startedElapsedMs = genStartTime,
+        )
 
-        val fullText = StringBuilder()
         // CPU 提频：包住 nativeGenerateStream（同一推理线程 begin/close）。
         // onToken 与 nativeGenerateStream 同线程（同步 JNI 回调），故 reportWorkDuration 的 tid 一致。
         val boost = cpuBoostController.beginInference(CpuBoostController.TARGET_WORK_DURATION_NS)
         var lastTokenTimeNs = 0L
+        // Task 4 Step 3：本方法不累积完整回复（全文拼接唯一归 LocalChatProvider）。
+        // policyStopped 标记策略截断（onToken 返回 false），完成原因优先级高于 USER_CANCEL。
+        var policyStopped = false
+        // 批处理后回调携带 native 实时 gen_len（真实 token 数），token 数与回调（批次）次数解耦：
+        // tokenCount=gen_len 供实时 tps；callbackCount=批次次数入快照。
+        var callbackCount = 0
         // 先复位 abort 再装 onToken：若复位在装回调之后，装回调与复位之间收到 stopGeneration
         // (abort=true) 会被复位覆盖，取消信号丢失、生成本应停止却跑到结束。
         MnnBridge.abort = false
-        MnnBridge.onToken = { token ->
-            tokenCount++
+        MnnBridge.onToken = { token, generatedTokens ->
+            callbackCount++
+            callbackBytes += token.toByteArray(Charsets.UTF_8).size.toLong()
+            tokenCount = generatedTokens   // native 实时 gen_len（绝对累计，非增量）
             val now = System.nanoTime()
             if (lastTokenTimeNs > 0L) {
                 boost?.reportWorkDuration(now - lastTokenTimeNs)
             }
             lastTokenTimeNs = now
-            val elapsed = (SystemClock.elapsedRealtime() - genStartTime) / 1000f
+            val nowElapsed = SystemClock.elapsedRealtime()
+            val elapsed = (nowElapsed - genStartTime) / 1000f
             if (elapsed > 0f) currentTps = tokenCount / elapsed
-            fullText.append(token)
+            // 发布 DECODE 实时快照（原子）：overlay 500ms 读它，零 native 调用。
+            telemetry.onDecodeToken(
+                tokenCount = tokenCount,
+                callbackCount = callbackCount,
+                callbackBytes = callbackBytes,
+                currentTps = if (elapsed > 0f) currentTps else null,
+                nowElapsedMs = nowElapsed,
+            )
             val cont = onToken(token)
-            if (!cont) MnnBridge.abort = true
+            if (!cont) {
+                policyStopped = true
+                MnnBridge.abort = true
+            }
         }
 
+        var completedNormally = false
+        var parsed: NativeGenerationSummary? = null
         try {
-            val bytes = bridge.nativeGenerateStream(
+            // native 不再返回完整回复，只回紧凑 GenerationSummary JSON；文本走流式回调。
+            val summaryJson = bridge.nativeGenerateStream(
                 handle, messagesJson, maxTokens, temperature, topP, repeatPenalty, enableThinking,
+                batchMaxBytes, batchMaxMs,
             )
-            val nativeFull = String(bytes, Charsets.UTF_8)
-            fullText.toString().ifBlank { nativeFull }
+            completedNormally = true
+            parsed = NativeGenerationSummary.parse(summaryJson)
+            if (parsed == null) {
+                Log.e(TAG, "native GenerationSummary 解析失败: ${summaryJson.take(200)}")
+            }
+            parsed   // try/finally 表达式的值 = 摘要（供 BackendManager 指标上报）
         } finally {
+            val cancelled = MnnBridge.abort
             MnnBridge.onToken = null
             MnnBridge.abort = false
             isGenerating = false
             boost?.close()
-            // 汇总日志：tps + MNN 实测复用/前缀指标，便于核对多轮前缀复用是否生效。
-            // metrics=[tps, prefillUs, decodeUs, promptLen, genLen, reuseKv]
-            runCatching {
-                if (handle != 0L) {
-                    val m = bridge.nativeGetMetrics(handle)
-                    if (m != null && m.size >= 6) {
-                        Log.i(TAG, "生成结束 ${mode.displayName}: tps=${"%.1f".format(m[0])} " +
-                            "promptLen=${m[3].toInt()} genLen=${m[4].toInt()} reuseKv=${m[5].toInt()}")
-                    }
+            // 受控点（finally 内单次调用）：优先用摘要组装的指标数组（零二次 native 调用），
+            // 摘要不可用（解析失败/未走 native）才回退 nativeGetMetrics。overlay 永不在此并发读。
+            val nativeMetrics = parsed?.toMetricsArray() ?: runCatching {
+                if (handle != 0L) bridge.nativeGetMetrics(handle) else null
+            }.getOrNull()
+            // 完成原因优先级：策略截断 > 用户取消 > 后端失败 > 摘要原因（MAX_TOKENS/BACKEND_FAILURE/
+            // USER_CANCEL/EOS）。native best-effort 原因由摘要承载，Kotlin 侧有更高优先级推导。
+            val completionReason = when {
+                policyStopped -> CompletionReason.POLICY_TRUNCATION
+                cancelled -> CompletionReason.USER_CANCEL
+                !completedNormally || parsed == null -> CompletionReason.BACKEND_FAILURE
+                else -> when (parsed.completionReason) {
+                    CompletionReason.MAX_TOKENS.name -> CompletionReason.MAX_TOKENS
+                    CompletionReason.BACKEND_FAILURE.name -> CompletionReason.BACKEND_FAILURE
+                    CompletionReason.USER_CANCEL.name -> CompletionReason.USER_CANCEL
+                    else -> CompletionReason.EOS
                 }
+            }
+            lastTurnRecord = telemetry.finalize(
+                nowElapsedMs = SystemClock.elapsedRealtime(),
+                completionReason = completionReason,
+                nativeMetrics = nativeMetrics,
+                configHash = loadedConfigPath?.let { it.hashCode().toString(16) },
+            )
+            // 汇总日志：tps + 摘要实测复用/前缀/批处理指标，便于核对多轮前缀复用与回调削减是否生效。
+            if (parsed != null) {
+                Log.i(TAG, "生成结束 ${mode.displayName}: tps=${"%.1f".format(nativeMetrics?.get(0) ?: 0f)} " +
+                    "promptLen=${parsed.promptTokens} genLen=${parsed.generatedTokens} " +
+                    "reuseKv=${parsed.reuseKv} cb=${parsed.callbackCount} reason=$completionReason")
+            } else if (nativeMetrics != null && nativeMetrics.size >= 6) {
+                Log.i(TAG, "生成结束 ${mode.displayName}: tps=${"%.1f".format(nativeMetrics[0])} " +
+                    "promptLen=${nativeMetrics[3].toInt()} genLen=${nativeMetrics[4].toInt()} " +
+                    "reuseKv=${nativeMetrics[5].toInt()} reason=$completionReason")
             }
         }
     }
@@ -223,7 +298,7 @@ class MnnBackend(
         topP: Float,
         repeatPenalty: Float,
         onToken: (String) -> Boolean,
-    ): String = generateStreamMessages(
+    ): NativeGenerationSummary? = generateStreamMessages(
         listOf(ChatMessage(role = "user", content = prompt)),
         maxTokens, temperature, topP, repeatPenalty, enableThinking = true, onToken,
     )
@@ -256,16 +331,14 @@ class MnnBackend(
     }
 
     override fun getBackendMetrics(): BackendMetrics {
-        // 优先用 MNN LlmContext 的 decode_us/gen_seq_len 算 tps（更准）
-        val ctxTps = runCatching {
-            if (handle != 0L) {
-                val m = bridge.nativeGetMetrics(handle) // [tps, prefillUs, decodeUs, promptLen, genLen, reuseKv]
-                if (m != null && m.isNotEmpty()) m[0] else 0f
-            } else 0f
-        }.getOrDefault(0f)
+        // overlay 读取：仅用 onToken 回调期已算出的实时快照，绝不并发调用 nativeGetMetrics。
+        // 精确 native tps 在生成结束的 finally 受控点写入 [lastTurnRecord]。
+        val snap = telemetry.snapshot()
+        val tps = if (isGenerating) (snap?.currentTps ?: currentTps) else 0f
         return BackendMetrics(
-            tokensPerSecond = if (ctxTps > 0f) ctxTps else currentTps,
-            gpuUtilization = if (isGenerating && mode != MnnMode.CPU) 0.85f else 0f,
+            tokensPerSecond = tps,
+            // 无可靠 GPU/NPU 占用率读取口径，统一 N/A（不再用 0.85f 假值）。
+            gpuUtilization = null,
             memoryUsedMB = 0L,
             backendName = backendName,
         )

@@ -1,0 +1,74 @@
+package com.chatbyyourside.data.repository
+
+import com.chatbyyourside.data.local.ChatHistoryEntity
+import com.chatbyyourside.data.model.ChatMessage
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+
+/**
+ * ChatRepository 实体<->领域消息映射测试（Task 3 Step 1）。
+ *
+ * 纯 JVM 单测：映射函数 [toMessage]/[toEntity] 为顶层 internal 纯函数，无 Android 依赖。
+ * 核心断言：`modelContent` 精确持久化；旧行（modelContent=null）经 `modelContent ?: content` 兼容。
+ */
+class ChatRepositoryMappingTest {
+
+    @Test
+    fun toMessage_preservesModelContent() {
+        val entity = ChatHistoryEntity(
+            id = 1, characterId = "c1", conversationId = 1,
+            role = "assistant", content = "display", modelContent = "raw", timestamp = 100,
+        )
+        val msg = entity.toMessage()
+        assertEquals("raw", msg.modelContent)
+        assertEquals("display", msg.content)
+    }
+
+    @Test
+    fun toMessage_legacyRow_hasNullModelContent() {
+        val entity = ChatHistoryEntity(
+            id = 1, characterId = "c1", conversationId = 1,
+            role = "assistant", content = "display", modelContent = null, timestamp = 100,
+        )
+        val msg = entity.toMessage()
+        assertNull(msg.modelContent)
+        // 旧行兼容规则：modelContent ?: content（本地历史构造消息时用此式取模型可见文本）
+        assertEquals("display", msg.modelContent ?: msg.content)
+    }
+
+    @Test
+    fun toEntity_persistsModelContent() {
+        val msg = ChatMessage(role = "assistant", content = "display", modelContent = "raw", timestamp = 100)
+        val entity = msg.toEntity(characterId = "c1", conversationId = 1)
+        assertEquals("raw", entity.modelContent)
+        assertEquals("display", entity.content)
+    }
+
+    @Test
+    fun toEntity_userMessageHasNullModelContent() {
+        val msg = ChatMessage(role = "user", content = "hi", modelContent = null)
+        val entity = msg.toEntity(characterId = "c1", conversationId = 1)
+        assertNull(entity.modelContent)
+    }
+
+    @Test
+    fun roundTrip_preservesModelContent() {
+        // modelText 可能含 <think>...</think> 等 display 阶段会剥离的内容，须原样留存
+        val original = ChatMessage(
+            role = "assistant", content = "display",
+            modelContent = "raw<think>reasoning</think>answer", timestamp = 1,
+        )
+        val restored = original.toEntity("c1", 1).toMessage()
+        assertEquals(original.modelContent, restored.modelContent)
+        assertEquals(original.content, restored.content)
+    }
+
+    @Test
+    fun roundTrip_legacyNullModelContent_fallsBackToContent() {
+        val original = ChatMessage(role = "assistant", content = "display", modelContent = null)
+        val restored = original.toEntity("c1", 1).toMessage()
+        assertNull(restored.modelContent)
+        assertEquals("display", restored.modelContent ?: restored.content)
+    }
+}
