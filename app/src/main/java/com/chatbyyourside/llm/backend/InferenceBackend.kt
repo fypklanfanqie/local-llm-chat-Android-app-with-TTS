@@ -42,26 +42,21 @@ interface InferenceBackend {
     val lastErrorMessage: String?
 
     /**
-     * 加载模型并初始化后端。
+     * 加载模型并初始化后端（Task 7）。
+     *
+     * 运行时配置由 [com.chatbyyourside.llm.profile.InferenceProfileResolver] 生成并规范化为
+     * [nativeConfigJson]，[loadConfigHash] 是其唯一重载指纹：同路径 + 同哈希已加载则热复用，
+     * 否则按新配置重建。采样参数（temperature/topP/repeatPenalty）已内含于配置 JSON。
+     *
      * @param modelPath `.mnn` 目录的 `config.json` 路径
-     * @param contextLength 上下文长度
-     * @param threads CPU 线程数
-     * @param lookahead CPU 模式下是否启用 lookahead n-gram 投机解码（仅 MNN CPU 后端生效；
-     *        非 cpu 后端忽略）。改值需重载模型才生效。
-     * @param temperature 采样温度。MNN 采样器在 load() 内一次性构建，须在加载前传入才能生效；
-     *        改值由 [BackendManager] 纳入重载指纹，触发下次重载。
-     * @param topP top-p 采样（MNN 键 `topP`）。AppConfig 常量。
-     * @param repeatPenalty 重复惩罚（MNN 键 `repetition_penalty`）。AppConfig 常量。
-     * @return true 成功；false 失败（返回 false 触发回退）
+     * @param nativeConfigJson 规范化 native set_config JSON（由 resolver 生成）
+     * @param loadConfigHash 配置指纹；模型重载判定的唯一依据
+     * @return true 成功（可能为热复用）；false 失败（返回 false 触发回退）
      */
     suspend fun initialize(
         modelPath: String,
-        contextLength: Int,
-        threads: Int,
-        lookahead: Boolean,
-        temperature: Float,
-        topP: Float,
-        repeatPenalty: Float,
+        nativeConfigJson: String,
+        loadConfigHash: String,
     ): Boolean
 
     /**

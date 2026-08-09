@@ -127,6 +127,11 @@ class SettingsRepository(private val store: SettingsStore) {
         threads: Int, contextLen: Int, backend: BackendPreference, lookahead: Boolean, temperature: Float,
     ) = store.acknowledgeLlmConfig(threads, contextLen, backend, lookahead, temperature)
 
+    /** 最近一次成功加载实际应用的 plan 配置哈希（Task 7）。 */
+    val llmLastConfigHash: Flow<String?> = store.llmLastConfigHash
+
+    suspend fun setLlmLastConfigHash(hash: String?) = store.setLlmLastConfigHash(hash)
+
     /** 同步获取当前 API 配置（阻塞读取 Flow 首值，5s 超时返回默认配置）。
      *  国产 ROM（MIUI/EMUI/ColorOS）的电池优化可能拦截 DataStore 文件 I/O 导致 .first() 永久挂起；
      *  withTimeoutOrNull 保证 UI 不卡死。 */

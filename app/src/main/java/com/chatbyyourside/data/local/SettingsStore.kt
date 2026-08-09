@@ -106,6 +106,8 @@ class SettingsStore(private val context: Context) {
         val LLM_LAST_BACKEND = stringPreferencesKey("llm_last_backend")
         val LLM_LAST_LOOKAHEAD = booleanPreferencesKey("llm_last_lookahead")
         val LLM_LAST_TEMPERATURE = floatPreferencesKey("llm_last_temperature")
+        // Task 7：最近一次成功加载实际应用的 plan loadConfigHash（唯一重载指纹）。
+        val LLM_LAST_CONFIG_HASH = stringPreferencesKey("llm_last_config_hash")
     }
 
     // ===== Theme Mode =====
@@ -560,6 +562,17 @@ class SettingsStore(private val context: Context) {
             p[Keys.LLM_LAST_BACKEND] = backend.storageKey
             p[Keys.LLM_LAST_LOOKAHEAD] = lookahead
             p[Keys.LLM_LAST_TEMPERATURE] = temperature
+        }
+    }
+
+    /** 最近一次成功加载实际应用的 plan 配置哈希（Task 7）；供诊断/后续健康记录。 */
+    val llmLastConfigHash: Flow<String?> = context.settingsDataStore.data.map { p ->
+        p[Keys.LLM_LAST_CONFIG_HASH]
+    }
+
+    suspend fun setLlmLastConfigHash(hash: String?) {
+        context.settingsDataStore.edit { p ->
+            if (hash != null) p[Keys.LLM_LAST_CONFIG_HASH] = hash else p.remove(Keys.LLM_LAST_CONFIG_HASH)
         }
     }
 

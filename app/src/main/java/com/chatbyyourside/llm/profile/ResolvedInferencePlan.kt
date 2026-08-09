@@ -1,0 +1,92 @@
+package com.chatbyyourside.llm.profile
+
+import com.chatbyyourside.llm.backend.BackendType
+
+/**
+ * 运行时配置变体（Task 7）。
+ *
+ * 每种变体对应一份显式的 native set_config JSON：
+ * - [CPU_OPTIMIZED]：low precision/memory + Power_High + 热准入线程数（性能优先）。
+ * - [CPU_COMPATIBILITY]：保守 precision/memory/power 枚举，不依赖省略字段继承未知模型默认。
+ * - [OPENCL]：MNN 要求的 `thread_num=68` 编码。
+ */
+enum class RuntimeVariant {
+    CPU_OPTIMIZED,
+    CPU_COMPATIBILITY,
+    OPENCL,
+}
+
+/**
+ * 单次后端尝试（Task 7 Step 1）。
+ *
+ * [BackendManager] 按此列表显式加载，不再由 JNI 隐式执行 CPU 安全重试。
+ *
+ * @param backend 后端类型（MNN_CPU / MNN_GPU / MNN_NPU）。
+ * @param variant 运行时配置变体（同后端可有优化/兼容多份）。
+ * @param nativeConfigJson 规范化后的 native set_config JSON（键排序，逐字节传给 JNI）。
+ * @param loadConfigHash 模型加载指纹：canonical(nativeConfigJson) 的哈希，作为唯一重载指纹。
+ * @param requiresProbe 是否需先经 OpenCL 探测/健康记录确认（Task 后期 BackendHealthStore 接入）。
+ */
+data class BackendAttempt(
+    val backend: BackendType,
+    val variant: RuntimeVariant,
+    val nativeConfigJson: String,
+    val loadConfigHash: String,
+    val requiresProbe: Boolean,
+)
+
+/** 流式批处理策略（只影响 UI/桥接，不参与模型加载指纹）。 */
+data class StreamPolicy(
+    val batchMaxBytes: Int,
+    val batchMaxMs: Int,
+)
+
+/**
+ * 功耗/调度策略（Task 7 解析产出；具体行为由后续 power/thermal 任务执行）。
+ *
+ * @param cpuThreads 热准入后的 CPU 线程数（MAXIMUM_SPEED 不能绕过温控上限）。
+ * @param lookahead 是否启用投机解码（仅 CPU；MAXIMUM_SPEED 仅在基准证明收益后开启）。
+ * @param sustainedMode 是否开启 sustained performance（仅本次生成期间，finally 恢复）。
+ * @param aggressiveHint 性能提示目标是否激进（MAXIMUM_SPEED 更积极）。
+ */
+data class PowerPolicy(
+    val cpuThreads: Int,
+    val lookahead: Boolean,
+    val sustainedMode: Boolean,
+    val aggressiveHint: Boolean,
+)
+
+/** 模型驻留策略（后台/切云后多久释放）。 */
+data class ResidencyPolicy(
+    val keepAliveMs: Long,
+)
+
+/** 计划级安全降级原因（类型化，替代散落的布尔/字符串）。 */
+enum class DowngradeReason {
+    THERMAL,            // 高温降线程/降模式
+    MEMORY,             // 内存准入受限
+    OPENCL_UNHEALTHY,   // OpenCL 探测失败或健康记录异常
+    BACKEND_UNAVAILABLE,// 后端/变体不可用（如 QNN 标准版不可用、OpenCL 缺运行时）
+    UNSUPPORTED_SETTING,// 已保存但不再支持的选择（如 MNN_NPU），解析为 CPU
+}
+
+/**
+ * 每轮推理前由 [InferenceProfileResolver] 生成的不可变执行计划（Task 7）。
+ *
+ * 覆盖设计规格 §4.3：请求/实际模式、实际上下文与输出上限、流式/功耗/驻留策略、
+ * 有序后端尝试列表、全部安全降级原因。BackendManager 只按 [attempts] 显式执行。
+ */
+data class ResolvedInferencePlan(
+    val requestedMode: InferencePerformanceMode,
+    val effectiveMode: InferencePerformanceMode,
+    val contextTokens: Int,
+    val maxOutputTokens: Int,
+    val streamPolicy: StreamPolicy,
+    val powerPolicy: PowerPolicy,
+    val residencyPolicy: ResidencyPolicy,
+    val attempts: List<BackendAttempt>,
+    val downgradeReasons: List<DowngradeReason>,
+) {
+    /** 首个可用尝试（期望执行的后端/变体）。 */
+    val firstAttempt: BackendAttempt? get() = attempts.firstOrNull()
+}

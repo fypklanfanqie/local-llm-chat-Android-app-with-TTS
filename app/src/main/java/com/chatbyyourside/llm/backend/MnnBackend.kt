@@ -60,6 +60,9 @@ class MnnBackend(
     @Volatile
     private var handle: Long = 0L
     private var loadedConfigPath: String? = null
+    /** 当前已加载配置的 loadConfigHash（Task 7 唯一重载指纹）。 */
+    @Volatile
+    private var loadedConfigHash: String? = null
 
     @Volatile
     private var isGenerating: Boolean = false
@@ -111,12 +114,8 @@ class MnnBackend(
 
     override suspend fun initialize(
         modelPath: String,
-        contextLength: Int,
-        threads: Int,
-        lookahead: Boolean,
-        temperature: Float,
-        topP: Float,
-        repeatPenalty: Float,
+        nativeConfigJson: String,
+        loadConfigHash: String,
     ): Boolean = mutex.withLock {
         lastErrorMessage = null  // 清旧值，避免跨调用残留误导诊断
         if (!MnnBridge.nativeAvailable) {
@@ -130,21 +129,26 @@ class MnnBackend(
             Log.e(TAG, lastErrorMessage!!)
             return@withLock false
         }
-        // 先释放已有实例
+        // 热复用：同路径 + 同 loadConfigHash 已加载 -> 直接复用，不重建。
+        if (handle != 0L && loadedConfigPath == modelPath && loadedConfigHash == loadConfigHash) {
+            Log.i(TAG, "MNN 已加载且配置指纹一致，热复用 (${mode.displayName}, hash=${loadConfigHash.take(8)})")
+            return@withLock true
+        }
+
         freeHandleLocked()
 
         currentCoroutineContext().ensureActive()
-        Log.i(TAG, "加载 MNN 模型: $modelPath (backend=${mode.mnnBackendType}, ctx=$contextLength, threads=$threads, lookahead=$lookahead, temp=$temperature, topP=$topP, rep=$repeatPenalty)")
+        Log.i(TAG, "加载 MNN 模型: $modelPath (backend=${mode.mnnBackendType}, configHash=${loadConfigHash.take(8)})")
 
         val h = try {
-            bridge.nativeCreate(modelPath, mode.mnnBackendType, threads, contextLength, lookahead, temperature, topP, repeatPenalty)
+            bridge.nativeCreate(modelPath, nativeConfigJson)
         } catch (e: Throwable) {
             lastErrorMessage = "nativeCreate 异常: ${e.message}"
             Log.e(TAG, lastErrorMessage!!)
             0L
         }
         if (h == 0L) {
-            // nativeCreate 返回 0：取 native 侧真实失败原因（含 CPU 安全配置重试结果），供 BackendManager 汇总上报
+            // nativeCreate 返回 0：取 native 侧真实失败原因，供 BackendManager 汇总上报。
             val nativeErr = runCatching { bridge.nativeGetLastError() }.getOrDefault("").orEmpty()
             lastErrorMessage = "模型加载失败 (backend=${mode.mnnBackendType})" +
                 (if (nativeErr.isNotBlank()) ": $nativeErr" else "")
@@ -153,6 +157,7 @@ class MnnBackend(
         }
         handle = h
         loadedConfigPath = modelPath
+        loadedConfigHash = loadConfigHash
         lastErrorMessage = null
         Log.i(TAG, "MNN 后端就绪 (${mode.displayName})")
         true
@@ -332,11 +337,16 @@ class MnnBackend(
         if (handle != 0L) runCatching { bridge.nativeStop(handle) }
     }
 
+    /** 是否已加载同一路径同一配置指纹（热复用判定，Task 7）。 */
+    fun isLoadedWithConfigHash(path: String, hash: String): Boolean =
+        handle != 0L && loadedConfigPath == path && loadedConfigHash == hash
+
     override fun release() {
         if (handle != 0L) {
             runCatching { bridge.nativeRelease(handle) }
             handle = 0L
             loadedConfigPath = null
+            loadedConfigHash = null
         }
     }
 
@@ -345,6 +355,7 @@ class MnnBackend(
             runCatching { bridge.nativeRelease(handle) }
             handle = 0L
             loadedConfigPath = null
+            loadedConfigHash = null
         }
     }
 

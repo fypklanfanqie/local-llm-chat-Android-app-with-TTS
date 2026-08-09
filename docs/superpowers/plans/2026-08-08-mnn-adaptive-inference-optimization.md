@@ -564,6 +564,10 @@ git commit -m "feat: add local inference performance modes"
 
 ### Task 7: Resolve profiles into explicit backend attempts
 
+> **Status (2026-08-09):** Steps 1–5 source complete. `ResolvedInferencePlan`/`BackendAttempt`/`RuntimeVariant`/`StreamPolicy`/`PowerPolicy`/`ResidencyPolicy`/`DowngradeReason` in `llm/profile/ResolvedInferencePlan.kt`; `InferenceProfileResolver` (canonical native JSON via kotlinx.serialization, keys sorted, SHA-256 `loadConfigHash`, AUTO=OpenCL(healthy)>CPU_OPTIMIZED>CPU_COMPATIBILITY, QNN never in AUTO, explicit NPU resolves to CPU + UNSUPPORTED_SETTING, OpenCL thread_num=68, CPU_COMPATIBILITY conservative normal/normal/normal, thermal-admitted threads never bypassed by MAXIMUM_SPEED, stream/power/residency policies per mode). Tests `InferenceProfileResolverTest` (TDD; ordering/no-QNN-AUTO/hash/68/conservative) + `BackendManagerPlanTest` (execution sequence, first-delta fallback via GenerationExecutionControl; BackendManager not JVM-instantiable without Context). Native `nativeCreate(configPath, resolvedConfigJson)`: length+`schemaVersion`+backend_type validation, logs only hash/safe summary, passes JSON verbatim to `set_config`, hidden CPU safe-retry removed. `MnnBackend.initialize(modelPath, nativeConfigJson, loadConfigHash)` hot-reuses same path+hash; `loadConfigHash` is the sole reload fingerprint. `BackendManager.generate` executes `plan.attempts` (CPU optimized→compat without CPU blacklist; GPU/NPU session blacklist kept; first visible delta disables transparent fallback). `SettingsStore` adds `llm_last_config_hash`; provider acks applied hash. `git diff --check` clean. Pending: Step 6 CI (`testDebugUnitTest --tests '*InferenceProfileResolverTest' --tests '*BackendManagerPlanTest'`; local Gradle blocked by JDK 8); Step 7 commit awaits user authorization.
+
+### Task 7: Resolve profiles into explicit backend attempts
+
 **Files:**
 - Create: `app/src/main/java/com/chatbyyourside/llm/profile/ResolvedInferencePlan.kt`
 - Create: `app/src/main/java/com/chatbyyourside/llm/profile/InferenceProfileResolver.kt`

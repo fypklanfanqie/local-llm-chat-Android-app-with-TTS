@@ -195,13 +195,7 @@ class MnnBridge {
      */
     external fun nativeCreate(
         configPath: String,
-        backendType: String,
-        threads: Int,
-        contextLen: Int,
-        lookahead: Boolean,
-        temperature: Float,
-        topP: Float,
-        repeatPenalty: Float,
+        resolvedConfigJson: String,
     ): Long
 
     /**

@@ -7,6 +7,8 @@ import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.backend.MnnBackend.MnnMode
 import com.chatbyyourside.llm.metrics.CompletionReason
+import com.chatbyyourside.llm.profile.BackendAttempt
+import com.chatbyyourside.llm.profile.ResolvedInferencePlan
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
 import kotlinx.coroutines.CancellationException
@@ -78,27 +80,8 @@ class BackendManager(
      * temperature 纳入指纹：MNN 采样器在 load() 内一次性构建，温度改值须重载才生效（见 mnn_jni.cpp）。
      * topP/repeatPenalty 为 AppConfig 常量、不会变，故不纳入指纹（但仍随 initialize 传入在 load 时设置）。
      */
-    private data class LoadedConfig(val path: String, val contextLen: Int, val threads: Int, val temperature: Float, val lookahead: Boolean)
-
-    private val configs = mutableMapOf<BackendType, LoadedConfig?>()
-
     /** 本次 generate 是否触发了模型(重新)加载。 */
     private var reloadedThisCall: Boolean = false
-
-    /**
-     * lookahead 仅 CPU 后端生效（JNI 内 cpu-gated），故仅对 CPU 比对；GPU/NPU 忽略 lookahead 变化，
-     * 避免在非 CPU 后端上因切换该开关而白白重载多 GB 模型。temperature 对所有后端生效，一律比对。
-     */
-    private fun needsReload(
-        cfg: LoadedConfig?, path: String, contextLen: Int, threads: Int,
-        temperature: Float, lookahead: Boolean, type: BackendType,
-    ): Boolean {
-        if (cfg == null) return true
-        if (cfg.path != path || cfg.contextLen != contextLen || cfg.threads != threads) return true
-        if (cfg.temperature != temperature) return true
-        if (type == BackendType.MNN_CPU && cfg.lookahead != lookahead) return true
-        return false
-    }
 
     /** 后端类型 -> 实例 */
     private fun backendFor(type: BackendType): InferenceBackend = when (type) {
@@ -177,6 +160,17 @@ class BackendManager(
      *        由 [com.chatbyyourside.llm.profile.InferencePerformanceMode] 解析覆盖。
      * @param batchMaxMs native 流式批处理缓冲时间上限（ms）；Balanced 16。
      */
+    /**
+     * 执行一次流式推理（Task 7）：按 [ResolvedInferencePlan.attempts] 显式执行后端尝试。
+     *
+     * 运行时配置（线程/上下文/采样/变体枚举）全部由 plan 的各 [BackendAttempt] 承载；
+     * 流式批处理阈值取 plan.streamPolicy。CPU 优化失败推进到 CPU 兼容（不黑名单 CPU）；
+     * 首个可见 delta 后禁止透明换后端（见 [GenerationExecutionControl]）。
+     *
+     * @param modelPath `.mnn` 目录的 config.json 路径
+     * @param resolvedPlan [InferenceProfileResolver] 生成的不可变执行计划（必填）
+     * @param onToken 流式回调；返回 false 触发策略截断
+     */
     suspend fun generate(
         modelPath: String,
         messages: List<ChatMessage>,
@@ -184,22 +178,21 @@ class BackendManager(
         temperature: Float,
         topP: Float,
         repeatPenalty: Float,
-        contextLen: Int,
-        threads: Int,
-        preference: BackendPreference,
-        lookahead: Boolean,
         enableThinking: Boolean,
         onToken: (String) -> Boolean,
-        batchMaxBytes: Int = InferenceBackend.DEFAULT_BATCH_MAX_BYTES,
-        batchMaxMs: Int = InferenceBackend.DEFAULT_BATCH_MAX_MS,
         downgradeReasons: List<String> = emptyList(),
         executionControl: GenerationExecutionControl? = null,
+        resolvedPlan: ResolvedInferencePlan? = null,
     ): GenerationResult = generationMutex.withLock {
-        val order = backendOrder(preference)
-        Log.i(TAG, "后端尝试顺序: $order (pref=$preference)")
+        val plan = resolvedPlan ?: throw IllegalStateException("Task 7 起 generate 必须提供 resolvedPlan")
+        val attempts = plan.attempts
+        if (attempts.isEmpty()) throw IllegalStateException("resolvedPlan.attempts 为空")
+        Log.i(TAG, "执行计划: attempts=${attempts.joinToString { it.variant.name }} req=${plan.requestedMode}")
         var lastError: Exception? = null
-        // 各后端失败原因（display 名 + 诊断信息），全失败时汇总报错，定位部分芯片「所有后端加载失败」根因。
+        // 各尝试失败原因（变体名 + 诊断信息），全失败时汇总报错。
         val failureReasons = mutableListOf<String>()
+        val effectiveBatchBytes = plan.streamPolicy.batchMaxBytes
+        val effectiveBatchMs = plan.streamPolicy.batchMaxMs
         reloadedThisCall = false
         synchronized(lifecycleLock) {
             generating = true
@@ -207,15 +200,16 @@ class BackendManager(
             MnnBridge.abort = executionControl?.reason() != null
         }
         try {
-            for (type in order) {
-                if (isSessionFailed(type)) continue
+            for (attempt in attempts) {
                 if (executionControl?.canTryNextBackend() == false) break
+                // 会话级失败黑名单（GPU/NPU；CPU 不黑名单）：命中则跳过该尝试，避免每轮重载再失败。
+                if (isSessionFailed(attempt.backend)) continue
 
-                // 切到此后端前，释放可能驻留的其他后端模型，避免两套模型同时占内存
-                releaseOthers(keep = type)
+                // 切到此后端前，释放可能驻留的其他后端模型，避免两套模型同时占内存。
+                releaseOthers(keep = attempt.backend)
 
                 val ok = try {
-                    ensureLoaded(type, modelPath, contextLen, threads, temperature, topP, repeatPenalty, lookahead)
+                    ensureAttemptLoaded(attempt, modelPath)
                 } catch (ce: CancellationException) {
                     throw ce
                 } catch (e: Exception) {
@@ -224,13 +218,13 @@ class BackendManager(
                 }
 
                 if (!ok) {
-                    // initialize 失败（返回 false 或抛异常）：取该后端 lastErrorMessage（由 MnnBackend 在各失败点填充，
-                    // 含 native 侧真实原因 / CPU 安全配置重试结果）汇总，供全失败时详细上报。
-                    val reason = backendFor(type).lastErrorMessage ?: lastError?.message ?: "初始化失败"
-                    failureReasons += "${type.displayName}: $reason"
-                    Log.w(TAG, "$type 初始化失败: $reason")
-                    markSessionFailed(type)
-                    runCatching { releaseBackend(type) }
+                    val reason = backendFor(attempt.backend).lastErrorMessage ?: lastError?.message ?: "初始化失败"
+                    failureReasons += "${attempt.variant.name}: $reason"
+                    Log.w(TAG, "${attempt.variant.name} 初始化失败: $reason")
+                    // CPU 优化失败推进到 CPU 兼容（下一变体），不黑名单 CPU；GPU/NPU 失败记会话级黑名单。
+                    if (attempt.backend == BackendType.MNN_GPU) markSessionFailed(BackendType.MNN_GPU)
+                    if (attempt.backend == BackendType.MNN_NPU) markSessionFailed(BackendType.MNN_NPU)
+                    runCatching { releaseBackend(attempt.backend) }
                     continue
                 }
 
@@ -239,19 +233,16 @@ class BackendManager(
                 if (attemptMaxTokens <= 0) break
 
                 try {
-                    val backend = backendFor(type)
-                    // 提前标记当前后端：供性能浮窗在生成中查询此后端的 native 指标（tps 等）。
-                    // 失败回退时会被下一个成功后端覆盖；全失败时无生成，指标亦无意义。
-                    lastUsedBackend = type
-                    // MNN 后端用模型自带 chat 模板格式化消息列表。
-                    // 返回 GenerationSummary（文本走流式回调，调用方累加），透传流式批处理参数。
+                    val backend = backendFor(attempt.backend)
+                    // 提前标记当前后端：供性能浮窗在生成中查询此后的 native 指标（tps 等）。
+                    lastUsedBackend = attempt.backend
                     val summary = backend.generateStreamMessages(
                         messages, attemptMaxTokens, temperature, topP, repeatPenalty, enableThinking, onToken,
-                        batchMaxBytes, batchMaxMs, downgradeReasons, executionControl,
+                        effectiveBatchBytes, effectiveBatchMs, downgradeReasons, executionControl,
                     )
                     return@withLock GenerationResult(
                         summary = summary,
-                        usedBackend = type,
+                        usedBackend = attempt.backend,
                         reloaded = reloadedThisCall,
                         completionReason = executionControl?.reason()
                             ?: (backend as? MnnBackend)?.lastTurnRecord?.completionReason
@@ -266,16 +257,17 @@ class BackendManager(
                     }
                     if (executionControl?.canTryNextBackend() == false) {
                         return@withLock GenerationResult(
-                            usedBackend = type,
+                            usedBackend = attempt.backend,
                             reloaded = reloadedThisCall,
                             completionReason = executionControl.reason(),
                         )
                     }
-                    Log.w(TAG, "$type 生成失败，尝试下一后端: ${e.message}")
-                    failureReasons += "${type.displayName}: 生成失败 - ${e.message}"
-                    markSessionFailed(type)
+                    Log.w(TAG, "${attempt.variant.name} 生成失败，尝试下一后端: ${e.message}")
+                    failureReasons += "${attempt.variant.name}: 生成失败 - ${e.message}"
+                    if (attempt.backend == BackendType.MNN_GPU) markSessionFailed(BackendType.MNN_GPU)
+                    if (attempt.backend == BackendType.MNN_NPU) markSessionFailed(BackendType.MNN_NPU)
                     lastError = e
-                    runCatching { releaseBackend(type) }
+                    runCatching { releaseBackend(attempt.backend) }
                 }
             }
 
@@ -287,14 +279,13 @@ class BackendManager(
                 )
             }
 
-            // 所有后端均失败：汇总各后端原因详细报错（替代空洞「所有后端均初始化失败」），便于定位部分芯片失败根因。
-            val detail = if (failureReasons.isEmpty()) "所有后端均初始化失败"
-                else "本地模型加载失败（所有后端均失败）。${failureReasons.joinToString("；")}"
+            // 所有尝试均失败：汇总各变体原因详细报错。
+            val detail = if (failureReasons.isEmpty()) "所有后端尝试均初始化失败"
+                else "本地模型加载失败（所有后端尝试均失败）。${failureReasons.joinToString("；")}"
             Log.e(TAG, detail)
             throw lastError?.let { IllegalStateException(detail, it) } ?: IllegalStateException(detail)
         } finally {
             // 与 [release] 互斥：原子地清 generating 并取走 releasePending，决定是否本轮释放。
-            // 此时 native 调用已返回（finally 在 generateStreamMessages 之后），释放安全。
             val pending: Boolean
             synchronized(lifecycleLock) {
                 generating = false
@@ -384,23 +375,14 @@ class BackendManager(
 
     // ===== 内部：加载确保 / 释放 =====
 
-    /** 确保指定后端已加载指定模型（同模型同配置则复用，否则重载）。失败返回 false。 */
-    private suspend fun ensureLoaded(
-        type: BackendType, modelPath: String, contextLen: Int, threads: Int,
-        temperature: Float, topP: Float, repeatPenalty: Float, lookahead: Boolean,
-    ): Boolean {
-        val backend = backendFor(type)
-        val cfg = configs[type]
-        if (backend.isModelLoaded && !needsReload(cfg, modelPath, contextLen, threads, temperature, lookahead, type)) {
+    /** 确保指定后端按指定尝试加载（同路径同 loadConfigHash 热复用，否则重载）。失败返回 false。 */
+    private suspend fun ensureAttemptLoaded(attempt: BackendAttempt, modelPath: String): Boolean {
+        val backend = backendFor(attempt.backend)
+        if (backend.isModelLoaded && (backend as? MnnBackend)?.isLoadedWithConfigHash(modelPath, attempt.loadConfigHash) == true) {
             return true
         }
-        val ok = backend.initialize(modelPath, contextLen, threads, lookahead, temperature, topP, repeatPenalty)
-        if (ok) {
-            configs[type] = LoadedConfig(modelPath, contextLen, threads, temperature, lookahead)
-            reloadedThisCall = true
-        } else {
-            configs[type] = null
-        }
+        val ok = backend.initialize(modelPath, attempt.nativeConfigJson, attempt.loadConfigHash)
+        if (ok) reloadedThisCall = true
         return ok
     }
 
@@ -408,23 +390,20 @@ class BackendManager(
     private suspend fun releaseOthers(keep: BackendType) {
         if (keep != BackendType.MNN_CPU && mnnCpuBackend.isModelLoaded) {
             runCatching { mnnCpuBackend.release() }
-            configs[BackendType.MNN_CPU] = null
         }
         if (keep != BackendType.MNN_GPU && mnnGpuBackend.isModelLoaded) {
             runCatching { mnnGpuBackend.release() }
-            configs[BackendType.MNN_GPU] = null
         }
         if (keep != BackendType.MNN_NPU && mnnNpuBackend.isModelLoaded) {
             runCatching { mnnNpuBackend.release() }
-            configs[BackendType.MNN_NPU] = null
         }
     }
 
     private fun releaseBackend(type: BackendType) {
         when (type) {
-            BackendType.MNN_CPU -> { mnnCpuBackend.release(); configs[type] = null }
-            BackendType.MNN_GPU -> { mnnGpuBackend.release(); configs[type] = null }
-            BackendType.MNN_NPU -> { mnnNpuBackend.release(); configs[type] = null }
+            BackendType.MNN_CPU -> mnnCpuBackend.release()
+            BackendType.MNN_GPU -> mnnGpuBackend.release()
+            BackendType.MNN_NPU -> mnnNpuBackend.release()
         }
     }
 

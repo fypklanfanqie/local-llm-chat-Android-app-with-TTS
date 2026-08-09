@@ -406,34 +406,64 @@ static std::string build_failure_summary(const char *stage, const std::string &m
 // extern "C" 保证 JNI 名称查找不被 C++ name mangling 破坏（与 vulkan_jni.cpp 一致）。
 extern "C" {
 
+// ===== resolvedConfigJson 轻量校验辅助（Task 7）=====
+// 提取顶层字符串键值：`"key":"value"`（value 不含转义引号）。仅用于日志/backend 判定，
+// 不做完整 JSON 解析（完整解析由 MNN set_config 承担）。
+static std::string extract_json_string(const std::string &json, const std::string &key) {
+    std::string needle = "\"" + key + "\":\"";
+    size_t pos = json.find(needle);
+    if (pos == std::string::npos) return "";
+    size_t val_start = pos + needle.size();
+    size_t val_end = json.find('"', val_start);
+    if (val_end == std::string::npos) return "";
+    return json.substr(val_start, val_end - val_start);
+}
+
+static const size_t MAX_RESOLVED_CONFIG_BYTES = 8192;
+
 JNIEXPORT jlong JNICALL
 Java_com_chatbyyourside_llm_backend_MnnBridge_nativeCreate(
         JNIEnv *env, jobject thiz,
-        jstring config_path, jstring backend_type,
-        jint threads, jint context_len, jboolean lookahead,
-        jfloat temperature, jfloat top_p, jfloat repeat_penalty) {
+        jstring config_path, jstring resolved_config_json) {
 
     ensure_jni_cache(env);
 
     // 构建标记：logcat 见此串即确认新 libmnn_jni.so 已部署（不见 = APK 仍带旧 .so，需重装）。
-    // 用于排查"源码已改但症状依旧"--典型因 .cxx 缓存导致 .so 未真正重编（见 memory native-build-setup）。
-    MNN_LOGI("mnn_jni build: batch-2026-08-09 (StreamBatcher 批处理 + 摘要返回; stepping prefill+generate(1)/<eop>/syncPromptCache/eraseHistory; jinja enable_thinking; mixed_samplers+penalty)");
+    MNN_LOGI("mnn_jni build: batch-2026-08-09 (resolved plans: nativeCreate(configPath, resolvedConfigJson); schema 校验 + 原样 set_config; 移除 native 内隐式 CPU 安全重试)");
 
     const char *cfg = env->GetStringUTFChars(config_path, nullptr);
     if (!cfg) return 0;
     std::string config_str(cfg);
     env->ReleaseStringUTFChars(config_path, cfg);
 
-    const char *bt = env->GetStringUTFChars(backend_type, nullptr);
-    std::string backend_str(bt ? bt : "cpu");
-    if (bt) env->ReleaseStringUTFChars(backend_type, bt);
+    const char *rcj = env->GetStringUTFChars(resolved_config_json, nullptr);
+    std::string resolved_json(rcj ? rcj : "");
+    if (rcj) env->ReleaseStringUTFChars(resolved_config_json, rcj);
 
-    MNN_LOGI("createLLM config=%s backend=%s threads=%d ctx=%d lookahead=%d temp=%.3f topP=%.3f rep=%.3f",
-             config_str.c_str(), backend_str.c_str(), (int)threads, (int)context_len, (int)lookahead,
-             (float)temperature, (float)top_p, (float)repeat_penalty);
+    // 防御性 schema/长度校验（完整 JSON 解析交给 MNN set_config；此处只挡明显畸形）。
+    // Task 7：resolvedConfigJson 仅由 Kotlin InferenceProfileResolver 生成。
+    if (resolved_json.empty()) {
+        g_last_load_error = "resolvedConfigJson 为空";
+        MNN_LOGE("%s", g_last_load_error.c_str());
+        return 0;
+    }
+    if (resolved_json.size() > MAX_RESOLVED_CONFIG_BYTES) {
+        g_last_load_error = "resolvedConfigJson 超长(" + std::to_string(resolved_json.size()) + "B)";
+        MNN_LOGE("%s", g_last_load_error.c_str());
+        return 0;
+    }
+    if (resolved_json.find("\"schemaVersion\":1") == std::string::npos) {
+        g_last_load_error = "resolvedConfigJson schemaVersion 不匹配";
+        MNN_LOGE("%s", g_last_load_error.c_str());
+        return 0;
+    }
+    std::string backend_str = extract_json_string(resolved_json, "backend_type");
+    if (backend_str.empty()) backend_str = "cpu";
 
-    // 诊断：打模型自带 config.json / llm_config.json 内容，便于核对模型原始配置（本工程 set_config
-    // 已显式覆盖激进键，此日志仅用于核对/定位疑难）。
+    // 日志只打规范化配置的哈希摘要 + 安全摘要，不打完整 JSON（含 app 私有 cache_path 路径）。
+    size_t resolved_id = std::hash<std::string>{}(resolved_json);
+    MNN_LOGI("createLLM config=%s backend=%s resolved_id=%016zx len=%zu",
+             config_str.c_str(), backend_str.c_str(), resolved_id, resolved_json.size());
     log_model_config(config_str);
 
     Llm *llm = Llm::createLLM(config_str);
@@ -443,95 +473,11 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeCreate(
         return 0;
     }
 
-    // ===== set_config：按 MNN 官方文档「运行时配置」钉安全-快速默认（在 load() 前调用）=====
-    // set_config 走 config_.merge()，**覆盖**模型自带 config.json 与任何旧值，于
-    // load()->initRuntime()->setRuntimeHint() 生效。键值依据：
-    //   https://mnn-docs.readthedocs.io/en/latest/transformers/llm.html#id「运行时配置」「配置项」
-    //
-    // cache_path：MNN 的 OpenCL/QNN 运行时把 tuned-kernel 缓存写到此文件。不设则默认相对
-    //   `./mnn_cachefile.bin`，落在进程 CWD（Android 不可写）-> "Can't open file" + "Load Cache
-    //   file error"，且回写缓存时可能崩在 PipelineModule::load（见 memory mnn-crash-cachepath）。
-    //   放到模型目录内（config.json 所在目录，app 可写）消除该问题。
-    std::string cache_path;
-    size_t slash = config_str.find_last_of('/');
-    if (slash != std::string::npos) {
-        cache_path = config_str.substr(0, slash) + "/mnn_cachefile.bin";
-    } else {
-        cache_path = "mnn_cachefile.bin";
-    }
-
-    // thread_num：cpu/qnn 用用户值（Kotlin 侧已 min(用户, 大核数, 温度上限)，不超 4）。
-    //   ⚠️ opencl 后端必须 68：文档「当选择opencl后端时，thread_num需设为68」--此值非线程数，
-    //   而是 OpenCL buffer 存储 + tuning wide 模式编码。传用户值(4)会让 GPU 走错误模式，慢且异常。
-    int thread_num;
-    if (backend_str == "opencl") {
-        thread_num = 68;
-    } else {
-        thread_num = threads > 0 ? (int)threads : 4;
-    }
-
-    // 通用键（所有后端设；GPU/NPU 对 CPU 专属键遵循默认/忽略，设了无害）：
-    //  - precision="low"（文档默认，fp16/ARM82 路径，最快且安全）
-    //  - memory="low"（文档默认，开启运行时量化）
-    //  - use_mmap=true（文档「手机上建议设成true」，多 GB 权重按需 mmap，避免整权重读入 RAM 溢出）
-    //  - reuse_kv=true（文档多轮对话复用 KV cache，第 2 轮起免重新 prefill 全历史，多轮提速）
-    //  - attention_mode=8（文档「默认推荐」= FlashAttention + KV 不量化）。**显式钉 8 覆盖任何旧值/
-    //    模型值**：旧版本曾设 10（flash + Q/K/V int8 KV 量化），对未带 int8 KV scale 的 taobao-mnn
-    //    模型会损坏 KV 缓存 -> decode 退化为 "FFFF" 重复乱码。8 与 MNN 官方模型 config 默认一致，安全。
-    //    （若个别模型仍乱码，把 8 改 0=关 FlashAttention 单行回退。）
-    //  - dynamic_option=0（文档默认=不动态量化）。**显式钉 0 覆盖旧值**：旧版本曾设 2（激活 block
-    //    动态 int8 量化），在不支持构建上走慢速回退 -> prefill 数分钟级（"运算很久才输出"即此）。
-    //
-    // 采样参数（temperature/topP/repetition_penalty）+ mixed_samplers 管线：
-    //   MNN 采样器在 load() 内一次性构建（Sampler::Sampler -> configSampler -> buildPipeline），
-    //   故必须 load() 前 set_config 才生效（nativeGenerateStream 里再 set 已来不及）。
-    //   键名：topP/repetition_penalty 均生效--llmconfig.hpp 里 topP() 先查 top_p 再回退 topP，
-    //   repetition_penalty() 同理，驼峰/snake_case 等价。temperature 由用户设置传入且可变 ->
-    //   Kotlin BackendManager 纳入"重载指纹"，改值触发重载。topP/repeat_penalty 为常量。
-    //
-    //   ⚠️ 关键修复（复读循环根因）：sampler_type 默认 "mixed"，而 mixed_samplers 默认列表
-    //   {"topK","tfs","typical","topP","min_p","temperature"} **不含 "penalty"**（见 sampler.hpp
-    //   SamplerConfig::mixedSamplers）。buildPipeline() 只为列表内名字加 step，故默认情况下
-    //   stepPenalty 根本不进管线 -> repetition_penalty 设了也是 no-op。小模型无重复惩罚时必陷入
-    //   逐字复读循环（症状：复述 system prompt 角色卡身份段后无限循环，如"我是羽毛笔，本名拉菲艾拉…"）。
-    //   这里显式把 "penalty" 加进 mixed_samplers 修复之：configMixed 会自动把 penalty 移到队首，
-    //   在 topK/topP 等过滤前先施加重复惩罚（multiplicative logit /= rep，对正 logit）。
-    //   末位保留 "temperature" -> select_type=temperature（随机采样，非 greedy）。
-    std::string conf = "{\"backend_type\":\"" + backend_str +
-                       "\",\"thread_num\":" + std::to_string(thread_num) +
-                       ",\"cache_path\":\"" + cache_path + "\"" +
-                       ",\"precision\":\"low\""
-                       ",\"memory\":\"low\""
-                       ",\"use_mmap\":true"
-                       ",\"reuse_kv\":true"
-                       ",\"attention_mode\":8"
-                       ",\"dynamic_option\":0"
-                       ",\"temperature\":" + std::to_string((double)temperature) +
-                       ",\"topP\":" + std::to_string((double)top_p) +
-                       ",\"repetition_penalty\":" + std::to_string((double)repeat_penalty) +
-                       ",\"mixed_samplers\":[\"penalty\",\"topK\",\"tfs\",\"typical\",\"topP\",\"min_p\",\"temperature\"]";
-    if (backend_str == "cpu") {
-        // CPU 专属：power=high（BackendConfig Power_High，调度用大核）；kv_max_length 钉 context_len
-        // 防 KV 无界增长（MNN 无 kvcache_limit 键，kv_max_length 为最接近的运行时键；不生效亦无害）。
-        conf += ",\"power\":\"high\"";
-        if (context_len > 0) {
-            conf += ",\"kv_max_length\":" + std::to_string((int)context_len);
-        }
-        // Lookahead 投机解码（n-gram，无需 draft 模型）：用 prompt/历史 n-gram 预测若干 token，一次
-        // 前向验证，命中即批量产出 -> CPU 上重复/代码类文本 1.5–3×。值见 llmconfig.hpp。
-        // ⚠️ 默认关闭（见 Kotlin llmLookahead 设置项）：首轮无 n-gram 历史时 draft 全 miss，每步多跑
-        // draft_predict_length 个前向却只产 1 token，在慢模型上反而数倍拖慢首条回复。多轮重复文本再开。
-        // 须 load() 前设；改值需重载模型。
-        if (lookahead) {
-            conf += ",\"speculative_type\":\"lookahead\""
-                    ",\"ngram_match_maxlen\":4"
-                    ",\"draft_predict_length\":5";
-        }
-    }
-    conf += "}";
-    MNN_LOGI("set_config: %s", conf.c_str());
-    if (!llm->set_config(conf)) {
-        MNN_LOGW("set_config 失败（继续用模型默认）: %s", conf.c_str());
+    // 原样透传 resolvedConfigJson（键已由 Kotlin 规范化排序，含安全通用键与 backend 专属键）。
+    // schemaVersion 等未知键被 MNN config merge 忽略；已知键覆盖模型默认。采样器在 load() 前设好。
+    MNN_LOGI("set_config(resolved): id=%016zx", resolved_id);
+    if (!llm->set_config(resolved_json)) {
+        MNN_LOGW("set_config 失败（继续用模型默认）");
     }
 
     bool ok = false;
@@ -543,64 +489,18 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeCreate(
         MNN_LOGE("%s", load_err.c_str());
         ok = false;
     }
-    // CPU 安全配置重试：激进配置 precision:"low"(fp16/ARM82) 与 memory:"low"(运行时量化) 在不支持该
-    // 指令集/量化核的芯片上会导致 load() 失败。CPU 是 AUTO 回退链的末端兜底（恒在列），其失败即
-    // 「所有后端均加载失败」-> 本地模型完全不可用。此处销毁失败实例后用「最小兼容配置」重建重试一次：
-    //   丢 precision/memory（回退模型默认 fp32/无运行时量化，最兼容），
-    //   保留 attention_mode=8/dynamic_option=0（防 KV int8 乱码/激活动态量化拖慢）、
-    //       cache_path（防相对路径不可写崩在 PipelineModule::load）、
-    //       mixed_samplers+penalty（防小模型复读循环）、use_mmap/reuse_kv（控内存/多轮复用）。
-    // 仅 CPU 重试（GPU/NPU 失败本就回退 CPU；OpenCL/QNN 可用性问题换配置无益）。
-    bool used_safe_retry = false;
-    if (!ok && backend_str == "cpu") {
-        MNN_LOGW("CPU 首次 load 失败，销毁后用安全配置(无 fp16/运行时量化)重建重试");
-        Llm::destroy(llm);
-        llm = Llm::createLLM(config_str);
-        if (!llm) {
-            g_last_load_error = "安全配置重试: Llm::createLLM 返回 null";
-            MNN_LOGE("%s", g_last_load_error.c_str());
-            return 0;
-        }
-        std::string safe_conf = "{\"backend_type\":\"cpu\""
-            ",\"thread_num\":" + std::to_string(thread_num) +
-            ",\"cache_path\":\"" + cache_path + "\"" +
-            ",\"use_mmap\":true"
-            ",\"reuse_kv\":true"
-            ",\"attention_mode\":8"
-            ",\"dynamic_option\":0"
-            ",\"power\":\"high\""
-            ",\"temperature\":" + std::to_string((double)temperature) +
-            ",\"topP\":" + std::to_string((double)top_p) +
-            ",\"repetition_penalty\":" + std::to_string((double)repeat_penalty) +
-            ",\"mixed_samplers\":[\"penalty\",\"topK\",\"tfs\",\"typical\",\"topP\",\"min_p\",\"temperature\"]";
-        if (context_len > 0) {
-            safe_conf += ",\"kv_max_length\":" + std::to_string((int)context_len);
-        }
-        safe_conf += "}";
-        MNN_LOGI("安全配置 set_config: %s", safe_conf.c_str());
-        if (!llm->set_config(safe_conf)) {
-            MNN_LOGW("安全配置 set_config 失败（继续用模型默认）");
-        }
-        try {
-            ok = llm->load();
-            if (ok) { load_err.clear(); used_safe_retry = true; }
-        } catch (const std::exception &e) {
-            load_err = std::string("安全配置 Llm::load 异常: ") + e.what();
-            MNN_LOGE("%s", load_err.c_str());
-            ok = false;
-        }
-    }
+    // Task 7：不再于 native 内做 CPU 安全配置隐式重试——CPU 优化/兼容两档由 Kotlin resolver
+    // 生成两个 BackendAttempt，BackendManager 显式顺序尝试。
     if (!ok) {
         if (load_err.empty()) load_err = std::string("Llm::load() 失败 (backend=") + backend_str + ")";
         g_last_load_error = load_err;
-        MNN_LOGE("%s", g_last_load_error.c_str());
+        MNN_LOGE("%s", load_err.c_str());
         Llm::destroy(llm);
         return 0;
     }
 
     g_last_load_error.clear();
-    MNN_LOGI("MNN 模型加载成功 backend=%s%s", backend_str.c_str(),
-             (used_safe_retry ? " (经安全配置重试: 已回退 fp32/无运行时量化)" : ""));
+    MNN_LOGI("MNN 模型加载成功 backend=%s (resolved plan)", backend_str.c_str());
     return (jlong)llm;
 }
 

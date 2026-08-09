@@ -13,6 +13,7 @@ import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.GenerationSafetyPolicy
 import com.chatbyyourside.llm.IncrementalScriptDetector
+import com.chatbyyourside.llm.profile.InferenceProfileResolver
 import com.chatbyyourside.llm.InferenceThreadOptimizer
 import com.chatbyyourside.llm.PromptWindowPlanner
 import com.chatbyyourside.llm.PromptWindowResult
@@ -221,6 +222,19 @@ class LocalChatProvider(
                 startedElapsedMs = SystemClock.elapsedRealtime(),
             )
             activeExecutionControl.set(executionControl)
+            // Task 7：由性能模式/后端偏好/设备/热准入线程解析不可变执行计划（含每变体 native 配置）。
+            val resolvedPlan = InferenceProfileResolver(context.cacheDir, modelPath).resolve(
+                mode = performanceMode,
+                backendPreference = preference,
+                contextTokens = contextLen,
+                maxOutputTokens = promptPlan.reservedOutputTokens,
+                thermalAdmittedThreads = effectiveThreads,
+                lookahead = lookahead,
+                temperature = temperature,
+                topP = AppConfig.LLM.DEFAULT_TOP_P,
+                repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
+                openclHealthy = backendManager.mnnGpuSupported,
+            )
             val result = try {
                 coroutineScope {
                     // 请求级 watchdog：进度由 MnnBackend 回调按真实时间直接写入 control；本协程只判 deadline。
@@ -239,17 +253,14 @@ class LocalChatProvider(
                         backendManager.generate(
                             modelPath = modelPath,
                             messages = modelMessages,
-                            maxTokens = promptPlan.reservedOutputTokens,
+                            maxTokens = resolvedPlan.maxOutputTokens,
                             temperature = temperature,
                             topP = AppConfig.LLM.DEFAULT_TOP_P,
                             repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
-                            contextLen = contextLen,
-                            threads = effectiveThreads,
-                            preference = preference,
-                            lookahead = lookahead,
                             enableThinking = deepThinking,
                             downgradeReasons = listOfNotNull(promptPlan.downgradeReason),
                             executionControl = executionControl,
+                            resolvedPlan = resolvedPlan,
                             onToken = { token ->
                                 if (!truncated) {
                                     accumulated.append(token)
@@ -287,6 +298,8 @@ class LocalChatProvider(
                 )
             }
             settings.acknowledgeLlmConfig(userThreads, contextLen, preference, lookahead, temperature)
+            // Task 7：ack 实际应用的 plan 配置哈希（重载指纹），供诊断/后续健康记录。
+            settings.setLlmLastConfigHash(resolvedPlan.firstAttempt?.loadConfigHash)
 
             Log.i(TAG, "生成完成，使用后端: ${result.usedBackend.displayName}")
 
