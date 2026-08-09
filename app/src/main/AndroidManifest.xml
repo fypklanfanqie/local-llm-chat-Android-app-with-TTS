@@ -24,11 +24,6 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
-    <!-- OpenCL 探测（Task 10）：声明可选 vendor OpenCL 库；探测进程动态加载，缺库不崩溃。 -->
-    <uses-native-library
-        android:name="libOpenCL.so"
-        android:required="false" />
-
     <application
         android:name=".ChatApp"
         android:allowBackup="true"
@@ -40,6 +35,11 @@
         android:theme="@style/Theme.ChatByYourSide"
         android:usesCleartextTraffic="true"
         tools:targetApi="31">
+
+        <!-- OpenCL 探测（Task 10）：声明可选 vendor OpenCL 库；探测进程动态加载，缺库不崩溃。 -->
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
 
         <activity
             android:name=".MainActivity"
