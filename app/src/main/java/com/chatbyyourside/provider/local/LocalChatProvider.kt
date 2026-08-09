@@ -11,6 +11,7 @@ import com.chatbyyourside.data.model.DEFAULT_MNN_MODELS
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.GenerationExecutionControl
+import com.chatbyyourside.llm.ModelBundleValidator
 import com.chatbyyourside.llm.GenerationSafetyPolicy
 import com.chatbyyourside.llm.IncrementalScriptDetector
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
@@ -32,6 +33,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -131,6 +133,13 @@ class LocalChatProvider(
 
         val modelPath = ModelPathResolver.getLoadPath(context, activeModelId)
             ?: throw Exception("模型文件未找到，请先下载模型: $activeModelId")
+
+        // 2a. 模型包完整性校验（Task 12）：config 派生必需文件（graph/weight/tokenizer/...）存在、
+        //     非空、非分片、路径不逃逸。校验失败拒绝进入 native（绝不硬编码 verified=true）。
+        val validation = ModelBundleValidator.validate(File(modelPath).parentFile ?: File(modelPath))
+        if (!validation.valid) {
+            throw Exception("模型包校验失败：${validation.errors.joinToString("；")}")
+        }
 
         // 2. 检查 MNN 引擎 native 就绪（libMNN.so）
         if (!backendManager.mnnCpuSupported) {
