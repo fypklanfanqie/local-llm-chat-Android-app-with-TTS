@@ -20,10 +20,15 @@ import java.util.Locale
  */
 object LlmMemoryEstimator {
 
-    /** 模型维度 */
+    /** 模型维度（Task 13：KV-head-aware）。 */
     data class ModelDims(
         val hiddenSize: Int,
         val layerCount: Int,
+        /** 注意力头数（MHA 下 kvHeads == attentionHeads）。 */
+        val numAttentionHeads: Int = 0,
+        /** GQA 的 KV 头数（< attentionHeads 时 KV cache 显著更小）。 */
+        val numKeyValueHeads: Int = 0,
+        val headDim: Int = 0,
     )
 
     /** 内存估算结果 */
@@ -37,6 +42,29 @@ object LlmMemoryEstimator {
 
     /** K + V 两个向量 */
     private const val KV_FACTOR = 2L
+
+    /**
+     * KV cache 内存（Task 13 Step 1 公式）：
+     * `context × layers × 2(K/V) × num_key_value_heads × head_dim × bytes_per_element`
+     *
+     * GQA（kvHeads < attentionHeads）时显著小于 full-hidden-size 估算。维度不足时由调用方回退
+     * [kvCacheBytesFullHidden]。
+     */
+    fun kvCacheBytes(
+        contextTokens: Long,
+        layerCount: Int,
+        kvHeads: Int,
+        headDim: Int,
+        bytesPerElement: Long = BYTES_PER_ELEMENT,
+    ): Long = contextTokens * layerCount * KV_FACTOR * kvHeads * headDim * bytesPerElement
+
+    /** 兼容回退：kvHeads/headDim 不可用时用 full hidden_size（等价 MHA）。 */
+    fun kvCacheBytesFullHidden(
+        contextTokens: Long,
+        layerCount: Int,
+        hiddenSize: Int,
+        bytesPerElement: Long = BYTES_PER_ELEMENT,
+    ): Long = contextTokens * layerCount * hiddenSize * KV_FACTOR * bytesPerElement
 
     /** 已知内置模型的维度兜底表（当 llm_config.json 缺少 layer_nums 时使用） */
     private val KNOWN_MODEL_DIMS: Map<String, ModelDims> = mapOf(
@@ -74,7 +102,11 @@ object LlmMemoryEstimator {
         if (modelId.isNullOrBlank()) return@withContext MemoryEstimate.Unavailable
 
         val dims = readModelDims(context, modelId) ?: return@withContext MemoryEstimate.Unavailable
-        val bytes = contextLen.toLong() * dims.layerCount * dims.hiddenSize * KV_FACTOR * BYTES_PER_ELEMENT
+        val bytes = if (dims.numKeyValueHeads > 0 && dims.headDim > 0) {
+            kvCacheBytes(contextLen.toLong(), dims.layerCount, dims.numKeyValueHeads, dims.headDim)
+        } else {
+            kvCacheBytesFullHidden(contextLen.toLong(), dims.layerCount, dims.hiddenSize)
+        }
         MemoryEstimate.Value(bytes)
     }
 
@@ -103,7 +135,22 @@ object LlmMemoryEstimator {
                 ?: fallback?.layerCount
                 ?: return null
 
-            ModelDims(hiddenSize = hiddenSize, layerCount = layerCount)
+            // KV-head-aware（Task 13）：优先 llm_config 的注意力结构；缺失时回退 full-hidden（GQA 退化为 MHA）。
+            val attentionHeads = json.optInt("num_attention_heads", 0).takeIf { it > 0 }
+                ?: fallback?.numAttentionHeads
+            val kvHeads = json.optInt("num_key_value_heads", 0).takeIf { it > 0 }
+                ?: attentionHeads ?: 0
+            val headDim = json.optInt("head_dim", 0).takeIf { it > 0 }
+                ?: json.optInt("head_size", 0).takeIf { it > 0 }
+                ?: if (attentionHeads != null && attentionHeads > 0) hiddenSize / attentionHeads else 0
+
+            ModelDims(
+                hiddenSize = hiddenSize,
+                layerCount = layerCount,
+                numAttentionHeads = attentionHeads ?: 0,
+                numKeyValueHeads = kvHeads,
+                headDim = headDim,
+            )
         } catch (e: Exception) {
             null
         }
