@@ -7,6 +7,7 @@ import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.metrics.CompletionReason
+import com.chatbyyourside.llm.profile.PowerPolicy
 import com.chatbyyourside.llm.metrics.InferenceTelemetry
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
@@ -180,6 +181,7 @@ class MnnBackend(
         batchMaxMs: Int = InferenceBackend.DEFAULT_BATCH_MAX_MS,
         downgradeReasons: List<String> = emptyList(),
         executionControl: GenerationExecutionControl? = null,
+        powerPolicy: PowerPolicy = PowerPolicy.DEFAULT,
     ): NativeGenerationSummary? = mutex.withLock {
         if (handle == 0L) throw IllegalStateException("MNN 后端未加载模型")
         currentCoroutineContext().ensureActive()
@@ -199,9 +201,9 @@ class MnnBackend(
             startedElapsedMs = genStartTime,
         )
 
-        // CPU 提频：包住 nativeGenerateStream（同一推理线程 begin/close）。
+        // CPU 提频：由 PowerPolicy 驱动（Task 8），包住 nativeGenerateStream（同一推理线程 begin/close）。
         // onToken 与 nativeGenerateStream 同线程（同步 JNI 回调），故 reportWorkDuration 的 tid 一致。
-        val boost = cpuBoostController.beginInference(CpuBoostController.TARGET_WORK_DURATION_NS)
+        val boost = cpuBoostController.beginInference(powerPolicy)
         var lastTokenTimeNs = 0L
         // Task 4 Step 3：本方法不累积完整回复（全文拼接唯一归 LocalChatProvider）。
         // policyStopped 标记策略截断（onToken 返回 false），完成原因优先级高于 USER_CANCEL。

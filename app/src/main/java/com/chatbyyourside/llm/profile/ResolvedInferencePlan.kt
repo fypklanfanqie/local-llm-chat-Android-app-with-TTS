@@ -54,7 +54,12 @@ data class PowerPolicy(
     val lookahead: Boolean,
     val sustainedMode: Boolean,
     val aggressiveHint: Boolean,
-)
+) {
+    companion object {
+        /** 兜底策略（Balanced 语义：4 线程、无 sustained、温和 hint）；无 plan 的兼容路径使用。 */
+        val DEFAULT = PowerPolicy(cpuThreads = 4, lookahead = false, sustainedMode = false, aggressiveHint = false)
+    }
+}
 
 /** 模型驻留策略（后台/切云后多久释放）。 */
 data class ResidencyPolicy(

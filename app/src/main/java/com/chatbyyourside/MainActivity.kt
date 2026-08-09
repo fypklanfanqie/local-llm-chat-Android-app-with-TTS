@@ -96,16 +96,12 @@ class MainActivity : ComponentActivity() {
         // 返回是否来自问候通知：若是则卡片流首页直接落到该角色的聊天页，而不是停在卡片流。
         val initialChatOpen = handleGreetingIntent(intent, app)
 
-        // CPU 提频（非 root 路线）：SustainedPerformanceMode 跟随设置开关 `llmCpuBoost`。
-        // 窗口级持续高性能模式，抗热降频；与 CpuBoostController 的 PerformanceHintManager hint session
-        // + 推理线程高优先级叠加，把推理时大核/超核频率尽量推向最高频。非 root 无法锁满频。
-        // 部分设备/窗口不支持 setSustainedPerformanceMode 时静默 no-op。
-        lifecycleScope.launch {
-            app.container.settingsRepository.llmCpuBoost.collect { enabled ->
-                runCatching { window.setSustainedPerformanceMode(enabled) }
-                    .onFailure { android.util.Log.w("MainActivity", "setSustainedPerformanceMode($enabled) failed: ${it.message}") }
-                    .onSuccess { android.util.Log.i("MainActivity", "SustainedPerformanceMode=$enabled") }
-            }
+        // CPU 提频（非 root 路线，Task 8）：sustained mode 改为**生成级**——仅 MAXIMUM_SPEED 本地推理
+        // 期间经 CpuBoostController 开启，finally/close 恢复；Balanced 永不开启。此处只注入 window setter。
+        app.container.cpuBoostController.sustainedModeSetter = { enabled ->
+            runCatching { window.setSustainedPerformanceMode(enabled) }
+                .onFailure { android.util.Log.w("MainActivity", "setSustainedPerformanceMode($enabled) failed: ${it.message}") }
+                .onSuccess { android.util.Log.i("MainActivity", "SustainedPerformanceMode=$enabled") }
         }
 
         setContent {

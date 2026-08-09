@@ -239,6 +239,7 @@ class BackendManager(
                     val summary = backend.generateStreamMessages(
                         messages, attemptMaxTokens, temperature, topP, repeatPenalty, enableThinking, onToken,
                         effectiveBatchBytes, effectiveBatchMs, downgradeReasons, executionControl,
+                        plan.powerPolicy,
                     )
                     return@withLock GenerationResult(
                         summary = summary,

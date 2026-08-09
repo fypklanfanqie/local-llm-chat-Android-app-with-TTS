@@ -635,6 +635,10 @@ git commit -m "feat: resolve adaptive MNN execution plans"
 
 ### Task 8: Scope power and thermal policy to each generation
 
+> **Status (2026-08-09):** Steps 1–4 source complete. `ThermalLevel` enum + `ThermalDecision` + `ThermalMonitor.decide(level, mode, bigCore)` (pure; MODERATE→MAXIMUM_SPEED→BALANCED+reload+cap/2, SEVERE→remove boost+reload+cap 2, CRITICAL/EMERGENCY→stopNow THERMAL_STOP without backend penalty, NONE/LIGHT→unchanged). Tests `ThermalPolicyTest` + `PowerPolicyTest` (TDD). `CpuBoostController.beginInference(PowerPolicy)`: per-mode target duration (AGGRESSIVE 8ms vs 16ms), sustained only when policy.sustainedMode (close restores), `deactivateHintNow()` thread-safe hint removal, global `enabled` boolean removed. `MainActivity` injects `sustainedModeSetter` (window) instead of collecting `llmCpuBoost`. `MnnBackend.generateStreamMessages` takes `powerPolicy` (from plan) and drives `beginInference`. `LocalChatProvider` thermal callback applies decide (removeBoost/deactivateHintNow, stopNow→requestStop(THERMAL_STOP)+cancel, nextThreadCap + effectiveMode flow into next resolve); legacy `cpuBoostController.enabled` write removed. `git diff --check` clean. Pending: Step 5 CI (`testDebugUnitTest --tests '*PowerPolicyTest' --tests '*ThermalPolicyTest'`); Step 6 commit pending (auto-authorized).
+
+### Task 8: Scope power and thermal policy to each generation
+
 **Files:**
 - Modify: `app/src/main/java/com/chatbyyourside/llm/CpuBoostController.kt`
 - Modify: `app/src/main/java/com/chatbyyourside/llm/ThermalMonitor.kt`

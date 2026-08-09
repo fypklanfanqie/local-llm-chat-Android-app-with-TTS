@@ -13,6 +13,7 @@ import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.GenerationSafetyPolicy
 import com.chatbyyourside.llm.IncrementalScriptDetector
+import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.InferenceProfileResolver
 import com.chatbyyourside.llm.InferenceThreadOptimizer
 import com.chatbyyourside.llm.PromptWindowPlanner
@@ -68,14 +69,37 @@ class LocalChatProvider(
     private var measuredAssistantTokens: Int = 0
     @Volatile
     private var thermalMonitoringStarted = false
+    /** 最近一次热状态决策（Task 8）；影响下一轮有效模式与线程 cap。 */
+    @Volatile
+    private var thermalDecision: ThermalDecision? = null
+    /** 当前请求的性能模式（热降级决策的参考模式；由 chatTyped 每轮更新）。 */
+    @Volatile
+    private var currentRequestedMode: InferencePerformanceMode = InferencePerformanceMode.DEFAULT
 
-    /** 启动温度监控（幂等）。高温回调仅记录建议线程数；MNN 运行中无法改线程数，
-     *  真正的下调在下次加载模型时按 [ThermalMonitor.recommendedThreadCount] 生效。 */
+    /** 启动温度监控（幂等）。热回调按 [ThermalMonitor.decide] 决策：撤销 hint / 请求 THERMAL_STOP /
+     *  记录下一轮模式与线程 cap。MNN 已加载线程数不可中途改变，线程下调走下一轮 resolve。 */
     private fun ensureThermalMonitoring() {
         if (thermalMonitoringStarted) return
         thermalMonitoringStarted = true
-        thermalMonitor.startThermalMonitoring { reduced ->
-            Log.w(TAG, "Thermal throttling -> recommend $reduced threads (生效于下次 MNN 加载)")
+        thermalMonitor.startThermalMonitoring { _ ->
+            val level = thermalMonitor.currentLevel()
+            val decision = ThermalMonitor.decide(
+                level = level,
+                requestedMode = currentRequestedMode,
+                bigCoreCount = threadOptimizer.getBigCoreCount(),
+            )
+            thermalDecision = decision
+            Log.w(
+                TAG,
+                "Thermal level=$level -> mode=${decision.effectiveMode} cap=${decision.nextThreadCap} " +
+                    "boost=${!decision.removeBoostNow} stop=${decision.stopNow}",
+            )
+            if (decision.removeBoostNow) cpuBoostController.deactivateHintNow()
+            if (decision.stopNow) {
+                // 热停止：先原子锁定原因（不计后端失败），再请求全局 abort；JNI 返回后由 finally 收尾。
+                activeExecutionControl.get()?.requestStop(CompletionReason.THERMAL_STOP)
+                backendManager.cancel()
+            }
         }
     }
 
@@ -127,8 +151,8 @@ class LocalChatProvider(
             val preference = settingsNow.backend
             val lookahead = settingsNow.lookahead
             val performanceMode = settingsNow.performanceMode
-            // 同步 CPU 提频开关到 controller（MnnBackend 据此决定是否开 hint session）
-            cpuBoostController.enabled = settingsNow.cpuBoost
+            currentRequestedMode = performanceMode
+            // Task 8：不再设置全局 boost 开关——提频由 PowerPolicy 驱动（Balanced 温和/MAXIMUM_SPEED 激进+sustained）。
             // 深度思考开关：透传给 MNN jinja context enable_thinking（运行时生效，无需重载）。
             // 关闭时推理模型跳过 <think> 推理段直接作答（修复「关闭开关仍深度思考」）。
             val deepThinking = settingsNow.deepThinking
@@ -147,11 +171,16 @@ class LocalChatProvider(
                 if (it > 0) it else Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
             }
             val thermalCap = thermalMonitor.recommendedThreadCount(bigCount) // -1 = 不限制
-            val effectiveThreads = (if (thermalCap > 0) {
+            val baseThreads = (if (thermalCap > 0) {
                 minOf(userThreads, bigCount, thermalCap)
             } else {
                 minOf(userThreads, bigCount)
             }).coerceAtLeast(1)
+            // Task 8：热降级决策的下一轮线程 cap（MODERATE=大核半、SEVERE=2、CRITICAL=1）再收紧。
+            val decision = thermalDecision
+            val effectiveThreads = if (decision != null && decision.nextThreadCap > 0) {
+                minOf(baseThreads, decision.nextThreadCap).coerceAtLeast(1)
+            } else baseThreads
 
             // 模型加载（阻塞 native）期间若被取消，立即抛 CancellationException，不进入生成。
             ensureActive()
@@ -224,7 +253,8 @@ class LocalChatProvider(
             activeExecutionControl.set(executionControl)
             // Task 7：由性能模式/后端偏好/设备/热准入线程解析不可变执行计划（含每变体 native 配置）。
             val resolvedPlan = InferenceProfileResolver(context.cacheDir, modelPath).resolve(
-                mode = performanceMode,
+                // Task 8：热降级后的有效模式（MODERATE+ 恒 BALANCED，撤销 sustained）。
+                mode = decision?.effectiveMode ?: performanceMode,
                 backendPreference = preference,
                 contextTokens = contextLen,
                 maxOutputTokens = promptPlan.reservedOutputTokens,
