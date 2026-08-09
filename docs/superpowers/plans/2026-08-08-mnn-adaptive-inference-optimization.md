@@ -519,6 +519,8 @@ git commit -m "perf: bound local prompts and generation"
 
 ### Task 6: Add performance mode and one immutable settings snapshot
 
+> **Status (2026-08-09):** Steps 1–3 source complete. `InferencePerformanceMode` already existed (Task 2), so no recreate. `LocalInferenceSettings` (immutable snapshot: performanceMode + contextLen/threads/temperature/maxTokens/backend + legacy cpuBoost/lookahead + deepThinking; `fromPreferences` single-point keys). `SettingsStore` adds `llm_performance_mode` key/flow/setter + `localInferenceSettings` one-`data.map` snapshot; inference keys moved to single-source `LocalInferenceSettings` constants; cpuBoost/lookahead flows marked legacy. `SettingsRepository` forwards + `getLocalInferenceSettingsNow(timeoutMs)` (timeout fallback to immutable default). `LocalChatProvider` replaced its 8 per-field `.first()` reads with one snapshot read and feeds the real `performanceMode` into `GenerationSafetyPolicy.forMode` (removing the Task 5 BALANCED placeholder). `BackendSettingsScreen` adds a two-option mode selector above backend settings and relocates CPU boost/lookahead into an "高级（诊断）" legacy section. Tests in `LocalInferenceSettingsTest.kt` (TDD first; missing/invalid mode→BALANCED, MAXIMUM_SPEED round-trip, legacy keys readable, default/stored aggregation, timeout-fallback default). `git diff --check` clean. Pending: Step 4 CI `./gradlew testDebugUnitTest --tests '*LocalInferenceSettingsTest'`; Step 5 commit awaits user authorization.
+
 **Files:**
 - Create: `app/src/main/java/com/chatbyyourside/llm/profile/InferencePerformanceMode.kt`
 - Modify: `app/src/main/java/com/chatbyyourside/data/local/SettingsStore.kt`

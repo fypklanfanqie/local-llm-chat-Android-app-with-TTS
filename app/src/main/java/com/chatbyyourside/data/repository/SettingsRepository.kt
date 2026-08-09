@@ -1,5 +1,6 @@
 package com.chatbyyourside.data.repository
 
+import com.chatbyyourside.data.local.LocalInferenceSettings
 import com.chatbyyourside.data.local.SettingsStore
 import com.chatbyyourside.data.model.ApiConfig
 import com.chatbyyourside.data.model.Character
@@ -11,6 +12,7 @@ import com.chatbyyourside.data.model.VoicePair
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.config.Characters
 import com.chatbyyourside.llm.backend.BackendPreference
+import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
@@ -43,8 +45,13 @@ class SettingsRepository(private val store: SettingsStore) {
     val llmTemperature: Flow<Float> = store.llmTemperature
     val llmMaxTokens: Flow<Int> = store.llmMaxTokens
     val llmBackend: Flow<BackendPreference> = store.llmBackend
+    /** 推理性能模式（默认 BALANCED）。 */
+    val llmPerformanceMode: Flow<InferencePerformanceMode> = store.llmPerformanceMode
+    /** 本地推理设置不可变快照（Task 6）：一次读取全部本地 LLM 参数。 */
+    val localInferenceSettings: Flow<LocalInferenceSettings> = store.localInferenceSettings
+    /** legacy：CPU 提频开关（Task 6 起不再权威，高级诊断视图仍可改）。 */
     val llmCpuBoost: Flow<Boolean> = store.llmCpuBoost
-    /** CPU lookahead 投机解码开关（默认关）。仅 MNN CPU 后端生效，改值需重载模型。 */
+    /** legacy：CPU lookahead 投机解码开关（默认关，Task 6 起不再权威）。仅 MNN CPU 后端生效。 */
     val llmLookahead: Flow<Boolean> = store.llmLookahead
     /** 深度思考模式开关（本地 + 云端通用）。 */
     val deepThinking: Flow<Boolean> = store.deepThinking
@@ -94,6 +101,13 @@ class SettingsRepository(private val store: SettingsStore) {
     ) = store.setLlmParams(contextLen, threads, temperature, maxTokens)
 
     suspend fun setLlmBackend(preference: BackendPreference) = store.setLlmBackend(preference)
+
+    suspend fun setLlmPerformanceMode(mode: InferencePerformanceMode) =
+        store.setLlmPerformanceMode(mode)
+
+    /** 同步读取本地推理设置快照；DataStore I/O 被拦截时超时回退不可变默认快照。 */
+    suspend fun getLocalInferenceSettingsNow(timeoutMs: Long = DATASTORE_TIMEOUT_MS): LocalInferenceSettings =
+        withTimeoutOrNull(timeoutMs) { localInferenceSettings.first() } ?: LocalInferenceSettings()
 
     suspend fun setLlmCpuBoost(enabled: Boolean) = store.setLlmCpuBoost(enabled)
 

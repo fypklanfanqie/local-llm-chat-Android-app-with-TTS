@@ -20,18 +20,15 @@ import com.chatbyyourside.llm.ThermalMonitor
 import com.chatbyyourside.llm.backend.BackendManager
 import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.metrics.CompletionReason
-import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.perfmon.BackendType as PerfmonBackendType
 import com.chatbyyourside.provider.ChatProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -119,29 +116,21 @@ class LocalChatProvider(
         return withContext(Dispatchers.IO) {
             ensureThermalMonitoring()
 
-            // 3. 读取推理参数（contextLen/threads 仅在加载时生效，但 BackendManager 内部决定加载时机，
-            //    故每轮读取并传入；DataStore.first() 有缓存，开销可忽略）。
-            //    国产 ROM DataStore I/O 可能被拦截导致 .first() 挂起，加超时返回默认值。
-            val contextLen = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) { settings.llmContextLen.first() }
-                ?: AppConfig.LLM.DEFAULT_CONTEXT_LEN
-            val userThreads = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) { settings.llmThreads.first() }
-                ?: AppConfig.LLM.DEFAULT_THREADS
-            val temperature = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) { settings.llmTemperature.first() }
-                ?: AppConfig.LLM.DEFAULT_TEMPERATURE
-            val maxTokens = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) { settings.llmMaxTokens.first() }
-                ?: AppConfig.LLM.DEFAULT_MAX_TOKENS
-            val preference = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) { settings.llmBackend.first() }
-                ?: com.chatbyyourside.llm.backend.BackendPreference.AUTO
-            val lookahead = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) { settings.llmLookahead.first() } ?: false
+            // 3. 读取推理参数（Task 6：一次 DataStore 快照读，替换逐字段 8 个 .first()；
+            //    国产 ROM DataStore I/O 被拦截时整体超时回退不可变默认快照，避免逐字段多次挂起点）。
+            val settingsNow = settings.getLocalInferenceSettingsNow()
+            val contextLen = settingsNow.contextLen
+            val userThreads = settingsNow.threads
+            val temperature = settingsNow.temperature
+            val maxTokens = settingsNow.maxTokens
+            val preference = settingsNow.backend
+            val lookahead = settingsNow.lookahead
+            val performanceMode = settingsNow.performanceMode
             // 同步 CPU 提频开关到 controller（MnnBackend 据此决定是否开 hint session）
-            cpuBoostController.enabled = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
-                settings.llmCpuBoost.first()
-            } ?: true
+            cpuBoostController.enabled = settingsNow.cpuBoost
             // 深度思考开关：透传给 MNN jinja context enable_thinking（运行时生效，无需重载）。
             // 关闭时推理模型跳过 <think> 推理段直接作答（修复「关闭开关仍深度思考」）。
-            val deepThinking = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
-                settings.deepThinking.first()
-            } ?: false
+            val deepThinking = settingsNow.deepThinking
             // 仅推理模型（Think 标签）的输出需要折叠包装：其 chat 模板把起始 <think> 放在 generation
             // prompt 前缀（非输出流），故 native 输出缺起始 <think>，parseWithThink 无法折叠（修复「本地
             // 思考过程不可折叠」）。非推理模型（Llama/Gemma/SmolLM）不产生 <think>，无需包装。
@@ -224,7 +213,7 @@ class LocalChatProvider(
             // 末批被跳过不影响最终落库（完成路径用 displayText 覆盖流式气泡）。
             var lastRenderMs = 0L
             val safetyPolicy = GenerationSafetyPolicy.forMode(
-                InferencePerformanceMode.DEFAULT,
+                performanceMode,
                 promptPlan.reservedOutputTokens,
             )
             val executionControl = GenerationExecutionControl(
@@ -363,9 +352,6 @@ class LocalChatProvider(
 
     companion object {
         private const val TAG = "LocalChatProvider"
-
-        /** DataStore .first() 超时阈值（ms）。国产 ROM 文件 I/O 被拦截时避免永久挂起。 */
-        private const val DATASTORE_TIMEOUT_MS = 5000L
 
         /** 仅轮询 Kotlin 原子进度快照；不读取/释放 native。 */
         private const val WATCHDOG_POLL_MS = 1000L

@@ -14,6 +14,7 @@ import com.chatbyyourside.data.model.TtsLanguage
 import com.chatbyyourside.data.model.VoicePair
 import com.chatbyyourside.data.repository.BgmTrack
 import com.chatbyyourside.llm.backend.BackendPreference
+import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
@@ -66,18 +67,20 @@ class SettingsStore(private val context: Context) {
         // ★ 本地 AI
         val ACTIVE_PROVIDER = stringPreferencesKey("active_provider")  // CLOUD / LOCAL
         val ACTIVE_LOCAL_MODEL = stringPreferencesKey("active_local_model")
-        val LLM_CONTEXT_LEN = intPreferencesKey("llm_context_len")
-        val LLM_THREADS = intPreferencesKey("llm_threads")
-        val LLM_TEMPERATURE = floatPreferencesKey("llm_temperature")
-        val LLM_MAX_TOKENS = intPreferencesKey("llm_max_tokens")
+        val LLM_CONTEXT_LEN = intPreferencesKey(LocalInferenceSettings.CONTEXT_LEN_KEY)
+        val LLM_THREADS = intPreferencesKey(LocalInferenceSettings.THREADS_KEY)
+        val LLM_TEMPERATURE = floatPreferencesKey(LocalInferenceSettings.TEMPERATURE_KEY)
+        val LLM_MAX_TOKENS = intPreferencesKey(LocalInferenceSettings.MAX_TOKENS_KEY)
         // 推理后端偏好：AUTO / MNN_CPU / MNN_GPU / MNN_NPU（见 BackendPreference）
         val LLM_BACKEND = stringPreferencesKey("llm_backend")
-        // CPU 推理提频开关：PerformanceHintManager hint session + SustainedPerformanceMode + 高线程优先级
-        val LLM_CPU_BOOST = booleanPreferencesKey("llm_cpu_boost")
-        // CPU lookahead 投机解码开关（n-gram，无需 draft 模型）；仅 MNN CPU 后端生效，改值需重载模型
-        val LLM_LOOKAHEAD = booleanPreferencesKey("llm_lookahead")
+        // 推理性能模式：BALANCED / MAXIMUM_SPEED（Task 6）。键名单点定义见 LocalInferenceSettings。
+        val LLM_PERFORMANCE_MODE = stringPreferencesKey(LocalInferenceSettings.PERFORMANCE_MODE_KEY)
+        // CPU 推理提频开关（legacy，Task 6 起不再权威；由性能模式解析层接管，高级诊断视图仍可改）
+        val LLM_CPU_BOOST = booleanPreferencesKey(LocalInferenceSettings.CPU_BOOST_KEY)
+        // CPU lookahead 投机解码开关（legacy，Task 6 起不再权威）；仅 MNN CPU 后端生效，改值需重载模型
+        val LLM_LOOKAHEAD = booleanPreferencesKey(LocalInferenceSettings.LOOKAHEAD_KEY)
         // 深度思考模式开关（本地 + 云端通用）：控制推理过程是否生成与展示
-        val DEEP_THINKING = booleanPreferencesKey("deep_thinking")
+        val DEEP_THINKING = booleanPreferencesKey(LocalInferenceSettings.DEEP_THINKING_KEY)
         // 性能监控浮窗液态玻璃效果开关（默认开）：backdrop blur + 镜面高光 + 旋转虹彩光晕；关闭则用普通深色面板
         val LIQUID_GLASS = booleanPreferencesKey("liquid_glass_perf_overlay")
 
@@ -367,7 +370,26 @@ class SettingsStore(private val context: Context) {
         context.settingsDataStore.edit { it[Keys.LLM_BACKEND] = preference.storageKey }
     }
 
-    /** CPU 推理提频开关（默认开）。非 root 下用系统提频机制把大核频率尽量推高，详见 CpuBoostController。 */
+    /** 推理性能模式（默认 BALANCED）。Task 6 引入；具体模式行为由后续 resolved-plans 任务解析。 */
+    val llmPerformanceMode: Flow<InferencePerformanceMode> = context.settingsDataStore.data.map { p ->
+        InferencePerformanceMode.fromStorageKey(p[Keys.LLM_PERFORMANCE_MODE])
+    }
+
+    suspend fun setLlmPerformanceMode(mode: InferencePerformanceMode) {
+        context.settingsDataStore.edit { it[Keys.LLM_PERFORMANCE_MODE] = mode.storageKey }
+    }
+
+    /**
+     * 一次聚合本地推理设置的不可变快照（Task 6）。
+     *
+     * 单个 `data.map` 读取全部相关键，替换 provider 侧逐字段 `.first()` 的多次读取；
+     * 缺失键一律回退默认值（只读、不写回）。
+     */
+    val localInferenceSettings: Flow<LocalInferenceSettings> = context.settingsDataStore.data.map {
+        LocalInferenceSettings.fromPreferences(it)
+    }
+
+    /** CPU 推理提频开关（legacy，默认开；Task 6 起不再权威，详见 [LocalInferenceSettings]）。 */
     val llmCpuBoost: Flow<Boolean> = context.settingsDataStore.data.map { p ->
         p[Keys.LLM_CPU_BOOST] ?: true
     }
@@ -376,7 +398,7 @@ class SettingsStore(private val context: Context) {
         context.settingsDataStore.edit { it[Keys.LLM_CPU_BOOST] = enabled }
     }
 
-    /** CPU lookahead 投机解码开关（默认关）。n-gram 投机解码无需 draft 模型，仅 MNN CPU 后端生效，改值触发下次重载。
+    /** CPU lookahead 投机解码开关（legacy，默认关）。n-gram 投机解码无需 draft 模型，仅 MNN CPU 后端生效，改值触发下次重载。
      *  默认关：首轮无 n-gram 历史时 draft 全 miss，每步多跑 draft_predict_length 个前向却只产 1 token，
      *  在慢模型上反而数倍拖慢首条回复；多轮重复/代码类文本再开可获 1.5–3× 提速。 */
     val llmLookahead: Flow<Boolean> = context.settingsDataStore.data.map { p ->

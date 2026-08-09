@@ -31,6 +31,7 @@ import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendSelector
 import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.backend.NpuSupportDetector
+import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.ui.glass.GlassListRow
 import com.chatbyyourside.ui.glass.GlassListSection
 import kotlinx.coroutines.Dispatchers
@@ -38,7 +39,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 推理引擎设置页（独立路由）：设备能力、后端选项、CPU 提频 / 投机解码、推理参数、回退链。
+ * 推理引擎设置页（独立路由）：性能模式、设备能力、后端选项、推理参数、高级（诊断）旧开关、回退链。
  */
 @Composable
 fun BackendSettingsScreen(
@@ -48,6 +49,8 @@ fun BackendSettingsScreen(
     val scheme = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
     val pref by container.settingsRepository.llmBackend.collectAsState(initial = BackendPreference.AUTO)
+    val performanceMode by container.settingsRepository.llmPerformanceMode
+        .collectAsState(initial = InferencePerformanceMode.DEFAULT)
 
     val deviceCap by produceState(initialValue = null as BackendSelector.DeviceCapability?) {
         value = withContext(Dispatchers.IO) { container.backendManager.deviceCapability }
@@ -143,6 +146,25 @@ fun BackendSettingsScreen(
             }
         }
 
+        // ===== 推理性能模式 =====
+        GlassListSection(title = "推理性能模式") {
+            InferencePerformanceMode.entries.forEachIndexed { idx, mode ->
+                val (title, desc) = when (mode) {
+                    InferencePerformanceMode.BALANCED -> "综合平衡（推荐）" to "兼顾速度、温度、功耗和稳定性"
+                    InferencePerformanceMode.MAXIMUM_SPEED -> "最高速度" to "优先首字和生成速度，仍会在过热、内存不足或后端异常时自动降级"
+                }
+                BackendOptionRow(
+                    title = title,
+                    desc = desc,
+                    selected = performanceMode == mode,
+                    enabled = true,
+                    isActive = false,
+                    onClick = { scope.launch { container.settingsRepository.setLlmPerformanceMode(mode) } },
+                    showDivider = idx == InferencePerformanceMode.entries.size - 1,
+                )
+            }
+        }
+
         // ===== 后端选项 =====
         GlassListSection(title = "选择推理后端") {
             BackendPreference.entries.forEachIndexed { idx, entry ->
@@ -179,38 +201,6 @@ fun BackendSettingsScreen(
                     showDivider = idx == BackendPreference.entries.size - 1,
                 )
             }
-        }
-
-        // ===== CPU 提频 =====
-        val cpuBoost by container.settingsRepository.llmCpuBoost.collectAsState(initial = true)
-        GlassListSection(title = "CPU 提频") {
-            GlassListRow(
-                title = "推理提频",
-                subtitle = "非 root 用系统提频机制把大核频率尽量推高；会增加耗电/发热，高温仍按温控降线程",
-                trailing = {
-                    Switch(
-                        checked = cpuBoost,
-                        onCheckedChange = { scope.launch { container.settingsRepository.setLlmCpuBoost(it) } },
-                    )
-                },
-                showDivider = false,
-            )
-        }
-
-        // ===== 投机解码 =====
-        val lookahead by container.settingsRepository.llmLookahead.collectAsState(initial = true)
-        GlassListSection(title = "投机解码") {
-            GlassListRow(
-                title = "Lookahead 投机解码",
-                subtitle = "用历史 n-gram 预测多 token 一次前向验证，CPU 上重复/代码类文本 1.5–3×；仅 CPU 后端生效，首轮无历史时反而拖慢，多轮重复文本再开",
-                trailing = {
-                    Switch(
-                        checked = lookahead,
-                        onCheckedChange = { scope.launch { container.settingsRepository.setLlmLookahead(it) } },
-                    )
-                },
-                showDivider = false,
-            )
         }
 
         // ===== 推理参数 =====
@@ -308,6 +298,35 @@ fun BackendSettingsScreen(
                 }
                 Text("单次回复的 token 上限（约 1 token ≈ 0.6 汉字）。选「不限」则生成到模型自然结束（EOS）。改后下条消息即生效，无需重载。", color = scheme.onSurfaceVariant, fontSize = 10.sp)
             }
+        }
+
+        // ===== 高级（诊断）=====
+        // legacy 开关：性能模式解析层接管前保留，供高级诊断；不再作为主设置展示。
+        val cpuBoost by container.settingsRepository.llmCpuBoost.collectAsState(initial = true)
+        val lookahead by container.settingsRepository.llmLookahead.collectAsState(initial = false)
+        GlassListSection(title = "高级（诊断）") {
+            GlassListRow(
+                title = "推理提频（旧开关）",
+                subtitle = "性能模式接管前的高级开关；非 root 用系统提频机制推高大核频率，会增加耗电/发热",
+                trailing = {
+                    Switch(
+                        checked = cpuBoost,
+                        onCheckedChange = { scope.launch { container.settingsRepository.setLlmCpuBoost(it) } },
+                    )
+                },
+                showDivider = true,
+            )
+            GlassListRow(
+                title = "Lookahead 投机解码（旧开关）",
+                subtitle = "性能模式接管前的高级开关；仅 CPU 后端生效，重复/代码类文本 1.5–3×，首轮无历史时反而拖慢",
+                trailing = {
+                    Switch(
+                        checked = lookahead,
+                        onCheckedChange = { scope.launch { container.settingsRepository.setLlmLookahead(it) } },
+                    )
+                },
+                showDivider = false,
+            )
         }
 
         // ===== 回退链 =====
