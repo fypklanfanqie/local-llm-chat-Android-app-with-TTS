@@ -33,7 +33,7 @@ class BackendManagerPlanTest {
     private fun plan(
         preference: BackendPreference,
         mode: InferencePerformanceMode = InferencePerformanceMode.BALANCED,
-        opencl: Boolean = false,
+        openclHealth: OpenClHealthState = OpenClHealthState.UNKNOWN,
     ): ResolvedInferencePlan = resolver.resolve(
         mode = mode,
         backendPreference = preference,
@@ -44,7 +44,7 @@ class BackendManagerPlanTest {
         temperature = 0.8f,
         topP = 0.9f,
         repeatPenalty = 1.2f,
-        openclHealthy = opencl,
+        openclHealth = openclHealth,
     )
 
     @Test
@@ -59,7 +59,7 @@ class BackendManagerPlanTest {
 
     @Test
     fun healthyOpenclAttemptLeadsExecutionAndRequiresProbe() {
-        val p = plan(BackendPreference.AUTO, opencl = true)
+        val p = plan(BackendPreference.AUTO, openclHealth = OpenClHealthState.MODEL_OK)
 
         assertEquals(RuntimeVariant.OPENCL, p.attempts.first().variant)
         assertTrue(p.attempts.first().requiresProbe)

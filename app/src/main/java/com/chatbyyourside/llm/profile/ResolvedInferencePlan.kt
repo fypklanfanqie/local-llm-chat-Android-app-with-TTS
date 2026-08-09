@@ -17,6 +17,12 @@ enum class RuntimeVariant {
 }
 
 /**
+ * OpenCL 健康状态（Task 9）：由 BackendHealthStore 持久记录，resolver 据此决定是否把 OpenCL
+ * 放进尝试链。UNKNOWN 需先探测（Task 10 probe）；COOLDOWN/CRASH_BLACKLISTED 不进入。
+ */
+enum class OpenClHealthState { UNKNOWN, PROBE_OK, MODEL_OK, COOLDOWN, CRASH_BLACKLISTED }
+
+/**
  * 单次后端尝试（Task 7 Step 1）。
  *
  * [BackendManager] 按此列表显式加载，不再由 JNI 隐式执行 CPU 安全重试。

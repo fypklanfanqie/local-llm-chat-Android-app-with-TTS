@@ -15,6 +15,7 @@ import com.chatbyyourside.llm.GenerationSafetyPolicy
 import com.chatbyyourside.llm.IncrementalScriptDetector
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.InferenceProfileResolver
+import com.chatbyyourside.llm.profile.OpenClHealthState
 import com.chatbyyourside.llm.InferenceThreadOptimizer
 import com.chatbyyourside.llm.PromptWindowPlanner
 import com.chatbyyourside.llm.PromptWindowResult
@@ -263,7 +264,7 @@ class LocalChatProvider(
                 temperature = temperature,
                 topP = AppConfig.LLM.DEFAULT_TOP_P,
                 repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
-                openclHealthy = backendManager.mnnGpuSupported,
+                openclHealth = if (backendManager.mnnGpuSupported) OpenClHealthState.PROBE_OK else OpenClHealthState.UNKNOWN,
             )
             val result = try {
                 coroutineScope {

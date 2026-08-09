@@ -34,8 +34,8 @@ class InferenceProfileResolver(
 ) {
 
     /**
-     * @param openclHealthy OpenCL 是否已探测且健康（Task 后期接 BackendHealthStore；
-     *        Task 7 先用现有设备探测结果）。
+     * @param openclHealth OpenCL 健康状态（Task 9，来自 BackendHealthStore）：PROBE_OK/MODEL_OK
+     *        可进链；UNKNOWN 需先探测（Task 10），不入链；COOLDOWN/CRASH_BLACKLISTED 不入链。
      * @param thermalAdmittedThreads 热准入后的 CPU 线程数（min(用户, 大核, 温控上限)），
      *        由调用方已算好，MAXIMUM_SPEED 不能绕过。
      */
@@ -49,18 +49,22 @@ class InferenceProfileResolver(
         temperature: Float,
         topP: Float,
         repeatPenalty: Float,
-        openclHealthy: Boolean,
+        openclHealth: OpenClHealthState,
     ): ResolvedInferencePlan {
         val downgrades = mutableListOf<DowngradeReason>()
 
         // 尝试链：QNN 永不进 AUTO；标准版显式选 NPU 也解析为 CPU（保留已存设置但标不支持）。
+        val openclEligible = openclHealth == OpenClHealthState.PROBE_OK ||
+            openclHealth == OpenClHealthState.MODEL_OK
         val attempts = buildList {
             val cpu = thermalAdmittedThreads.coerceAtLeast(1)
             when (backendPreference) {
                 BackendPreference.AUTO, BackendPreference.MNN_GPU -> {
-                    if (openclHealthy) {
+                    if (openclEligible) {
                         add(attempt(BackendType.MNN_GPU, RuntimeVariant.OPENCL, 68, contextTokens, temperature, topP, repeatPenalty))
-                    } else if (backendPreference == BackendPreference.MNN_GPU) {
+                    } else if (backendPreference == BackendPreference.MNN_GPU &&
+                        openclHealth != OpenClHealthState.UNKNOWN
+                    ) {
                         downgrades += DowngradeReason.OPENCL_UNHEALTHY
                     }
                     add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_OPTIMIZED, cpu, contextTokens, lookahead, temperature, topP, repeatPenalty))

@@ -24,7 +24,7 @@ class InferenceProfileResolverTest {
         preference: BackendPreference,
         mode: InferencePerformanceMode = InferencePerformanceMode.BALANCED,
         threads: Int = 4,
-        opencl: Boolean = false,
+        openclHealth: OpenClHealthState = OpenClHealthState.UNKNOWN,
         lookahead: Boolean = false,
     ): ResolvedInferencePlan = resolver.resolve(
         mode = mode,
@@ -36,14 +36,14 @@ class InferenceProfileResolverTest {
         temperature = 0.8f,
         topP = 0.9f,
         repeatPenalty = 1.2f,
-        openclHealthy = opencl,
+        openclHealth = openclHealth,
     )
 
     private fun variants(p: ResolvedInferencePlan): List<RuntimeVariant> = p.attempts.map { it.variant }
 
     @Test
     fun autoWithoutHealthyOpenclFallsBackToCpuOptimizedThenCompatibility() {
-        val p = plan(BackendPreference.AUTO, opencl = false)
+        val p = plan(BackendPreference.AUTO, openclHealth = OpenClHealthState.UNKNOWN)
 
         assertEquals(listOf(RuntimeVariant.CPU_OPTIMIZED, RuntimeVariant.CPU_COMPATIBILITY), variants(p))
         assertTrue(p.attempts.none { it.backend == BackendType.MNN_GPU })
@@ -52,7 +52,7 @@ class InferenceProfileResolverTest {
 
     @Test
     fun autoWithHealthyOpenclPlacesOpenclFirstThenCpu() {
-        val p = plan(BackendPreference.AUTO, opencl = true)
+        val p = plan(BackendPreference.AUTO, openclHealth = OpenClHealthState.MODEL_OK)
 
         assertEquals(
             listOf(RuntimeVariant.OPENCL, RuntimeVariant.CPU_OPTIMIZED, RuntimeVariant.CPU_COMPATIBILITY),
@@ -64,7 +64,7 @@ class InferenceProfileResolverTest {
     @Test
     fun qnnNeverAppearsInAutoEvenWithNpuPreference() {
         // 显式选 NPU 的标准版：QNN 不可用，解析为 CPU 并记录 UNSUPPORTED_SETTING。
-        val p = plan(BackendPreference.MNN_NPU, opencl = false)
+        val p = plan(BackendPreference.MNN_NPU, openclHealth = OpenClHealthState.UNKNOWN)
 
         assertTrue(p.attempts.none { it.backend == BackendType.MNN_NPU })
         assertTrue(p.downgradeReasons.contains(DowngradeReason.UNSUPPORTED_SETTING))
@@ -72,12 +72,21 @@ class InferenceProfileResolverTest {
     }
 
     @Test
-    fun explicitGpuWithoutHealthyOpenclRecordsDowngradeAndFallsBackToCpu() {
-        val p = plan(BackendPreference.MNN_GPU, opencl = false)
+    fun explicitGpuWithCooldownHealthRecordsDowngradeAndFallsBackToCpu() {
+        // UNKNOWN 需先探测（不算 unhealthy）；COOLDOWN/BLACKLISTED 视为不健康 -> 显式 GPU 降级。
+        val p = plan(BackendPreference.MNN_GPU, openclHealth = OpenClHealthState.COOLDOWN)
 
         assertTrue(p.downgradeReasons.contains(DowngradeReason.OPENCL_UNHEALTHY))
         assertTrue(p.attempts.none { it.backend == BackendType.MNN_GPU })
         assertEquals(RuntimeVariant.CPU_OPTIMIZED, p.attempts.first().variant)
+    }
+
+    @Test
+    fun unknownOpenclHealthRequiresProbeNotImmediateLoad() {
+        // UNKNOWN：OpenCL 不入链（需 probe），且不标 unhealthy（健康未知 ≠ 不健康）。
+        val p = plan(BackendPreference.AUTO, openclHealth = OpenClHealthState.UNKNOWN)
+        assertFalse(p.attempts.any { it.backend == BackendType.MNN_GPU })
+        assertFalse(p.downgradeReasons.contains(DowngradeReason.OPENCL_UNHEALTHY))
     }
 
     @Test
@@ -92,7 +101,7 @@ class InferenceProfileResolverTest {
 
     @Test
     fun openclAttemptUsesThreadNum68Encoding() {
-        val p = plan(BackendPreference.AUTO, opencl = true)
+        val p = plan(BackendPreference.AUTO, openclHealth = OpenClHealthState.MODEL_OK)
 
         val openclJson = p.attempts.first { it.variant == RuntimeVariant.OPENCL }.nativeConfigJson
         assertTrue(openclJson.contains("\"thread_num\":68"))
