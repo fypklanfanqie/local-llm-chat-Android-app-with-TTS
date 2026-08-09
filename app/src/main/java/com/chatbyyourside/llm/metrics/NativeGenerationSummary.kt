@@ -77,15 +77,17 @@ data class NativeGenerationSummary(
          * 严格解析 native 返回的摘要 JSON。
          * @return 校验通过的对象；版本不符 / 未知 reason / 未知 stage / 非法 JSON 返回 null。
          */
-        fun parse(json: String): NativeGenerationSummary? = try {
-            val raw = summaryJson.decodeFromString<NativeGenerationSummary>(json)
-            if (raw.version != VERSION) return null
-            if (CompletionReason.entries.none { it.name == raw.completionReason }) return null
-            if (raw.errorStage != null &&
-                InferenceStage.entries.none { it.name == raw.errorStage }) return null
-            raw
-        } catch (e: Exception) {
-            null
+        fun parse(json: String): NativeGenerationSummary? {
+            return try {
+                val raw = summaryJson.decodeFromString<NativeGenerationSummary>(json)
+                if (raw.version != VERSION) return null
+                if (CompletionReason.entries.none { it.name == raw.completionReason }) return null
+                if (raw.errorStage != null &&
+                    InferenceStage.entries.none { it.name == raw.errorStage }) return null
+                raw
+            } catch (e: Exception) {
+                null
+            }
         }
     }
 }

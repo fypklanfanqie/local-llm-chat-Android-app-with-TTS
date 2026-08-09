@@ -124,6 +124,9 @@ class MnnStreamingIntegrationTest {
             },
             batchMaxBytes = batchMaxBytes,
             batchMaxMs = batchMaxMs,
+            downgradeReasons = emptyList(),
+            executionControl = null,
+            powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
         )
     }
 

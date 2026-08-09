@@ -83,6 +83,8 @@ class MnnRuntimeIntegrationTest {
                 maxTokens = 64, temperature = 0.8f, topP = 0.9f, repeatPenalty = 1.2f,
                 enableThinking = false,
                 onToken = { sb.append(it); true },
+                batchMaxBytes = 256, batchMaxMs = 16, downgradeReasons = emptyList(),
+                executionControl = null, powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
             )
         }
         assertNotNull(summary)
@@ -99,6 +101,8 @@ class MnnRuntimeIntegrationTest {
                 messages = messages(), maxTokens = 256, temperature = 0.8f, topP = 0.9f, repeatPenalty = 1.2f,
                 enableThinking = false,
                 onToken = { sb.append(it); sb.length < 8 },  // 立即截断
+                batchMaxBytes = 256, batchMaxMs = 16, downgradeReasons = emptyList(),
+                executionControl = null, powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
             )
         }
         assertNotNull(summary)
@@ -113,10 +117,10 @@ class MnnRuntimeIntegrationTest {
     fun secondTurnReusesKvCache() {
         val fx = requireHandle()
         // 第一轮生成（预热 + 前缀）。
-        runBlocking { fx.backend.generateStreamMessages(messages(false), 32, 0.8f, 0.9f, 1.2f, false, { true }) }
+        runBlocking { fx.backend.generateStreamMessages(messages(false), 32, 0.8f, 0.9f, 1.2f, false, { true }, 256, 16, emptyList(), null, com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT) }
         // 第二轮：新增 user，历史前缀应命中 KV。
         val summary = runBlocking {
-            fx.backend.generateStreamMessages(messages(true), 32, 0.8f, 0.9f, 1.2f, false, { true })
+            fx.backend.generateStreamMessages(messages(true), 32, 0.8f, 0.9f, 1.2f, false, { true }, 256, 16, emptyList(), null, com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT)
         }
         assertNotNull(summary)
         assertEquals("第二轮应复用 KV 前缀", 1, summary!!.reuseKv)

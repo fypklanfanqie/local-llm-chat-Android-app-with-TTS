@@ -14,6 +14,7 @@ import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.ModelBundleValidator
 import com.chatbyyourside.llm.GenerationSafetyPolicy
 import com.chatbyyourside.llm.IncrementalScriptDetector
+import com.chatbyyourside.llm.ThermalDecision
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.InferenceProfileResolver
 import com.chatbyyourside.llm.profile.OpenClHealthState

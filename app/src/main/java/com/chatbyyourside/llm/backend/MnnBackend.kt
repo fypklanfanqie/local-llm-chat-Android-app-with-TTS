@@ -177,11 +177,11 @@ class MnnBackend(
         repeatPenalty: Float,
         enableThinking: Boolean,
         onToken: (String) -> Boolean,
-        batchMaxBytes: Int = InferenceBackend.DEFAULT_BATCH_MAX_BYTES,
-        batchMaxMs: Int = InferenceBackend.DEFAULT_BATCH_MAX_MS,
-        downgradeReasons: List<String> = emptyList(),
-        executionControl: GenerationExecutionControl? = null,
-        powerPolicy: PowerPolicy = PowerPolicy.DEFAULT,
+        batchMaxBytes: Int,
+        batchMaxMs: Int,
+        downgradeReasons: List<String>,
+        executionControl: GenerationExecutionControl?,
+        powerPolicy: PowerPolicy,
     ): NativeGenerationSummary? = mutex.withLock {
         if (handle == 0L) throw IllegalStateException("MNN 后端未加载模型")
         currentCoroutineContext().ensureActive()
@@ -326,6 +326,11 @@ class MnnBackend(
     ): NativeGenerationSummary? = generateStreamMessages(
         listOf(ChatMessage(role = "user", content = prompt)),
         maxTokens, temperature, topP, repeatPenalty, enableThinking = true, onToken,
+        batchMaxBytes = InferenceBackend.DEFAULT_BATCH_MAX_BYTES,
+        batchMaxMs = InferenceBackend.DEFAULT_BATCH_MAX_MS,
+        downgradeReasons = emptyList(),
+        executionControl = null,
+        powerPolicy = PowerPolicy.DEFAULT,
     )
 
     override suspend fun stopGeneration() {

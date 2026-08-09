@@ -179,7 +179,7 @@ fun sampleStandardDeviation(values: List<Float>): Float? {
 /** 由记录列表构建基准汇总。空列表返回全 null 字段。 */
 fun summarize(records: List<InferenceTurnRecord>): BenchmarkSummary {
     if (records.isEmpty()) return BenchmarkSummary()
-    val ttfts = records.mapNotNull { it.ttftMs }.filter { it > 0 }
+    val ttfts = records.mapNotNull { it.ttftMs }.filter { it > 0 }.map { it.toFloat() }
     val prefillTps = records.mapNotNull { it.prefillTps }.filter { it > 0 }
     val decodeTps = records.mapNotNull { it.decodeTps }.filter { it > 0 }
     val pss = records.mapNotNull { it.peakPssMb }

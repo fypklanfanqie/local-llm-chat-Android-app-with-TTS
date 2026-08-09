@@ -361,7 +361,6 @@ class BackendManager(
             mnnCpuBackend.release()
             mnnGpuBackend.release()
             mnnNpuBackend.release()
-            configs.clear()
         }
     }
 

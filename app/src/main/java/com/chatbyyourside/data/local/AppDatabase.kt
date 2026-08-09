@@ -2,6 +2,7 @@ package com.chatbyyourside.data.local
 
 import android.content.Context
 import androidx.room.*
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.chatbyyourside.config.AppConfig
 import kotlinx.coroutines.flow.Flow

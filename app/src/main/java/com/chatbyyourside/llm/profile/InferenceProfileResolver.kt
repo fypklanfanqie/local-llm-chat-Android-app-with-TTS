@@ -61,7 +61,7 @@ class InferenceProfileResolver(
             when (backendPreference) {
                 BackendPreference.AUTO, BackendPreference.MNN_GPU -> {
                     if (openclEligible) {
-                        add(attempt(BackendType.MNN_GPU, RuntimeVariant.OPENCL, 68, contextTokens, temperature, topP, repeatPenalty))
+                        add(attempt(BackendType.MNN_GPU, RuntimeVariant.OPENCL, 68, contextTokens, lookahead = false, temperature, topP, repeatPenalty))
                     } else if (backendPreference == BackendPreference.MNN_GPU &&
                         openclHealth != OpenClHealthState.UNKNOWN
                     ) {
@@ -225,7 +225,7 @@ class InferenceProfileResolver(
                 is JsonObject -> JsonObject(
                     element.entries.sortedBy { it.key }.associate { (k, v) -> k to canon(v) },
                 )
-                is JsonArray -> JsonArray(element.content.map(::canon))
+                is JsonArray -> element  // 数组元素序确定性（resolver 固定构建），无需重建
                 else -> element
             }
             return (canon(root) as JsonObject).toString()

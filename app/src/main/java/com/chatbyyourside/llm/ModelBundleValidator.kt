@@ -91,7 +91,7 @@ object ModelBundleValidator {
         }
 
         // 4. 分片残留 -> 警告（下载未完成/合并失败）。
-        val parts = root.listFiles { f -> PART_SUFFIX.containsMatchIn(f.name) }?.orEmpty()
+        val parts = root.listFiles { f -> PART_SUFFIX.containsMatchIn(f.name) }?.toList() ?: emptyList()
         if (parts.isNotEmpty()) {
             warnings += "存在 ${parts.size} 个未合并分片（.partN）"
         }

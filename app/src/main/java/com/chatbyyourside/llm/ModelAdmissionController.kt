@@ -49,7 +49,7 @@ object ModelAdmissionController {
         } else {
             AdmissionDecision.Rejected(
                 userMessage = "存储空间不足，无法下载模型",
-                details = mapOf("requiredBytes" to required, "availableBytes" to available),
+                details = mapOf("requiredBytes" to required, "availableBytes" to availableBytes),
             )
         }
     }
@@ -81,7 +81,7 @@ object ModelAdmissionController {
 
     fun decideMemory(inputs: MemoryInputs): AdmissionDecision {
         // 可用模型预算 = availMem - threshold - activation reserve - backend 开销 - 实测 PSS - lowMemory 余量。
-        val guard = if (inputs.lowMemory) (availMemBytes > 0L).let { inputs.availMemBytes / 4 } else 0L
+        val guard = if (inputs.lowMemory) inputs.availMemBytes / 4 else 0L
         val availableForModel =
             inputs.availMemBytes - inputs.thresholdBytes - inputs.activationReserveBytes -
                 inputs.backendOverheadBytes - (inputs.measuredPeakPssBytes ?: 0L) - guard
