@@ -14,12 +14,12 @@
     "16k_pages",
     "opencl_probe"
   ],
-  "note": "All standard libs rebuilt locally with NDK 26.1.10909125 against pinned MNN af0142bc; libMNN.so/libcpu_sys_jni.so/libmnn_jni.so/libbackend_probe.so are 16 KiB p_align (0x4000). QNN libs in jniLibs are intentionally not listed (excluded from standard packaging, Task 11).",
+  "note": "All standard libs rebuilt locally with NDK 26.1.10909125 against pinned MNN af0142bc (MNN_SEP_BUILD=OFF so LLM engine links into libMNN.so). libMNN/libcpu_sys_jni/libmnn_jni/libbackend_probe are 16 KiB p_align. QNN libs not listed (excluded from packaging, Task 11).",
   "files": [
     {
       "name": "libMNN.so",
-      "sha256": "734abe2f69a5918ead565913fc8644835a7a6777cefbfadb296c927cd6bbe4ec",
-      "buildId": "712c877dcc5a33e856f223bc09e4b70e8a689d7f",
+      "sha256": "041e575a3886cc35a8a667f63a9d8fa73da9d2063ee3e54590aad74648ae2ec4",
+      "buildId": "75cae231d3eb7bfc56098d13f2fe4b364a355695",
       "ptLoadAlignment": "0x4000"
     },
     {
