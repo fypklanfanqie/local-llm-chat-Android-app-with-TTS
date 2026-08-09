@@ -65,3 +65,10 @@ if(MNN_DIR AND EXISTS "${MNN_DIR}/lib/libMNN.so")
 else()
     message(STATUS "MNN_DIR 未配置或 libMNN.so 缺失，跳过 MNN JNI 编译（MNN 后端不可用）")
 endif()
+
+# ===== OpenCL 执行探测 JNI（libbackend_probe.so，Task 10）=====
+# 运行于 :mnn_probe 进程，dlopen 动态加载 libOpenCL.so（不链接 vendor 库，避免 app 进程崩溃）。
+# 仅依赖 log/dl；OpenCL 类型/符号在 backend_probe_jni.cpp 自声明。
+add_library(backend_probe SHARED backend_probe_jni.cpp)
+target_link_libraries(backend_probe log)
+target_link_options(backend_probe PRIVATE ${CHAT_16K_PAGE_LINKER_FLAG})

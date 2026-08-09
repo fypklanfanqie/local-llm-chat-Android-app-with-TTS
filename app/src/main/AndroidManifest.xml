@@ -24,6 +24,11 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- OpenCL 探测（Task 10）：声明可选 vendor OpenCL 库；探测进程动态加载，缺库不崩溃。 -->
+    <uses-native-library
+        android:name="libOpenCL.so"
+        android:required="false" />
+
     <application
         android:name=".ChatApp"
         android:allowBackup="true"
@@ -47,6 +52,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- OpenCL 执行探测服务（Task 10）：独立进程，驱动崩溃不波及主进程。 -->
+        <service
+            android:name=".llm.backend.OpenClProbeService"
+            android:process=":mnn_probe"
+            android:exported="false" />
     </application>
 
 </manifest>
