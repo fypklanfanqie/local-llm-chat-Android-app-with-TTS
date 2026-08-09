@@ -36,8 +36,8 @@
     },
     {
       "name": "libmnn_jni.so",
-      "sha256": "afb014c36d398e462baba2b6d2206ec53733ed394d338ecfd14c25eadbb0b4b4",
-      "buildId": "f83608e3240afadf8576067e0fe416cb4be781f9",
+      "sha256": "8a71ed3c40bda750e6fd5bb323d3dbc11911e30da5f676263518da95a735f830",
+      "buildId": "def00f4c1a8c487781f51f58781ad33dfbc87267",
       "ptLoadAlignment": "0x4000"
     },
     {
