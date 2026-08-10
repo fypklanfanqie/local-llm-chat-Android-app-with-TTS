@@ -32,6 +32,13 @@
 //  6) 采样参数：temperature/top_p/repetition_penalty 在 load() 前 set_config（采样器在 load 内
 //     一次性构建）。nativeGenerateStream 内 best-effort 再 set_config 一次（部分构建按 response
 //     重建采样器则生效，否则 no-op）。temperature 改值由 Kotlin BackendManager 纳入重载指纹触发重载。
+//  7) v2 生成契约（Task 1）：nativeGenerateStream 末尾追加 decode_step_tokens（clamp 到 [1,4]，
+//     缺省/非法值 -> 1，等价 v1 逐 token 行为）；prefill/decode/finalize 抽成 GenerationSession
+//     三阶段状态机（行为与 v1 完全一致：StreamBatcher / UTF-8 / syncPromptCache / eraseHistory /
+//     <eop> 语义保留）；摘要 v2 新增 decodeStepTokens / thinkingConfigAccepted（set_config 返回值）/
+//     reasoningEndUs（输出流旁路扫描 </think>，us 相对生成起点）/ firstBodyDeltaUs（</think> 之后
+//     首个回调）/ errorCode；nativeGetRuntimeInfo capabilities 追加 "summary_v2"（Kotlin
+//     MnnBridge.hasSummaryV2Capability 查询，Task 8 发布门禁使用；v1 兼容路径继续可用）。
 
 #include <jni.h>
 #include <string>
@@ -235,6 +242,37 @@ private:
     }
 };
 
+// ===== 思考边界检测（Task 1 v2 契约）=====
+// 在 UTF-8 输出路径旁路增量扫描 "</think>"：命中即记 hitUs（us，相对生成起点 t_start_us）。
+// 只观察不吞改输出流，不影响 <eop>/EOS/UTF-8 行为。字节级比较安全：</think> 全 ASCII，而 UTF-8
+// 续字节恒 ≥0x80，不可能与 ASCII 标记混淆，尾缓冲按字节截断不会产生误匹配。
+class ThinkBoundaryScanner {
+public:
+    explicit ThinkBoundaryScanner(long long t_start_us) : t_start_us_(t_start_us) {}
+
+    // 追加一个完整 UTF-8 字符；首次命中 </think> 记 hit_us_。
+    void feed(const std::string &utf8Char) {
+        if (hit_) return;
+        tail_.append(utf8Char);
+        const size_t kTagSize = 8;  // "</think>" 长度
+        if (tail_.size() > kTagSize) tail_ = tail_.substr(tail_.size() - kTagSize);
+        if (tail_ == "</think>") { hit_ = true; hit_us_ = nowUs() - t_start_us_; }
+    }
+
+    bool hit() const { return hit_; }
+    long long hitUs() const { return hit_us_; }
+
+private:
+    static long long nowUs() {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    long long t_start_us_;
+    bool hit_ = false;
+    long long hit_us_ = -1;
+    std::string tail_;
+};
+
 // ===== stepping 流状态（移植自 MnnLlmChat llm_session.cpp AndroidSteppingStreamState）=====
 // processChunk 处理一个完整 UTF-8 字符：普通文本 -> full_text 累积 + StreamBatcher 批处理回调 + 每字符
 // 轮询 abort；<eop> -> flush 缓冲后挂起。finalizePendingEop 收尾：置 generate_text_end（<eop> 由
@@ -246,6 +284,8 @@ struct AndroidSteppingStreamState {
     bool &stop_requested;
     std::string &full_text;
     const char *result_log_tag;
+    // v2（Task 1）：思考边界旁路扫描（可选，nullptr=不扫描）。不改变 <eop>/EOS/UTF-8 行为。
+    ThinkBoundaryScanner *think_scanner = nullptr;
     bool pending_eop = false;
 
     void processChunk(const std::string &utf8Char) {
@@ -256,6 +296,8 @@ struct AndroidSteppingStreamState {
             return;
         }
         full_text.append(utf8Char);
+        // v2（Task 1）：思考边界旁路扫描（只观察，不吞改输出流；命中时刻由扫描器换算）。
+        if (think_scanner) think_scanner->feed(utf8Char);
         batcher.add(utf8Char);
         // 每字符轮询 shouldAbort（不受批处理缓冲影响）：取消/策略停止在 1 token 内响应，
         // 无需等下一次 flush。
@@ -391,15 +433,230 @@ static std::string json_escape(const std::string &s) {
     return out;
 }
 
-// 进入 generate 之前就失败（null handle / 消息解析失败）时的兜底摘要（BACKEND_FAILURE）。
-static std::string build_failure_summary(const char *stage, const std::string &message) {
+// 进入 generate 之前就失败（null handle / 消息解析失败）时的兜底摘要（v2 契约：BACKEND_FAILURE +
+// errorCode；其余 v2 观测字段取默认/可空，thinkingConfigAccepted=null 表示「未尝试」）。
+static std::string build_failure_summary(const char *stage, const char *code, const std::string &message) {
     std::ostringstream oss;
-    oss << "{\"v\":1,\"completionReason\":\"BACKEND_FAILURE\",\"promptTokens\":0,"
+    oss << "{\"v\":2,\"completionReason\":\"BACKEND_FAILURE\",\"promptTokens\":0,"
         << "\"generatedTokens\":0,\"prefillUs\":0,\"decodeUs\":0,\"reuseKv\":-1,"
         << "\"callbackCount\":0,\"callbackBytes\":0,\"firstDeltaUs\":null,"
         << "\"errorStage\":\"" << stage << "\",\"errorMessage\":\""
-        << json_escape(message) << "\"}";
+        << json_escape(message) << "\""
+        << ",\"decodeStepTokens\":1,\"thinkingConfigAccepted\":null"
+        << ",\"reasoningEndUs\":null,\"firstBodyDeltaUs\":null"
+        << ",\"errorCode\":\"" << code << "\"}";
     return oss.str();
+}
+
+// ===== v2 生成会话（Task 1：prefill/decode/finalize 三阶段状态机）=====
+// 由 nativeGenerateStream 构造，按 prefill -> decode 循环 -> finalize 顺序推进；行为与 v1
+// （generate(1) 逐 token stepping）完全一致：StreamBatcher / UTF-8 处理 / syncPromptCache /
+// eraseHistory / <eop> 语义全部保留，仅把逻辑抽成清晰阶段函数并新增 v2 观测字段
+// （decodeStepTokens / thinkingConfigAccepted / reasoningEndUs / firstBodyDeltaUs / errorCode）。
+struct GenerationSession {
+    JNIEnv *env = nullptr;
+    Llm *llm = nullptr;
+    int max_tokens = 0;     // 已解析（<=0 -> 2048）
+    int decode_step = 1;    // clamp 后的实际步长（1..4）
+    // ---- 流式/中断状态（与 v1 语义一致）----
+    bool stop_requested = false;
+    bool generate_text_end = false;
+    std::string full_text;
+    // ---- v2 观测（us，相对生成起点 t_start_us；-1=未观测到）----
+    long long t_start_us = 0;             // 生成起点（prefill 前）
+    long long first_delta_us = -1;        // 首回调时刻
+    long long reasoning_end_us = -1;      // </think> 命中时刻
+    long long first_body_delta_us = -1;   // </think> 之后首个回调时刻
+    bool thinking_config_accepted = false;  // set_config(enable_thinking) 返回值
+    // ---- 错误/指标状态 ----
+    const char *error_stage = nullptr;    // nullptr=无错误；"PREFILL"/"DECODE"
+    std::string error_message;
+    std::string error_code;               // 错误码（与 error_stage 同生；空串=无错误）
+    int gen_len_cb = 0;                   // 回调 gen_len 回退值（flush 首选 LlmContext::gen_seq_len）
+    size_t kv_before_decode = 0;          // prefill 后、decode 前的 KV 长度（中断回滚基准）
+    int current_size = 0;                 // 本轮 decode 步数（<= max_tokens）
+
+    static long long nowUs() {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    long long elapsedUs() const { return nowUs() - t_start_us; }
+};
+
+// ===== 阶段一：prefill（采样/思考 set_config + response 前缀填充 + 中断即时检查 + KV 基准）=====
+// 与 v1 行为一致：采样参数 best-effort 再 set_config 一次（load() 前已设，此处部分构建按 response
+// 重建采样器则生效）；enable_thinking 经 jinja context set_config（返回值记 thinkingConfigAccepted
+// 供 v2 遥测）；response(history, &os, "<eop>", 0) 仅 prefill，把 ostream 存入 LlmContext 供后续
+// generate 继续写入；返回后立即轮询 abort（prefill 是 MNN 单次阻塞调用，期间无法安全跨线程
+// 释放/中断，watchdog 只置 Kotlin abort）并取 KV 基准用于中断回滚。
+static void session_prefill(GenerationSession &s, const ChatMessages &history, std::ostream &os,
+                            float temperature, float top_p, float repeat_penalty,
+                            bool enable_thinking) {
+    // belt-and-suspenders：采样参数已在 nativeCreate 的 load() 前 set_config（保证生效，键名
+    // topP/repetition_penalty 已修正）。此处按调用方参数再设一次 best-effort--若某些 MNN 构建
+    // 按 response() 重建采样器则按此生效；若采样器确为 load() 一次性构建（本构建的行为），则此调用
+    // 为 no-op，不影响正确性。键名同样用实测正确的 topP / repetition_penalty。
+    char sample_conf[160];
+    snprintf(sample_conf, sizeof(sample_conf),
+             "{\"temperature\":%.4f,\"topP\":%.4f,\"repetition_penalty\":%.4f}",
+             (double)temperature, (double)top_p, (double)repeat_penalty);
+    s.llm->set_config(sample_conf);
+
+    // 深度思考开关：经 jinja context 的 enable_thinking 控制（Qwen3 / DeepSeek-R1 等推理模型的 chat
+    // 模板据此决定是否在 generation prompt 末尾插入 <think> 前缀）。set_config -> setChatTemplate ->
+    // set_chat_template_context 立即更新 tokenizer 上下文，下一次 apply_chat_template（下方 response
+    // 内）即生效，**无需重载模型**。enable_thinking=false 时模板注入空 <think>\n\n</think> 前缀，
+    // 模型跳过推理直接作答；true 时插入 <think>\n，模型生成 reasoning 后 </think> 再作答。
+    // 仅对含 enable_thinking 分支的 jinja 模板生效；Llama/Gemma 等无此分支的模板忽略该上下文，无害。
+    // 出处：MNN dflash.cpp:84 set_config({"jinja":{"context":{"enable_thinking":false}}})；llm.cpp setChatTemplate。
+    const char *think_conf = enable_thinking
+        ? "{\"jinja\":{\"context\":{\"enable_thinking\":true}}}"
+        : "{\"jinja\":{\"context\":{\"enable_thinking\":false}}}";
+    s.thinking_config_accepted = s.llm->set_config(think_conf);
+    if (!s.thinking_config_accepted) {
+        MNN_LOGW("set_config enable_thinking 失败（继续用模型默认）: %s", think_conf);
+    }
+
+    MNN_LOGI("stepping prefill: msgs=%zu max_tokens=%d", history.size(), s.max_tokens);
+    // prefill only（max_new_tokens=0），<eop> 作停止串。MNN 按模型 chat 模板格式化 history，
+    // 并与上一轮 mCachedPromptText 做前缀匹配 -> reuse_kv 仅 prefill 新增 token。ostream 存入
+    // LlmContext，供后续 generate(1) 继续写入。
+    try {
+        s.llm->response(history, &os, "<eop>", 0);
+    } catch (const std::exception &e) {
+        MNN_LOGE("prefill response 异常: %s", e.what());
+        if (s.env->ExceptionCheck()) s.env->ExceptionClear();
+        s.error_stage = "PREFILL";
+        s.error_message = json_escape(e.what());
+        s.error_code = "PREFILL_EXCEPTION";
+    }
+
+    // prefill 是 MNN 单次阻塞调用，期间无法安全跨线程释放/中断；watchdog 只置 Kotlin abort。
+    // response 一返回立即检查，保证 timeout/cancel 不再额外 decode 1 token。
+    s.stop_requested = s.stop_requested || should_abort(s.env);
+
+    // prefill 后、decode 前的 KV 长度：中断时据此回滚生成的 token，使下一轮前缀仍命中缓存。
+    try { s.kv_before_decode = s.llm->getCurrentHistory(); } catch (...) {}
+}
+
+// ===== 阶段二：decode 循环（stepping；步长 clamp 值；每步内逐 token 检查 EOS/maxTokens/abort）=====
+// 与 v1 一致：每步 generate(1) 后若 <eop> 入流（pending_eop）即真·EOS -> 收尾退出；shouldAbort()
+// 命中即停（1 token 内）。v2 多 token 步长（decode_step>1）下，内层循环逐 token 复核
+// EOS/maxTokens/shouldAbort，保证取消粒度与 decodeStepTokens 一致——即使 step>1 也在 1 token 内响应。
+static void session_decode(GenerationSession &s, AndroidSteppingStreamState &stream_state) {
+    while (!s.stop_requested && !s.generate_text_end && s.current_size < s.max_tokens) {
+        for (int i = 0; i < s.decode_step && !s.stop_requested && !s.generate_text_end && !s.error_stage; ++i) {
+            try {
+                s.llm->generate(1);
+            } catch (const std::exception &e) {
+                MNN_LOGE("generate(1) 异常: %s", e.what());
+                if (s.env->ExceptionCheck()) s.env->ExceptionClear();
+                s.error_stage = "DECODE";
+                s.error_message = json_escape(e.what());
+                s.error_code = "DECODE_EXCEPTION";
+                break;
+            }
+            s.current_size++;
+            s.gen_len_cb = s.current_size;  // 回调 gen_len 回退值（flush 首选 LlmContext::gen_seq_len）
+            if (stream_state.pending_eop) {
+                stream_state.finalizePendingEop();  // 真·EOS：<eop> 由 ArGeneration is_stop 分支写出
+            }
+            // v2：每步内逐 token 复核 abort（v1 靠外层 while 条件，等价；多 token 步长下保证
+            // 取消粒度与 decodeStepTokens 一致，1 token 内停止）。
+            if (!s.error_stage && should_abort(s.env)) s.stop_requested = true;
+        }
+        if (s.error_stage) break;  // 解码异常：与 v1 break 语义一致（仍走下方收尾）
+    }
+}
+
+// ===== 阶段三：finalize（EOS 兜底收尾 + 缓冲 flush + KV 对齐 + 指标 + 完成原因 + v2 摘要 JSON）=====
+// 与 v1 一致：pending EOS 兜底收尾、batcher.flush() 不丢字；正常结束 syncPromptCache、
+// 中断 eraseHistory(kv_before_decode, 0) 回滚（避免半句污染前缀导致下一轮全量重 prefill）；
+// 摘要按 v2 契约输出（新增 decodeStepTokens/thinkingConfigAccepted/reasoningEndUs/
+// firstBodyDeltaUs/errorCode）。
+static jstring session_finalize(GenerationSession &s, StreamBatcher &batcher, ChatMessages &history) {
+    // KV 缓存对齐（多轮前缀复用关键）：
+    //  - 正常结束：把 assistant 回复并入 history 后 syncPromptCache——MNN 据此对齐 mCachedPromptText
+    //    （含本次回复），下一轮 response(full_history) 命中前缀 -> 仅 prefill 新 user。
+    //  - 中断：eraseHistory(kv_before_decode, 0) 回滚到 prefill 后状态，避免被取消的半句污染前缀
+    //    导致下一轮全量重 prefill。current_size==0（prefill 即被取消/未产 token）则无需回滚。
+    //  - 策略截断（Kotlin onToken 返回 false -> abort）：走中断分支，显式失效 prompt cache，
+    //    绝不 sync 被丢弃的生成后缀。
+    if (!s.stop_requested) {
+        if (!s.full_text.empty()) {
+            history.emplace_back("assistant", s.full_text);
+        }
+        try {
+            s.llm->syncPromptCache(history);
+        } catch (const std::exception &e) {
+            MNN_LOGW("syncPromptCache 异常（忽略）: %s", e.what());
+        }
+    } else if (s.current_size > 0) {
+        try {
+            s.llm->eraseHistory(s.kv_before_decode, 0);
+        } catch (const std::exception &e) {
+            MNN_LOGW("eraseHistory 异常（忽略）: %s", e.what());
+        }
+        MNN_LOGI("中断：已回滚 KV 至 prefill 后状态 kv_before=%zu generated=%d",
+                 s.kv_before_decode, s.current_size);
+    }
+
+    // 指标 + 摘要：prompt_len（本轮 prefill 的 token 数，应远小于完整历史=前缀复用生效）/gen_len/
+    // reuse_kv（本轮是否命中前缀缓存）。多轮中若 prompt_len 始终≈完整历史且 reuse_kv=0，说明前缀
+    // 复用未生效，需排查 syncPromptCache / 历史一致性。
+    int prompt_len = 0, gen_len = 0, reuse = -1;
+    long long prefill_us = 0, decode_us = 0;
+    {
+        const LlmContext *ctx = s.llm->getContext();
+        if (ctx) {
+            prompt_len = ctx->prompt_len;
+            gen_len = ctx->gen_seq_len;
+            prefill_us = (long long)ctx->prefill_us;
+            decode_us = (long long)ctx->decode_us;
+            try { reuse = s.llm->reuse_kv() ? 1 : 0; } catch (...) { reuse = -1; }
+            MNN_LOGI("response done: prompt_len=%d gen_len=%d all_seq_len=%d reuse_kv=%d "
+                     "prefill_us=%lld decode_us=%lld stopped=%d cb=%d/%zu first_delta_us=%lld "
+                     "reasoning_end_us=%lld first_body_delta_us=%lld step=%d",
+                     prompt_len, gen_len, ctx->all_seq_len, reuse,
+                     prefill_us, decode_us, (int)s.stop_requested,
+                     batcher.callbackCount(), batcher.pushedBytes(), s.first_delta_us,
+                     s.reasoning_end_us, s.first_body_delta_us, s.decode_step);
+        }
+    }
+
+    // 完成原因（native best-effort；Kotlin 侧有更高优先级推导：策略截断/用户取消/后端失败）。
+    const char *reason = "EOS";
+    if (s.error_stage != nullptr) {
+        reason = "BACKEND_FAILURE";
+    } else if (s.stop_requested) {
+        reason = "USER_CANCEL";  // Kotlin 侧区分 USER_CANCEL / POLICY_TRUNCATION（onToken 返回 false）
+    } else if (!s.generate_text_end) {
+        reason = "MAX_TOKENS";   // 循环因 current_size >= max_tokens 退出且未遇 EOS
+    }
+
+    // 紧凑版本化 GenerationSummary JSON（v2，Task 1；替代全量文本字节数组）。full_text 仅在
+    // native 内部供 syncPromptCache 使用，不再整份拷贝回 Kotlin。
+    std::ostringstream oss;
+    oss << "{\"v\":2,\"completionReason\":\"" << reason << "\""
+        << ",\"promptTokens\":" << prompt_len
+        << ",\"generatedTokens\":" << gen_len
+        << ",\"prefillUs\":" << prefill_us
+        << ",\"decodeUs\":" << decode_us
+        << ",\"reuseKv\":" << reuse
+        << ",\"callbackCount\":" << batcher.callbackCount()
+        << ",\"callbackBytes\":" << batcher.pushedBytes()
+        << ",\"firstDeltaUs\":" << (s.first_delta_us >= 0 ? std::to_string(s.first_delta_us) : "null")
+        << ",\"errorStage\":" << (s.error_stage ? ("\"" + std::string(s.error_stage) + "\"") : "null")
+        << ",\"errorMessage\":" << (s.error_message.empty() ? "null" : ("\"" + s.error_message + "\""))
+        // ---- v2 新增（Task 1）：decode 实际步长 / 思考配置接受 / 思考边界 / 首正文 / 错误码 ----
+        << ",\"decodeStepTokens\":" << s.decode_step
+        << ",\"thinkingConfigAccepted\":" << (s.thinking_config_accepted ? "true" : "false")
+        << ",\"reasoningEndUs\":" << (s.reasoning_end_us >= 0 ? std::to_string(s.reasoning_end_us) : "null")
+        << ",\"firstBodyDeltaUs\":" << (s.first_body_delta_us >= 0 ? std::to_string(s.first_body_delta_us) : "null")
+        << ",\"errorCode\":" << (s.error_code.empty() ? "null" : ("\"" + s.error_code + "\""))
+        << "}";
+    MNN_LOGI("nativeGenerateStream summary: %s", oss.str().c_str());
+    return s.env->NewStringUTF(oss.str().c_str());
 }
 
 // ===== JNI 导出 =====
@@ -511,13 +768,16 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStream(
         jint max_tokens, jfloat temperature,
         jfloat top_p, jfloat repeat_penalty,
         jboolean enable_thinking,
-        jint batch_bytes, jint batch_ms) {
+        jint batch_bytes, jint batch_ms,
+        jint decode_step_tokens) {   // v2（Task 1）：末尾追加；clamp 到 [1,4]，缺省/非法值 -> 1
 
     Llm *llm = (Llm *)handle;
-    if (!llm) return env->NewStringUTF(build_failure_summary("LOAD", "null handle").c_str());
+    if (!llm) return env->NewStringUTF(
+        build_failure_summary("LOAD", "LOAD_NULL_HANDLE", "null handle").c_str());
 
     const char *jstr = env->GetStringUTFChars(messages_json, nullptr);
-    if (!jstr) return env->NewStringUTF(build_failure_summary("LOAD", "messages_json 不可读").c_str());
+    if (!jstr) return env->NewStringUTF(
+        build_failure_summary("LOAD", "LOAD_MESSAGES_JSON", "messages_json 不可读").c_str());
     std::string json(jstr);
     env->ReleaseStringUTFChars(messages_json, jstr);
 
@@ -525,66 +785,55 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStream(
     parse_messages(json, history);
     if (history.empty()) {
         MNN_LOGE("消息列表解析为空，放弃推理");
-        return env->NewStringUTF(build_failure_summary("LOAD", "消息列表解析为空").c_str());
+        return env->NewStringUTF(
+            build_failure_summary("LOAD", "LOAD_PARSE_EMPTY", "消息列表解析为空").c_str());
     }
 
-    // belt-and-suspenders：采样参数已在 nativeCreate 的 load() 前 set_config（保证生效，键名
-    // topP/repetition_penalty 已修正）。此处按调用方参数再设一次 best-effort--若某些 MNN 构建
-    // 按 response() 重建采样器则按此生效；若采样器确为 load() 一次性构建（本构建的行为），则此调用
-    // 为 no-op，不影响正确性。键名同样用实测正确的 topP / repetition_penalty。
-    char sample_conf[160];
-    snprintf(sample_conf, sizeof(sample_conf),
-             "{\"temperature\":%.4f,\"topP\":%.4f,\"repetition_penalty\":%.4f}",
-             (double)temperature, (double)top_p, (double)repeat_penalty);
-    llm->set_config(sample_conf);
+    // v2：decode 步长 clamp 到 [1,4]（非法值/缺省 -> 1，等价 v1 逐 token 行为）。
+    int decode_step = decode_step_tokens < 1 ? 1 : (decode_step_tokens > 4 ? 4 : decode_step_tokens);
 
-    // 深度思考开关：经 jinja context 的 enable_thinking 控制（Qwen3 / DeepSeek-R1 等推理模型的 chat 模板据此
-    // 决定是否在 generation prompt 末尾插入 <think> 前缀）。set_config -> setChatTemplate ->
-    // set_chat_template_context 立即更新 tokenizer 上下文，下一次 apply_chat_template（下方 response 内）即生效，
-    // **无需重载模型**。enable_thinking=false 时模板注入空 <think>\n\n</think> 前缀，模型跳过推理直接作答；
-    // true 时插入 <think>\n，模型生成 reasoning 后 </think> 再作答。
-    // 仅对含 enable_thinking 分支的 jinja 模板生效；Llama/Gemma 等无此分支的模板忽略该上下文，无害。
-    // 出处：MNN dflash.cpp:84 set_config({"jinja":{"context":{"enable_thinking":false}}})；llm.cpp setChatTemplate。
-    const char *think_conf = (enable_thinking == JNI_TRUE)
-        ? "{\"jinja\":{\"context\":{\"enable_thinking\":true}}}"
-        : "{\"jinja\":{\"context\":{\"enable_thinking\":false}}}";
-    if (!llm->set_config(think_conf)) {
-        MNN_LOGW("set_config enable_thinking 失败（继续用模型默认）: %s", think_conf);
-    }
+    // ===== v2 生成会话：prefill -> decode 循环 -> finalize 三阶段（Task 1）=====
+    GenerationSession session;
+    session.env = env;
+    session.llm = llm;
+    session.max_tokens = max_tokens > 0 ? (int)max_tokens : 2048;
+    session.decode_step = decode_step;
+    session.t_start_us = GenerationSession::nowUs();  // 生成起点：所有 v2 时延观测的相对基准
 
-    int n = max_tokens > 0 ? (int)max_tokens : 2048;
-
-    bool stop_requested = false;
-    bool generate_text_end = false;
-    std::string full_text;
+    // 思考边界旁路扫描（v2）：</think> 命中时刻 -> reasoning_end_us（us，相对生成起点）。
+    ThinkBoundaryScanner think_scanner(session.t_start_us);
 
     // 流式批处理（Task 4 Step 2）：首个完整可见字符立即 flush（首 delta 即时性），其余按
     // batch_bytes/batch_ms 聚合后再回调。策略是"仅本次生成"的，经参数由 Kotlin 传入
     // （Task 6 性能模式接入前先用 Balanced 默认 256B/16ms），与 load 配置分离。
-    auto t_start = std::chrono::steady_clock::now();
-    long long first_delta_us = -1;
-    // 回调用真实已生成 token 数（供浮窗实时 tps）。批处理后回调次数≠token 数，不能再用回调计数。
-    // LlmContext::gen_seq_len 在解码线程同步读（无并发），flush 时已含正在生成的 token，最准确；
-    // 读失败回退 stepping 步数计数（gen_len_cb，每步 generate(1) 后更新）。
-    int gen_len_cb = 0;
     StreamBatcher batcher(
-        [&env, &t_start, &first_delta_us, llm, &gen_len_cb](const std::string &batch) {
-            if (first_delta_us < 0) {
-                first_delta_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now() - t_start).count();
+        [&session, &think_scanner](const std::string &batch) {
+            // 首回调记 first_delta_us（首 delta 即时性）；</think> 之后的首个回调记
+            // first_body_delta_us（v2：首个非思考正文 delta；无思考段则恒不置位）。
+            if (think_scanner.hit() && session.reasoning_end_us < 0) {
+                session.reasoning_end_us = think_scanner.hitUs();
             }
-            int gen_len_now = gen_len_cb;
+            if (session.first_delta_us < 0) {
+                session.first_delta_us = session.elapsedUs();
+            }
+            if (session.reasoning_end_us >= 0 && session.first_body_delta_us < 0) {
+                session.first_body_delta_us = session.elapsedUs();
+            }
+            // 回调用真实已生成 token 数（供浮窗实时 tps）。批处理后回调次数≠token 数，不能再用
+            // 回调计数。LlmContext::gen_seq_len 在解码线程同步读（无并发），flush 时已含正在生成的
+            // token，最准确；读失败回退 stepping 步数计数（gen_len_cb，每步 generate(1) 后更新）。
+            int gen_len_now = session.gen_len_cb;
             try {
-                const LlmContext *c = llm->getContext();
+                const LlmContext *c = session.llm->getContext();
                 if (c) gen_len_now = c->gen_seq_len;
             } catch (...) {}
-            push_bytes(env, batch.data(), (int)batch.size(), gen_len_now);
+            push_bytes(session.env, batch.data(), (int)batch.size(), gen_len_now);
         },
         (int)batch_bytes, (int)batch_ms);
 
     AndroidSteppingStreamState stream_state{
-            env, batcher, generate_text_end, stop_requested, full_text,
-            "nativeGenerateStream Result"
+            env, batcher, session.generate_text_end, session.stop_requested, session.full_text,
+            "nativeGenerateStream Result", &think_scanner
     };
     Utf8StreamProcessor processor([&stream_state](const std::string &ch) {
         stream_state.processChunk(ch);
@@ -604,125 +853,17 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStream(
         }
     }
 
-    const char *error_stage = nullptr;
-    std::string error_message;
+    // 阶段一：prefill（采样/思考 set_config + response 前缀填充 + abort 即时检查 + KV 基准）。
+    session_prefill(session, history, os, temperature, top_p, repeat_penalty,
+                    enable_thinking == JNI_TRUE);
 
-    MNN_LOGI("stepping prefill: msgs=%zu max_tokens=%d", history.size(), n);
-    // prefill only（max_new_tokens=0），<eop> 作停止串。MNN 按模型 chat 模板格式化 history，
-    // 并与上一轮 mCachedPromptText 做前缀匹配 -> reuse_kv 仅 prefill 新增 token。ostream 存入
-    // LlmContext，供后续 generate(1) 继续写入。
-    try {
-        llm->response(history, &os, "<eop>", 0);
-    } catch (const std::exception &e) {
-        MNN_LOGE("prefill response 异常: %s", e.what());
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        error_stage = "PREFILL";
-        error_message = json_escape(e.what());
-    }
-
-    // prefill 是 MNN 单次阻塞调用，期间无法安全跨线程释放/中断；watchdog 只置 Kotlin abort。
-    // response 一返回立即检查，保证 timeout/cancel 不再额外 decode 1 token。
-    stop_requested = stop_requested || should_abort(env);
-
-    // prefill 后、decode 前的 KV 长度：中断时据此回滚生成的 token，使下一轮前缀仍命中缓存。
-    size_t kv_before_decode = 0;
-    try { kv_before_decode = llm->getCurrentHistory(); } catch (...) {}
-
-    int current_size = 0;
-    // 逐 token decode：每步 generate(1) 后若 <eop> 入流（pending_eop）即真·EOS -> 收尾退出；
-    // shouldAbort() 命中即 break，1 个 token 内停止，取代旧版 let-finish。
-    while (!stop_requested && !generate_text_end && current_size < n) {
-        try {
-            llm->generate(1);
-        } catch (const std::exception &e) {
-            MNN_LOGE("generate(1) 异常: %s", e.what());
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            error_stage = "DECODE";
-            error_message = json_escape(e.what());
-            break;
-        }
-        current_size++;
-        gen_len_cb = current_size;  // 回调 gen_len 回退值（flush 首选 LlmContext::gen_seq_len）
-        if (stream_state.pending_eop) {
-            stream_state.finalizePendingEop();  // 真·EOS：<eop> 由 ArGeneration is_stop 分支写出
-        }
-    }
+    // 阶段二：decode 循环（stepping；步长 clamp 值；每步内逐 token 检查 EOS/maxTokens/abort）。
+    session_decode(session, stream_state);
     stream_state.finalizePendingEop();  // 兜底（到 max_tokens 未遇 EOS，或循环被 break）
     batcher.flush();                    // 收尾 flush：abort / max_tokens / 错误路径均不丢已缓冲内容
 
-    // KV 缓存对齐（多轮前缀复用关键）：
-    //  - 正常结束：把 assistant 回复并入 history 后 syncPromptCache——MNN 据此对齐 mCachedPromptText
-    //    （含本次回复），下一轮 response(full_history) 命中前缀 -> 仅 prefill 新 user。
-    //  - 中断：eraseHistory(kv_before_decode, 0) 回滚到 prefill 后状态，避免被取消的半句污染前缀
-    //    导致下一轮全量重 prefill。current_size==0（prefill 即被取消/未产 token）则无需回滚。
-    //  - 策略截断（Kotlin onToken 返回 false -> abort）：走中断分支，显式失效 prompt cache，
-    //    绝不 sync 被丢弃的生成后缀。
-    if (!stop_requested) {
-        if (!full_text.empty()) {
-            history.emplace_back("assistant", full_text);
-        }
-        try {
-            llm->syncPromptCache(history);
-        } catch (const std::exception &e) {
-            MNN_LOGW("syncPromptCache 异常（忽略）: %s", e.what());
-        }
-    } else if (current_size > 0) {
-        try {
-            llm->eraseHistory(kv_before_decode, 0);
-        } catch (const std::exception &e) {
-            MNN_LOGW("eraseHistory 异常（忽略）: %s", e.what());
-        }
-        MNN_LOGI("中断：已回滚 KV 至 prefill 后状态 kv_before=%zu generated=%d", kv_before_decode, current_size);
-    }
-
-    // 指标 + 摘要：prompt_len（本轮 prefill 的 token 数，应远小于完整历史=前缀复用生效）/gen_len/
-    // reuse_kv（本轮是否命中前缀缓存）。多轮中若 prompt_len 始终≈完整历史且 reuse_kv=0，说明前缀
-    // 复用未生效，需排查 syncPromptCache / 历史一致性。
-    int prompt_len = 0, gen_len = 0, reuse = -1;
-    long long prefill_us = 0, decode_us = 0;
-    {
-        const LlmContext *ctx = llm->getContext();
-        if (ctx) {
-            prompt_len = ctx->prompt_len;
-            gen_len = ctx->gen_seq_len;
-            prefill_us = (long long)ctx->prefill_us;
-            decode_us = (long long)ctx->decode_us;
-            try { reuse = llm->reuse_kv() ? 1 : 0; } catch (...) { reuse = -1; }
-            MNN_LOGI("response done: prompt_len=%d gen_len=%d all_seq_len=%d reuse_kv=%d "
-                     "prefill_us=%lld decode_us=%lld stopped=%d cb=%d/%zu first_delta_us=%lld",
-                     prompt_len, gen_len, ctx->all_seq_len, reuse,
-                     prefill_us, decode_us, (int)stop_requested,
-                     batcher.callbackCount(), batcher.pushedBytes(), first_delta_us);
-        }
-    }
-
-    // 完成原因（native best-effort；Kotlin 侧有更高优先级推导：策略截断/用户取消/后端失败）。
-    const char *reason = "EOS";
-    if (error_stage != nullptr) {
-        reason = "BACKEND_FAILURE";
-    } else if (stop_requested) {
-        reason = "USER_CANCEL";  // Kotlin 侧区分 USER_CANCEL / POLICY_TRUNCATION（onToken 返回 false）
-    } else if (!generate_text_end) {
-        reason = "MAX_TOKENS";   // 循环因 current_size >= n 退出且未遇 EOS
-    }
-
-    // 紧凑版本化 GenerationSummary JSON（替代全量文本字节数组）。full_text 仅在 native 内部
-    // 供 syncPromptCache 使用，不再整份拷贝回 Kotlin。
-    std::ostringstream oss;
-    oss << "{\"v\":1,\"completionReason\":\"" << reason << "\""
-        << ",\"promptTokens\":" << prompt_len
-        << ",\"generatedTokens\":" << gen_len
-        << ",\"prefillUs\":" << prefill_us
-        << ",\"decodeUs\":" << decode_us
-        << ",\"reuseKv\":" << reuse
-        << ",\"callbackCount\":" << batcher.callbackCount()
-        << ",\"callbackBytes\":" << batcher.pushedBytes()
-        << ",\"firstDeltaUs\":" << (first_delta_us >= 0 ? std::to_string(first_delta_us) : "null")
-        << ",\"errorStage\":" << (error_stage ? ("\"" + std::string(error_stage) + "\"") : "null")
-        << ",\"errorMessage\":" << (error_message.empty() ? "null" : ("\"" + error_message + "\""))
-        << "}";
-    MNN_LOGI("nativeGenerateStream summary: %s", oss.str().c_str());
-    return env->NewStringUTF(oss.str().c_str());
+    // 阶段三：finalize（KV 对齐 + 指标 + 完成原因 + v2 摘要 JSON）。
+    return session_finalize(session, batcher, history);
 }
 
 JNIEXPORT void JNICALL
@@ -788,7 +929,8 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGetLastError(
 // Kotlin 侧 MnnBridge 加载库后解析一次（nativeGetRuntimeInfo），与期望 ABI/commit 不符时
 // 置 nativeAvailable=false 并暴露诊断（runtimeDiagnostic），在模型加载前拦截不兼容的 native 栈。
 // 能力集反映本 libMNN.so 钉定构建的编译期特性（LLM/低内存/OpenCL/ARM82 开启，QNN 关闭）；
-// stream_batching_v1 在流式批处理改造（后续任务）落地后追加。
+// summary_v2 在 v2 生成契约（Task 1）落地后追加（Kotlin MnnBridge.hasSummaryV2Capability 查询，
+// Task 8 发布门禁据此拒绝旧 native；v1 兼容路径继续可用）。
 // JSON 形如 {"abiVersion":1,"mnnCommit":"af0142...","nativeBuildId":"...","capabilities":["mmap",...]}
 JNIEXPORT jstring JNICALL
 Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGetRuntimeInfo(
@@ -798,7 +940,7 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGetRuntimeInfo(
         "{\"abiVersion\":%d,"
         "\"mnnCommit\":\"%s\","
         "\"nativeBuildId\":\"%s\","
-        "\"capabilities\":[\"mmap\",\"cached_mmap\",\"reuse_kv\",\"opencl\",\"arm82\"]}";
+        "\"capabilities\":[\"mmap\",\"cached_mmap\",\"reuse_kv\",\"opencl\",\"arm82\",\"summary_v2\"]}";
     char buf[512];
     snprintf(buf, sizeof(buf), kFmt,
              (int)CHAT_MNN_JNI_ABI, CHAT_MNN_COMMIT, CHAT_MNN_BUILD_ID);
