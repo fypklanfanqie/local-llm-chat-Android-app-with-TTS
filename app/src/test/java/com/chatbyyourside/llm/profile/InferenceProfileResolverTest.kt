@@ -2,6 +2,7 @@ package com.chatbyyourside.llm.profile
 
 import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendType
+import com.chatbyyourside.llm.benchmark.CertifiedInferenceOptions
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -9,7 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-/** InferenceProfileResolver 尝试链 / 原生 JSON / 指纹测试（Task 7 Steps 1–2）。 */
+/** InferenceProfileResolver 尝试链 / 原生 JSON / 指纹 / 认证门禁测试（Task 7 Steps 1–2 + Task 6）。 */
 class InferenceProfileResolverTest {
 
     private lateinit var resolver: InferenceProfileResolver
@@ -20,12 +21,28 @@ class InferenceProfileResolverTest {
         resolver = InferenceProfileResolver(cacheDir = dir, modelPath = dir.absolutePath + "/m/config.json")
     }
 
+    /** 构造一份认证记录；variant 默认 CPU_OPTIMIZED（认证的基准变体）。 */
+    private fun cert(
+        variant: String = RuntimeVariant.CPU_OPTIMIZED.name,
+        lookahead: Boolean = false,
+        step: Int = 1,
+    ) = CertifiedInferenceOptions(
+        deviceFingerprint = "device-a",
+        modelFingerprint = "model-a",
+        variant = variant,
+        nativeBuildId = "build-1",
+        mnnCommit = "abc123",
+        lookahead = lookahead,
+        decodeStepTokens = step,
+    )
+
     private fun plan(
         preference: BackendPreference,
         mode: InferencePerformanceMode = InferencePerformanceMode.BALANCED,
         threads: Int = 4,
         openclHealth: OpenClHealthState = OpenClHealthState.UNKNOWN,
         lookahead: Boolean = false,
+        certifiedOptions: CertifiedInferenceOptions? = null,
     ): ResolvedInferencePlan = resolver.resolve(
         mode = mode,
         backendPreference = preference,
@@ -37,7 +54,12 @@ class InferenceProfileResolverTest {
         topP = 0.9f,
         repeatPenalty = 1.2f,
         openclHealth = openclHealth,
+        certifiedOptions = certifiedOptions,
     )
+
+    /** CPU_OPTIMIZED attempt 的 native config JSON。 */
+    private fun cpuOptimizedJson(p: ResolvedInferencePlan): String =
+        p.attempts.first { it.variant == RuntimeVariant.CPU_OPTIMIZED }.nativeConfigJson
 
     private fun variants(p: ResolvedInferencePlan): List<RuntimeVariant> = p.attempts.map { it.variant }
 
@@ -180,5 +202,117 @@ class InferenceProfileResolverTest {
         assertTrue(speed.powerPolicy.sustainedMode)
         assertTrue(speed.powerPolicy.aggressiveHint)
         assertTrue(speed.residencyPolicy.keepAliveMs > balanced.residencyPolicy.keepAliveMs)
+    }
+
+    // ===== Task 6：认证门禁（lookahead / decodeStepTokens）=====
+
+    @Test
+    fun lookaheadRequestedWithoutCertificationIsDowngradedToDisabled() {
+        // 用户请求 lookahead 但无认证：回落 false，记 LOOKAHEAD_UNCERTIFIED，config 无 speculative_type。
+        val p = plan(BackendPreference.MNN_CPU, lookahead = true)
+
+        assertTrue(p.downgradeReasons.contains(DowngradeReason.LOOKAHEAD_UNCERTIFIED))
+        assertFalse("未认证不应启用 lookahead", p.powerPolicy.lookahead)
+        assertFalse("native config 不应含 speculative_type", cpuOptimizedJson(p).contains("speculative_type"))
+    }
+
+    @Test
+    fun lookaheadCertifiedForMatchingVariantIsEnabled() {
+        // 认证匹配（CPU_OPTIMIZED + lookahead 证据）+ 用户请求 -> 启用，且 powerPolicy 同步。
+        val p = plan(BackendPreference.MNN_CPU, lookahead = true, certifiedOptions = cert(lookahead = true))
+
+        assertFalse(p.downgradeReasons.contains(DowngradeReason.LOOKAHEAD_UNCERTIFIED))
+        assertTrue("认证后应启用 lookahead", p.powerPolicy.lookahead)
+        assertTrue("native config 应含 speculative_type", cpuOptimizedJson(p).contains("speculative_type"))
+    }
+
+    @Test
+    fun lookaheadCertifiedButUserDidNotRequestStaysDisabled() {
+        // 有认证但用户未请求：lookahead 是用户许可 + 认证证据双条件，不自动开启。
+        val p = plan(BackendPreference.MNN_CPU, lookahead = false, certifiedOptions = cert(lookahead = true))
+
+        assertFalse(p.powerPolicy.lookahead)
+        assertFalse(cpuOptimizedJson(p).contains("speculative_type"))
+        // 用户未请求，不算降级（无 LOOKAHEAD_UNCERTIFIED）。
+        assertFalse(p.downgradeReasons.contains(DowngradeReason.LOOKAHEAD_UNCERTIFIED))
+    }
+
+    @Test
+    fun lookaheadCertWithoutLookaheadEvidenceStaysDisabled() {
+        // 认证存在但无 lookahead 证据（如纯步进认证）：用户请求也不启用，记降级原因。
+        val p = plan(BackendPreference.MNN_CPU, lookahead = true, certifiedOptions = cert(lookahead = false))
+
+        assertTrue(p.downgradeReasons.contains(DowngradeReason.LOOKAHEAD_UNCERTIFIED))
+        assertFalse(p.powerPolicy.lookahead)
+        assertFalse(cpuOptimizedJson(p).contains("speculative_type"))
+    }
+
+    @Test
+    fun lookaheadCertForMismatchedVariantIsNotApplied() {
+        // 认证变体不匹配（OPENCL 组合的认证不是 CPU 组合的证据）-> 不启用 + 记原因。
+        val gpuCert = cert(variant = RuntimeVariant.OPENCL.name, lookahead = true)
+        val p = plan(BackendPreference.MNN_CPU, lookahead = true, certifiedOptions = gpuCert)
+
+        assertTrue(p.downgradeReasons.contains(DowngradeReason.LOOKAHEAD_UNCERTIFIED))
+        assertFalse(p.powerPolicy.lookahead)
+        assertFalse(cpuOptimizedJson(p).contains("speculative_type"))
+    }
+
+    @Test
+    fun decodeStepTokensDefaultsToOneWithoutCertification() {
+        // 无认证：多 token 步进保持关闭（native 逐 token），plan 恒 1。
+        val p = plan(BackendPreference.MNN_CPU)
+
+        assertEquals("未认证步进应默认 1", 1, p.decodeStepTokens)
+        val certified = plan(BackendPreference.MNN_CPU, certifiedOptions = cert(step = 1))
+        assertEquals("认证了步长 1（无步进证据）仍为 1", 1, certified.decodeStepTokens)
+    }
+
+    @Test
+    fun decodeStepTokensTakesCertifiedValueWhenMatching() {
+        // 认证了步进收益（step=2）且变体匹配 -> plan 取认证值。
+        val p = plan(BackendPreference.MNN_CPU, certifiedOptions = cert(step = 2))
+
+        assertEquals("plan 应取认证步长", 2, p.decodeStepTokens)
+    }
+
+    @Test
+    fun decodeStepTokensIgnoredForMismatchedVariant() {
+        // 步进认证但变体不匹配（GPU 组合）-> 恒 1。
+        val p = plan(
+            BackendPreference.MNN_CPU,
+            certifiedOptions = cert(variant = RuntimeVariant.OPENCL.name, step = 4),
+        )
+
+        assertEquals("变体不匹配时步进应回落 1", 1, p.decodeStepTokens)
+    }
+
+    @Test
+    fun lookaheadAndStepGatesAreIndependent() {
+        // 认证既有 lookahead 证据又有步进证据：用户请求 lookahead -> 两者都生效。
+        val p = plan(
+            BackendPreference.MNN_CPU,
+            lookahead = true,
+            certifiedOptions = cert(lookahead = true, step = 2),
+        )
+
+        assertTrue(p.powerPolicy.lookahead)
+        assertTrue(cpuOptimizedJson(p).contains("speculative_type"))
+        assertEquals(2, p.decodeStepTokens)
+        assertFalse(p.downgradeReasons.contains(DowngradeReason.LOOKAHEAD_UNCERTIFIED))
+    }
+
+    @Test
+    fun openclAttemptNeverEnablesLookaheadEvenWhenCertified() {
+        // OpenCL attempt 恒 lookahead=false（lookahead 仅 CPU）；认证不影响 GPU 变体。
+        val p = plan(
+            BackendPreference.AUTO,
+            lookahead = true,
+            openclHealth = OpenClHealthState.MODEL_OK,
+            certifiedOptions = cert(lookahead = true),
+        )
+
+        val openclJson = p.attempts.first { it.variant == RuntimeVariant.OPENCL }.nativeConfigJson
+        assertFalse(openclJson.contains("speculative_type"))
     }
 }

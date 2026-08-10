@@ -80,6 +80,10 @@ enum class DowngradeReason {
     BACKEND_UNAVAILABLE,// 后端/变体不可用（如 OpenCL 缺运行时）
     UNSUPPORTED_SETTING,// 已保存但不再支持的选择，解析为 CPU
     QNN_UNAVAILABLE_IN_STANDARD_BUILD, // 标准构建不含 QNN 运行时；legacy NPU 偏好解析为 CPU（Task 11）
+    // Task 6：用户请求 lookahead 但该 device+model+variant+native 组合没有基准认证
+    // （InferenceCertificationStore 无记录 / 记录无 lookahead 证据 / 变体不匹配）——native
+    // config 回落 lookahead=false，仅在基准证明收益的认证存在时才启用。
+    LOOKAHEAD_UNCERTIFIED,
 }
 
 /**
@@ -98,6 +102,10 @@ data class ResolvedInferencePlan(
     val residencyPolicy: ResidencyPolicy,
     val attempts: List<BackendAttempt>,
     val downgradeReasons: List<DowngradeReason>,
+    /** Task 6：native decode 步长（1=逐 token；2..4=多 token 步进，native clamp 到 [1,4]）。
+     *  仅当 [InferenceCertificationStore] 认证了该 device+model+variant+native 组合的步进收益
+     *  时才 >1，否则恒为 1（多 token 步进保持默认关闭，直到有基准证据）。 */
+    val decodeStepTokens: Int = 1,
 ) {
     /** 首个可用尝试（期望执行的后端/变体）。 */
     val firstAttempt: BackendAttempt? get() = attempts.firstOrNull()

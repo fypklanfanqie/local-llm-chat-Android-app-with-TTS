@@ -2,6 +2,7 @@ package com.chatbyyourside.llm.profile
 
 import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendType
+import com.chatbyyourside.llm.benchmark.CertifiedInferenceOptions
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -24,6 +25,11 @@ import java.security.MessageDigest
  * 热/内存降级不能被 MAXIMUM_SPEED 绕过：CPU 线程数一律取热准入值，模式只影响
  * sustained/性能提示/批处理阈值等非安全键。
  *
+ * Task 6 认证门禁：lookahead 与多 token 步进不是用户无条件配置——只有
+ * [com.chatbyyourside.llm.benchmark.InferenceCertificationStore] 认证了该
+ * device+model+variant+native 组合的基准收益才启用（lookahead 还需用户请求）；未认证一律回落
+ * 安全默认（lookahead=false、decodeStepTokens=1），CPU 线程数保持热准入（线程认证不在本任务范围）。
+ *
  * @param cacheDir 应用私有缓存目录（Context.cacheDir）；运行时缓存按模型指纹命名写入，
  *                 不再写入下载模型目录。
  * @param modelPath MNN 模型 `config.json` 绝对路径；用于 cache 命名空间与负载指纹。
@@ -38,6 +44,11 @@ class InferenceProfileResolver(
      *        可进链；UNKNOWN 需先探测（Task 10），不入链；COOLDOWN/CRASH_BLACKLISTED 不入链。
      * @param thermalAdmittedThreads 热准入后的 CPU 线程数（min(用户, 大核, 温控上限)），
      *        由调用方已算好，MAXIMUM_SPEED 不能绕过。
+     * @param certifiedOptions 该组合（device+model+variant+native）的基准认证（Task 6，
+     *        [com.chatbyyourside.llm.benchmark.InferenceCertificationStore]）；null=未认证。
+     *        用户 lookahead 请求只是使用既有认证的许可——认证缺失/无 lookahead 证据/变体不匹配时
+     *        native config 回落 lookahead=false 并记 [DowngradeReason.LOOKAHEAD_UNCERTIFIED]；
+     *        多 token 步进（decodeStepTokens）同理：仅认证了步进收益的组合才 >1，否则恒 1。
      */
     fun resolve(
         mode: InferencePerformanceMode,
@@ -50,8 +61,22 @@ class InferenceProfileResolver(
         topP: Float,
         repeatPenalty: Float,
         openclHealth: OpenClHealthState,
+        certifiedOptions: CertifiedInferenceOptions? = null,
     ): ResolvedInferencePlan {
         val downgrades = mutableListOf<DowngradeReason>()
+        // Task 6：lookahead 门禁——用户请求只是使用既有认证的许可，不是无条件 native 配置：
+        // 该组合（device+model+CPU 变体+native）有 lookahead 基准认证才启用，否则回落 false。
+        val cert = certifiedOptions
+        val effectiveLookahead = lookahead && cert != null && cert.lookahead &&
+            cert.matchesCpuVariant()
+        if (lookahead && !effectiveLookahead) {
+            downgrades += DowngradeReason.LOOKAHEAD_UNCERTIFIED
+        }
+        // Task 6：多 token 步进门禁——无认证默认 1（native 逐 token，Task 1 clamp [1,4]）；
+        // 仅当该组合认证了步进收益（decodeStepTokens>1）且变体匹配时才 >1。
+        val effectiveStep = if (cert != null && cert.decodeStepTokens > 1 &&
+            cert.matchesCpuVariant()
+        ) cert.decodeStepTokens else 1
 
         // 尝试链：QNN 永不进 AUTO；标准版显式选 NPU 也解析为 CPU（保留已存设置但标不支持）。
         val openclEligible = openclHealth == OpenClHealthState.PROBE_OK ||
@@ -67,18 +92,21 @@ class InferenceProfileResolver(
                     ) {
                         downgrades += DowngradeReason.OPENCL_UNHEALTHY
                     }
-                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_OPTIMIZED, cpu, contextTokens, lookahead, temperature, topP, repeatPenalty))
-                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_COMPATIBILITY, cpu, contextTokens, lookahead, temperature, topP, repeatPenalty))
+                    // Task 6：CPU 两个变体统一使用门禁后的 effectiveLookahead——认证记录于
+                    // CPU_OPTIMIZED（基准变体），CPU_COMPATIBILITY 是极少运行的兜底 attempt，
+                    // 沿用同一认证配置（与既有「用户 lookahead 同时作用于两个 CPU 变体」一致）。
+                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_OPTIMIZED, cpu, contextTokens, effectiveLookahead, temperature, topP, repeatPenalty))
+                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_COMPATIBILITY, cpu, contextTokens, effectiveLookahead, temperature, topP, repeatPenalty))
                 }
                 BackendPreference.MNN_CPU -> {
-                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_OPTIMIZED, cpu, contextTokens, lookahead, temperature, topP, repeatPenalty))
-                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_COMPATIBILITY, cpu, contextTokens, lookahead, temperature, topP, repeatPenalty))
+                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_OPTIMIZED, cpu, contextTokens, effectiveLookahead, temperature, topP, repeatPenalty))
+                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_COMPATIBILITY, cpu, contextTokens, effectiveLookahead, temperature, topP, repeatPenalty))
                 }
                 BackendPreference.MNN_NPU -> {
                     // 标准构建不含 QNN 运行时：保留设置但解析为 CPU，显式降级原因（Task 11）。
                     downgrades += DowngradeReason.QNN_UNAVAILABLE_IN_STANDARD_BUILD
-                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_OPTIMIZED, cpu, contextTokens, lookahead, temperature, topP, repeatPenalty))
-                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_COMPATIBILITY, cpu, contextTokens, lookahead, temperature, topP, repeatPenalty))
+                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_OPTIMIZED, cpu, contextTokens, effectiveLookahead, temperature, topP, repeatPenalty))
+                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_COMPATIBILITY, cpu, contextTokens, effectiveLookahead, temperature, topP, repeatPenalty))
                 }
             }
         }
@@ -98,9 +126,9 @@ class InferenceProfileResolver(
             },
             powerPolicy = PowerPolicy(
                 cpuThreads = thermalAdmittedThreads.coerceAtLeast(1),
-                // lookahead 保持用户设置：设计规格要求仅经基准证明收益后由 MAXIMUM_SPEED 自动开启，
-                // 基准接入前不擅自改变用户选择。
-                lookahead = lookahead,
+                // Task 6：lookahead 同步为门禁后的 effectiveLookahead（与 native config 一致）——
+                // 用户请求只是使用认证的许可；无认证时即使 MAXIMUM_SPEED 也不开启。
+                lookahead = effectiveLookahead,
                 sustainedMode = mode == InferencePerformanceMode.MAXIMUM_SPEED,
                 aggressiveHint = mode == InferencePerformanceMode.MAXIMUM_SPEED,
             ),
@@ -112,8 +140,20 @@ class InferenceProfileResolver(
             ),
             attempts = attempts,
             downgradeReasons = downgrades,
+            // Task 6：多 token 步进门禁后的生效步长（BackendManager 生成期透传 native）。
+            decodeStepTokens = effectiveStep,
         )
     }
+
+    /**
+     * 认证组合是否匹配当前 CPU 变体。
+     *
+     * 认证记录于基准变体 [RuntimeVariant.CPU_OPTIMIZED]（[toCertifiedOptions] 由 CPU 象限推导）；
+     * lookahead / 多 token 步进只对 CPU 有意义，且门禁要求组合完整匹配——变体不一致的认证
+     * （如 GPU 象限认证）不构成 CPU 组合的证据。
+     */
+    private fun CertifiedInferenceOptions.matchesCpuVariant(): Boolean =
+        variant == RuntimeVariant.CPU_OPTIMIZED.name
 
     private fun attempt(
         backend: BackendType,
