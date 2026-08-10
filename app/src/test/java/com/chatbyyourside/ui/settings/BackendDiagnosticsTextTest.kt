@@ -208,7 +208,7 @@ class BackendDiagnosticsTextTest {
         val thinking = rows.first { it.label == "深度思考" }.value
         assertTrue(thinking.contains("已生效"))
         val backend = rows.first { it.label == "实际后端" }.value
-        assertTrue(backend.contains("MNN_CPU"))
+        assertTrue(backend.contains("MNN CPU"))
         assertTrue(backend.contains("CPU_OPTIMIZED"))
         val timings = rows.first { it.label == "阶段计时" }.value
         assertTrue(timings.contains("prefill 123ms"))
