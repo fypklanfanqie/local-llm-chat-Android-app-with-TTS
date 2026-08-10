@@ -121,6 +121,50 @@ fun BackendSettingsScreen(
         if (!contextInputFocused) contextInput = contextLen.toString()
     }
 
+    // ===== Task 7：本次生成诊断 / 认证状态 =====
+    // 模板能力（Step 5）：按 activeLocalModelId 的模型目录解析（IO；解析器进程内缓存按 mtime 失效）。
+    val templateResolver = remember { ThinkingTemplateCapabilityResolver() }
+    val templateCapability by produceState<ThinkingTemplateCapability?>(
+        initialValue = null,
+        activeModelId,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            val id = container.settingsRepository.getActiveLocalModelIdNow() ?: return@withContext null
+            val path = ModelPathResolver.getLoadPath(context, id) ?: return@withContext null
+            templateResolver.resolve(File(path).parentFile ?: File(path))
+        }
+    }
+    // 认证状态：认证存储快照（基准认证落盘后自动刷新）→ 按当前 device+model+CPU 变体+native 组合
+    // 查证（键派生与生产侧一致，Task 6 M-3）。
+    val certRecords by container.inferenceCertificationStore.records.collectAsState(initial = emptyMap())
+    val currentCert by produceState<CertifiedInferenceOptions?>(
+        initialValue = null,
+        activeModelId, certRecords,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            val id = container.settingsRepository.getActiveLocalModelIdNow() ?: return@withContext null
+            val path = ModelPathResolver.getLoadPath(context, id) ?: return@withContext null
+            val runtime = MnnBridge.runtimeInfo ?: return@withContext null
+            val key = InferenceCertificationStore.certKey(
+                deviceFingerprint = BackendHealthCoordinator.deviceFingerprintOf(),
+                modelFingerprint = modelConfigFingerprint(path),
+                variant = RuntimeVariant.CPU_OPTIMIZED.name,
+                nativeBuildId = runtime.nativeBuildId,
+                mnnCommit = runtime.mnnCommit,
+            )
+            certRecords[key]
+        }
+    }
+    // 最近一次生成记录（跨会话存活于 BackendManager 实例；无记录时展示「暂无生成记录」）。
+    val lastTurn = container.backendManager.lastTurnRecord()
+
+    // 基准认证入口状态（运行中禁用按钮；完成后在诊断区展示最近一次判定原因）。
+    var benchmarkRunning by remember { mutableStateOf(false) }
+    var benchmarkOutcome by remember { mutableStateOf<LookaheadCertificationDecision?>(null) }
+    // 两个重置动作的确认对话框开关。
+    var confirmResetHealth by remember { mutableStateOf(false) }
+    var confirmResetCert by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -327,6 +371,55 @@ fun BackendSettingsScreen(
             }
         }
 
+        // ===== 本次生成诊断 =====
+        // Task 7 Step 2/5：最近一次生成的诊断摘要（模板能力 / 认证状态 / 思考 / 后端 / 计时）。
+        GlassListSection(title = "本次生成诊断") {
+            GlassListRow(
+                title = "模型",
+                subtitle = activeModelId ?: "未选择模型",
+                showDivider = true,
+            )
+            GlassListRow(
+                title = "模板思考能力",
+                subtitle = templateCapabilityText(templateCapability),
+                showDivider = true,
+            )
+            GlassListRow(
+                title = "实验认证",
+                subtitle = certificationStatusText(currentCert),
+                showDivider = true,
+            )
+            benchmarkOutcome?.let { outcome ->
+                val text = when (outcome) {
+                    is LookaheadCertificationDecision.Certified ->
+                        "已认证：lookahead 启用（本机已有基准证据）"
+                    is LookaheadCertificationDecision.NotCertified ->
+                        "未认证：${outcome.reasons.joinToString("；")}"
+                }
+                GlassListRow(
+                    title = "最近一次认证判定",
+                    subtitle = text,
+                    showDivider = true,
+                )
+            }
+            val rows = diagnosticRows(lastTurn, templateCapability)
+            if (rows.isEmpty()) {
+                GlassListRow(
+                    title = "最近一次生成",
+                    subtitle = "暂无生成记录（发送一条本地消息后展示诊断摘要）",
+                    showDivider = false,
+                )
+            } else {
+                rows.forEachIndexed { idx, row ->
+                    GlassListRow(
+                        title = row.label,
+                        subtitle = row.value,
+                        showDivider = idx == rows.lastIndex,
+                    )
+                }
+            }
+        }
+
         // ===== 高级（诊断）=====
         // legacy 开关：性能模式解析层接管前保留，供高级诊断；不再作为主设置展示。
         val cpuBoost by container.settingsRepository.llmCpuBoost.collectAsState(initial = true)
@@ -345,14 +438,113 @@ fun BackendSettingsScreen(
             )
             GlassListRow(
                 title = "Lookahead 投机解码（旧开关）",
-                subtitle = "性能模式接管前的高级开关；仅 CPU 后端生效，重复/代码类文本 1.5–3×，首轮无历史时反而拖慢",
+                subtitle = "旧开关（仅 CPU 生效）：需先经「运行基准并认证」取得本机认证后才生效，否则即使打开也不启用",
                 trailing = {
                     Switch(
                         checked = lookahead,
                         onCheckedChange = { scope.launch { container.settingsRepository.setLlmLookahead(it) } },
                     )
                 },
+                showDivider = true,
+            )
+            // Task 7 Step 3：基准触发与认证闭环入口（IO 执行；运行中禁用按钮）。
+            GlassListRow(
+                title = "运行基准并认证（Lookahead）",
+                subtitle = "跑基线 vs lookahead 两轮固定解码对比：收益 ≥10% 且无 TTFT/内存回归才认证启用（约 1–2 分钟，期间请勿退出）",
+                onClick = {
+                    if (benchmarkRunning) return@GlassListRow
+                    scope.launch {
+                        benchmarkRunning = true
+                        val result = withContext(Dispatchers.IO) {
+                            try {
+                                runLookaheadCertification(context, container, container.benchmarkRunner)
+                            } catch (ce: CancellationException) {
+                                throw ce
+                            } catch (e: Exception) {
+                                LookaheadCertificationDecision.NotCertified(listOf("基准异常：${e.message}"))
+                            }
+                        }
+                        benchmarkOutcome = result
+                        benchmarkRunning = false
+                        when (result) {
+                            is LookaheadCertificationDecision.Certified ->
+                                Toast.makeText(context, "基准通过：lookahead 已认证并生效", Toast.LENGTH_SHORT).show()
+                            is LookaheadCertificationDecision.NotCertified ->
+                                Toast.makeText(
+                                    context,
+                                    "未认证：${result.reasons.firstOrNull() ?: "未知原因"}",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                        }
+                    }
+                },
+                trailing = {
+                    if (benchmarkRunning) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("运行", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                    }
+                },
+                showDivider = true,
+            )
+            GlassListRow(
+                title = "清除后端健康记录",
+                subtitle = "删除全部 OpenCL 探测/冷却/黑名单记录，并重置本次会话的后端失败缓存",
+                onClick = { confirmResetHealth = true },
+                showDivider = true,
+            )
+            GlassListRow(
+                title = "清除实验认证",
+                subtitle = "删除全部 lookahead/步进认证；此后相关配置回落未认证默认（不生效）",
+                onClick = { confirmResetCert = true },
                 showDivider = false,
+            )
+        }
+
+        // 清除后端健康记录确认对话框（Task 7 Step 3）：重置健康记录 + 会话失败缓存。
+        if (confirmResetHealth) {
+            AlertDialog(
+                onDismissRequest = { confirmResetHealth = false },
+                title = { Text("清除后端健康记录") },
+                text = { Text("将删除全部后端健康记录（OpenCL 探测/冷却/黑名单），并重置本次会话的后端失败缓存。确定清除？") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        confirmResetHealth = false
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                container.backendHealthStore.resetAll()
+                                container.backendManager.resetSessionFailures()
+                            }
+                            Toast.makeText(context, "后端健康记录已清除", Toast.LENGTH_SHORT).show()
+                        }
+                    }) { Text("清除") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmResetHealth = false }) { Text("取消") }
+                },
+            )
+        }
+
+        // 清除实验认证确认对话框（Task 7 Step 3）：删除全部认证记录。
+        if (confirmResetCert) {
+            AlertDialog(
+                onDismissRequest = { confirmResetCert = false },
+                title = { Text("清除实验认证") },
+                text = { Text("将删除全部 lookahead/步进基准认证记录；此后相关配置回落未认证默认（即使打开旧开关也不生效）。确定清除？") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        confirmResetCert = false
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                container.inferenceCertificationStore.resetAll()
+                            }
+                            Toast.makeText(context, "实验认证已清除", Toast.LENGTH_SHORT).show()
+                        }
+                    }) { Text("清除") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmResetCert = false }) { Text("取消") }
+                },
             )
         }
 
