@@ -74,6 +74,13 @@ class ThinkingOutputClassifier(
     private val templateCapability: ThinkingTemplateCapability,
 ) {
 
+    /** Task 4：最近一次 [finish] 产出的空响应分类（供 [com.chatbyyourside.llm.backend.BackendManager]
+     *  在 GPU 空输出回退判定时**消费**，不重复调用 finish——finish 已被 MnnBackend 在 finally 内收口
+     *  调用过一次（Task 2 fix），二次 finish 会污染旁路观察状态。未 finish 过为 null。
+     *  线程模型：与上层累加器同线程串行调用（generationMutex 内），无需同步。 */
+    var lastEmptyResponseClass: EmptyResponseClass? = null
+        private set
+
     /** 已见完整 `<think>` 开标签。 */
     var sawThinkOpen: Boolean = false
         private set
@@ -216,6 +223,8 @@ class ThinkingOutputClassifier(
             !thinkingRequested && hasBodyText -> ThinkingEffect.DISABLED
             else -> ThinkingEffect.UNKNOWN
         }
+        // Task 4：收口结果落盘到只读属性（BackendManager 回退判定消费；单线程串行无并发问题）。
+        lastEmptyResponseClass = emptyResponseClass
         return ClassificationResult(emptyResponseClass, thinkingEffect)
     }
 

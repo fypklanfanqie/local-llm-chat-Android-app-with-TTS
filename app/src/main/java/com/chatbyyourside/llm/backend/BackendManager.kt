@@ -205,6 +205,9 @@ class BackendManager(
         thinkingClassifier: ThinkingOutputClassifier? = null,
         executionControl: GenerationExecutionControl? = null,
         resolvedPlan: ResolvedInferencePlan? = null,
+        // Task 4：输出策略（GPU 首 delta 前空输出回退 CPU 等；带默认值，旧调用方不受影响——
+        // 默认 DISABLED 使未显式启用的调用保持既有行为）。
+        outputPolicy: GenerationOutputPolicy = GenerationOutputPolicy(),
     ): GenerationResult = generationMutex.withLock {
         val plan = resolvedPlan ?: throw IllegalStateException("Task 7 起 generate 必须提供 resolvedPlan")
         val attempts = plan.attempts
@@ -216,6 +219,14 @@ class BackendManager(
         var lastError: Exception? = null
         // 各尝试失败原因（变体名 + 诊断信息），全失败时汇总报错。
         val failureReasons = mutableListOf<String>()
+        // Task 4：传给 generateStreamMessages 的遥测降级原因（裁决 7）——GPU 空输出回退发生后，
+        // 把 EMPTY_GPU_OUTPUT_FALLBACK 并入后续 attempt（CPU 兜底）的遥测记录；GPU attempt 自身的
+        // 遥测已在 MnnBackend finally 收口，无法追溯修改，故原因随下一 attempt 落盘。
+        var attemptDowngradeReasons = downgradeReasons
+        // Task 4：最后一次「GPU 空输出可回退」的 (摘要, 后端, 完成原因)——链末端兜底：
+        // 回退后循环耗尽（计划仅含 GPU attempt / 后续 attempt 全失败）时原样返回该 GPU 空结果，
+        // 不误报「所有后端尝试均失败」（旧行为即返回该结果，回退只是新增一次 CPU 重试机会）。
+        var lastEmptyFallback: Triple<NativeGenerationSummary?, BackendType, CompletionReason?>? = null
         val effectiveBatchBytes = plan.streamPolicy.batchMaxBytes
         val effectiveBatchMs = plan.streamPolicy.batchMaxMs
         reloadedThisCall = false
@@ -271,7 +282,7 @@ class BackendManager(
                     lastUsedBackend = attempt.backend
                     val summary = backend.generateStreamMessages(
                         messages, attemptMaxTokens, temperature, topP, repeatPenalty, enableThinking, onToken,
-                        effectiveBatchBytes, effectiveBatchMs, downgradeReasons, executionControl,
+                        effectiveBatchBytes, effectiveBatchMs, attemptDowngradeReasons, executionControl,
                         plan.powerPolicy,
                         // Task 1 遥测：性能模式 / 实际配置指纹 / 尝试链 / 加载耗时（冷/热区分）。
                         requestedMode = plan.requestedMode,
@@ -288,6 +299,41 @@ class BackendManager(
                     val completionReason = executionControl?.reason()
                         ?: (backend as? MnnBackend)?.lastTurnRecord?.completionReason
                         ?: summary?.completionReason?.let(CompletionReason::valueOf)
+                    // Task 4：首 delta 前 GPU 空输出回退 CPU。
+                    // - 判定**消费**（不重新分类）MnnBackend finally 内已收口的分类器结果
+                    //   （ThinkingOutputClassifier.lastEmptyResponseClass），绝不再调 finish；
+                    // - 请求级终止（取消/超时/热停/策略截断/后端失败已 requestStop）时
+                    //   executionControl?.reason() != null：既有 canTryNextBackend()==false 检查
+                    //   （循环顶/生成前）与本守卫双重拒绝回退，绝不覆盖既有 requestStop 路径；
+                    // - 不调 afterGenerationFailure：空输出非异常（模板/模型行为），Task 3 已定
+                    //   「空输出由分类器判定、不触发 health 降级」；本回退对健康统计零副作用
+                    //   （连 markModelOk 也不写——被丢弃的空结果不足以证明 GPU 可用）；
+                    // - 不显式 release：attempt 循环顶部 releaseOthers(keep=CPU) 在推进到 CPU
+                    //   attempt 时已释放 GPU，杜绝双驻留（裁决 5）；
+                    // - 零 delta（callbackBytes==0）才回退：onToken 从未输出，回退不拼接任何文本
+                    //   （裁决 6）；首 delta 后失败走既有 requestStop(BACKEND_FAILURE) catch 路径。
+                    if (executionControl?.reason() == null &&
+                        GenerationOutcomeClassifier.isEligibleForCpuFallback(
+                            policy = outputPolicy,
+                            backend = attempt.backend,
+                            completionReason = completionReason,
+                            emptyResponseClass = thinkingClassifier?.lastEmptyResponseClass,
+                            generatedTokens = summary?.generatedTokens ?: 0,
+                            callbackBytes = summary?.callbackBytes ?: 0L,
+                            thinkingRequested = thinkingRequested ?: false,
+                        )
+                    ) {
+                        Log.w(
+                            TAG,
+                            "GPU 空输出回退 CPU: reason=${summary?.completionReason} " +
+                                "class=${thinkingClassifier?.lastEmptyResponseClass}",
+                        )
+                        // 裁决 7：回退原因并入后续 attempt 的遥测 downgradeReasons。
+                        attemptDowngradeReasons = (attemptDowngradeReasons + EMPTY_GPU_OUTPUT_FALLBACK).distinct()
+                        // 链末端兜底：记录本次可回退结果，循环耗尽时原样返回（见循环后判定）。
+                        lastEmptyFallback = Triple(summary, attempt.backend, completionReason)
+                        continue
+                    }
                     // Task 3 review I-1：仅「完成一次非错误生成」的字面语义才升 MODEL_OK——
                     // 完成原因须在 {EOS, MAX_TOKENS, POLICY_TRUNCATION} 内。USER_CANCEL/TIMEOUT/
                     // THERMAL_STOP 是中断（requestStop 提前返回、不抛异常），不代表后端已证明可用；
@@ -344,6 +390,18 @@ class BackendManager(
                     usedBackend = lastUsedBackend,
                     reloaded = reloadedThisCall,
                     completionReason = reason,
+                )
+            }
+
+            // Task 4 链末端兜底：GPU 空输出回退后循环耗尽（计划仅含 GPU attempt，或后续 attempt
+            // 加载/生成全部失败）时，原样返回最后一次可回退的 GPU 空结果。回退本身只是新增一次
+            // CPU 重试机会，不应把「可回退的空输出」误报成「所有后端尝试均失败」（裁决 3 测试 e）。
+            lastEmptyFallback?.let { (summary, backend, completionReason) ->
+                return@withLock GenerationResult(
+                    summary = summary,
+                    usedBackend = backend,
+                    reloaded = reloadedThisCall,
+                    completionReason = completionReason,
                 )
             }
 
@@ -515,6 +573,9 @@ class BackendManager(
 
     companion object {
         private const val TAG = "BackendManager"
+
+        /** Task 4：GPU 空输出回退 CPU 的遥测降级原因（并入后续 attempt 的 downgradeReasons）。 */
+        private const val EMPTY_GPU_OUTPUT_FALLBACK = "EMPTY_GPU_OUTPUT_FALLBACK"
 
         /** Task 3 review I-1：「完成一次非错误生成」的完成原因集合——仅这些记 MODEL_OK。
          *  中断（USER_CANCEL/TIMEOUT/THERMAL_STOP）与后端错误不是完成，不得证明后端可用。 */

@@ -26,6 +26,8 @@ import com.chatbyyourside.llm.backend.BackendHealthCoordinator
 import com.chatbyyourside.llm.backend.BackendManager
 import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendType
+import com.chatbyyourside.llm.backend.EmptyOutputFallbackPolicy
+import com.chatbyyourside.llm.backend.GenerationOutputPolicy
 import com.chatbyyourside.llm.backend.modelConfigFingerprint
 import com.chatbyyourside.llm.metrics.CompletionReason
 import com.chatbyyourside.llm.template.ThinkingOutputClassifier
@@ -272,6 +274,20 @@ class LocalChatProvider(
                 thinkingRequested = deepThinking,
                 templateCapability = templateCapability,
             )
+            // Task 4：GPU 空输出回退策略按后端偏好构造（裁决 1）：
+            // - AUTO / 显式 MNN_GPU / 显式 MNN_NPU -> CPU_BEFORE_FIRST_DELTA：链中含 GPU attempt
+            //   （NPU 链在标准版解析为 CPU 计划，无 GPU attempt 时策略无副作用），首 delta 前
+            //   GPU 空输出可回退 CPU 重跑；
+            // - 显式 MNN_CPU -> DISABLED：纯 CPU 链，无 GPU attempt，策略无意义。
+            // 判定本身由 GenerationOutcomeClassifier 把关（仅 MNN_GPU 后端 + 零输出 + 可回退分类
+            // 才生效），此处只是按用户偏好开/关。
+            val outputPolicy = GenerationOutputPolicy(
+                emptyOutputFallback = if (preference == BackendPreference.MNN_CPU) {
+                    EmptyOutputFallbackPolicy.DISABLED
+                } else {
+                    EmptyOutputFallbackPolicy.CPU_BEFORE_FIRST_DELTA
+                },
+            )
             // Task 4 Step 6：`<think>` 装饰与 UI 回调移入独立渲染协程（LocalStreamRenderPump），
             // 解码回调只做增量 append + 剧本检测 + conflated 信号，不再整串 toString + renderLocalThink，
             // 避免同步工作直接推迟下一次 generate(1)。首块立即渲染保证即时性；末帧由 finish 兜底。
@@ -361,6 +377,7 @@ class LocalChatProvider(
                             thinkingRequested = deepThinking,
                             templateCapability = templateCapability.name,
                             thinkingClassifier = thinkingClassifier,
+                            outputPolicy = outputPolicy,
                             onToken = { token ->
                                 // Task 2 旁路：分类器观察未装饰的原始流（截断后仍继续观察真实到达的
                                 // token，使 raw/body 字节计数完整），增量 O(1)，不进渲染路径。
