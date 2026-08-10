@@ -110,6 +110,26 @@ data class ReliabilityResult(
  * [ExperimentalPromotionPolicy.evaluate] 判定 Promote 后，由 [InferenceCertificationStore.toCertifiedOptions]
  * 生成认证记录——认证存储与门禁由 Task 6 落地，基准触发与 UI 入口见 Task 7。
  */
+/**
+ * 基准候选配置旁路（Task 7 M-4）。
+ *
+ * 认证流程专用：测量「未被门禁放行」的候选配置（如 lookahead=true）相对基线的收益。非 null 时
+ * [DefaultLocalInferenceBenchmarkRunner] 构造**合成 [CertifiedInferenceOptions]**（lookahead /
+ * decodeStepTokens 取旁路值、variant 匹配当前 CPU 变体）传给
+ * [com.chatbyyourside.llm.profile.InferenceProfileResolver]，使计划按候选配置执行——否则 resolver
+ * 的认证门禁会把候选恒回落为安全默认（lookahead=false / step=1），基准永远测不到候选配置
+ * （Task 6 M-4 转交项：认证流无法闭环）。
+ *
+ * **仅供基准流程**：生产推理路径（[com.chatbyyourside.provider.local.LocalChatProvider]）不传
+ * （默认 null = 按既有门禁语义解析，认证缺失即关）。
+ */
+data class CandidateOverrides(
+    /** 候选 lookahead 开关（true=测 lookahead 开启；false=基线/对照）。 */
+    val lookahead: Boolean,
+    /** 候选 decode 步长（1=逐 token；2..4=多 token 步进候选，native clamp 到 [1,4]）。 */
+    val decodeStepTokens: Int = 1,
+)
+
 interface LocalInferenceBenchmarkRunner {
 
     /**
@@ -129,6 +149,9 @@ interface LocalInferenceBenchmarkRunner {
      * @param deviceFingerprint 设备指纹。
      * @param warmupRounds 预热轮数（默认 1）。
      * @param recordedRounds 记录轮数（默认 5）。
+     * @param candidateOverrides 候选配置旁路（Task 7 M-4，[CandidateOverrides]）：非 null 时按
+     *        候选 lookahead/步长构造合成认证记录测量该配置，并强制 CPU 象限（lookahead/步进仅
+     *        CPU 变体有意义）；**仅供认证基准流程使用**。null=按既有门禁语义（默认）。
      */
     suspend fun run(
         scenario: InferenceBenchmarkScenario,
@@ -136,6 +159,7 @@ interface LocalInferenceBenchmarkRunner {
         deviceFingerprint: String,
         warmupRounds: Int = 1,
         recordedRounds: Int = 5,
+        candidateOverrides: CandidateOverrides? = null,
     ): BenchmarkScenarioResult
 
     /**

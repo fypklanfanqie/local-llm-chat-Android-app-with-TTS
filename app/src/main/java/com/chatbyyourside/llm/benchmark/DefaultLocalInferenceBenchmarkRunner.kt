@@ -20,6 +20,7 @@ import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.InferenceProfileResolver
 import com.chatbyyourside.llm.profile.OpenClHealthState
 import com.chatbyyourside.llm.profile.ResolvedInferencePlan
+import com.chatbyyourside.llm.profile.RuntimeVariant
 import com.chatbyyourside.llm.template.EmptyResponseClass
 import com.chatbyyourside.llm.template.ThinkingOutputClassifier
 import com.chatbyyourside.llm.template.ThinkingTemplateCapability
@@ -81,6 +82,7 @@ open class DefaultLocalInferenceBenchmarkRunner(
         deviceFingerprint: String,
         warmupRounds: Int,
         recordedRounds: Int,
+        candidateOverrides: CandidateOverrides? = null,
     ): BenchmarkScenarioResult {
         if (isThermallyHot()) {
             return rejectedResult(
@@ -89,7 +91,17 @@ open class DefaultLocalInferenceBenchmarkRunner(
             )
         }
         val snapshot = settings.getLocalInferenceSettingsNow()
-        val quadrant = InferenceBackendQuadrant.of(snapshot.backend, snapshot.deepThinking)
+        var quadrant = InferenceBackendQuadrant.of(snapshot.backend, snapshot.deepThinking)
+        // Task 7 M-4：候选旁路只对 CPU 变体有意义（lookahead / 多 token 步进仅 CPU 生效）——
+        // 强制 CPU 象限测量，防止 GPU/AUTO 偏好下把 OPENCL 样本当作候选证据（证据错配，
+        // 与 Task 6 review I-3 的「步进证据按变体守卫」同源约束）。思考开关沿用设置快照推导值。
+        if (candidateOverrides != null) {
+            quadrant = if (quadrant.thinkingEnabled) {
+                InferenceBackendQuadrant.CPU_THINKING_ON
+            } else {
+                InferenceBackendQuadrant.CPU_THINKING_OFF
+            }
+        }
 
         // COLD_LOAD：先卸载模型，让首轮成为真实冷启动（mmap + load）。
         if (scenario.requiresColdStart) {
@@ -101,7 +113,7 @@ open class DefaultLocalInferenceBenchmarkRunner(
         if (modelPath == null) {
             return rejectedResult(scenario, configFingerprint, deviceFingerprint, listOf(REASON_NO_MODEL))
         }
-        val plan = buildPlan(snapshot, quadrant, modelPath)
+        val plan = buildPlan(snapshot, quadrant, modelPath, candidateOverrides)
         val templateCapability = templateResolver.resolve(File(modelPath).parentFile ?: File(modelPath))
 
         val discardedReasons = mutableListOf<String>()
@@ -240,11 +252,21 @@ open class DefaultLocalInferenceBenchmarkRunner(
         return backendManager.lastTurnRecord()
     }
 
-    /** 构建固定参数的计划：平衡档、象限决定后端偏好、OpenCL 健康强制按可用入链。 */
+    /**
+     * 构建固定参数的计划：平衡档、象限决定后端偏好、OpenCL 健康强制按可用入链。
+     *
+     * @param candidateOverrides Task 7 M-4 候选配置旁路（仅认证基准流程传入；null=生产语义）：
+     *        非 null 时以候选值为「用户请求」输入并构造合成 [CertifiedInferenceOptions]（variant 恒
+     *        [RuntimeVariant.CPU_OPTIMIZED]——lookahead/步进认证只对 CPU 变体有意义，resolver 门禁
+     *        matchesCpuVariant 只认该变体），使 resolver 门禁放行候选配置；device/model 指纹留空
+     *        （resolver 只匹配 variant，不读指纹）；native 身份取运行时握手（MnnBridge.runtimeInfo）
+     *        供归档。KDoc 约束：**仅供基准流程**，生产路径（LocalChatProvider）不传。
+     */
     private fun buildPlan(
         snapshot: LocalInferenceSettings,
         quadrant: InferenceBackendQuadrant,
         modelPath: String,
+        candidateOverrides: CandidateOverrides? = null,
     ): ResolvedInferencePlan = InferenceProfileResolver(context.cacheDir, modelPath).resolve(
         // 基准固定平衡档：性能模式不是本任务的控制变量（Task 6 认证门再做调参）。
         mode = InferencePerformanceMode.BALANCED,
@@ -254,11 +276,24 @@ open class DefaultLocalInferenceBenchmarkRunner(
         contextTokens = snapshot.contextLen,
         maxOutputTokens = snapshot.maxTokens,
         thermalAdmittedThreads = snapshot.threads.coerceAtLeast(1),
-        lookahead = snapshot.lookahead,
+        // 旁路时以候选值为「用户请求」输入（与合成认证同源，使 lookahead && cert.lookahead 门禁
+        // 放行候选配置）；生产路径仍取设置快照（用户请求只是使用既有认证的许可）。
+        lookahead = candidateOverrides?.lookahead ?: snapshot.lookahead,
         temperature = snapshot.temperature,
         topP = AppConfig.LLM.DEFAULT_TOP_P,
         repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
         openclHealth = if (quadrant.usesGpu) OpenClHealthState.PROBE_OK else OpenClHealthState.UNKNOWN,
+        certifiedOptions = candidateOverrides?.let { overrides ->
+            CertifiedInferenceOptions(
+                deviceFingerprint = "",
+                modelFingerprint = "",
+                variant = RuntimeVariant.CPU_OPTIMIZED.name,
+                nativeBuildId = MnnBridge.runtimeInfo?.nativeBuildId ?: "",
+                mnnCommit = MnnBridge.runtimeInfo?.mnnCommit ?: "",
+                lookahead = overrides.lookahead,
+                decodeStepTokens = overrides.decodeStepTokens,
+            )
+        },
     )
 
     /** 解析当前选中模型的 config.json 路径；未选模型/文件缺失返回 null。 */
