@@ -309,7 +309,7 @@ class TestManifestSchema(unittest.TestCase):
         return {
             "schemaVersion": 1,
             "mnnCommit": "af0142bcc7b76b7a5128373e285683dc04f55f69",
-            "ndkVersion": "27.2.12479018",
+            "ndkVersion": "26.1.10909125",
             "androidApi": 24,
             "abi": "arm64-v8a",
             "flags": ["llm", "low_memory", "arm82", "opencl"],
@@ -366,7 +366,7 @@ class TestVerifyBundle(unittest.TestCase):
         manifest = {
             "schemaVersion": 1,
             "mnnCommit": "af0142b",
-            "ndkVersion": "27.2.12479018",
+            "ndkVersion": "26.1.10909125",
             "androidApi": 24,
             "abi": "arm64-v8a",
             "flags": [],
@@ -444,6 +444,52 @@ class TestVerifyBundle(unittest.TestCase):
         result = vnb.verify_bundle(tmp, mpath)
         self.assertFalse(result.ok)
         self.assertTrue(any("libstray" in e for e in result.errors))
+
+
+# ---------------------------------------------------------------------------
+# Manifest generation (generate_manifest / CLI --generate)
+# ---------------------------------------------------------------------------
+class TestGenerateManifest(unittest.TestCase):
+
+    def _bundle_with_libmnn(self):
+        tmp = tempfile.mkdtemp()
+        with open(os.path.join(tmp, "libMNN.so"), "wb") as f:
+            f.write(build_minimal_elf(pt_load_align=0x4000))
+        return tmp
+
+    def test_default_generation_matches_pinned_versions(self):
+        # 固化 Task 8 审查修复：默认生成必须与单一事实源一致，并保留 opencl_probe
+        # 旗标；不传 note 时产出物不写 note 键。
+        m = vnb.generate_manifest(self._bundle_with_libmnn())
+        self.assertEqual(m["ndkVersion"], "26.1.10909125")
+        self.assertEqual(m["mnnCommit"], "af0142bcc7b76b7a5128373e285683dc04f55f69")
+        self.assertIn("opencl_probe", m["flags"])
+        self.assertNotIn("note", m)
+        self.assertEqual(len(m["files"]), 1)
+        self.assertEqual(m["files"][0]["name"], "libMNN.so")
+        self.assertEqual(m["files"][0]["ptLoadAlignment"], "0x4000")
+
+    def test_note_param_is_emitted(self):
+        m = vnb.generate_manifest(self._bundle_with_libmnn(),
+                                  note="rebuilt with NDK 26.1.10909125")
+        self.assertEqual(m["note"], "rebuilt with NDK 26.1.10909125")
+
+    def test_cli_generate_carries_old_manifest_note(self):
+        # --generate 重写 manifest 时保留旧 manifest 的 note（重编来源等人工元信息）。
+        import json
+        tmp = self._bundle_with_libmnn()
+        mpath = os.path.join(tmp, "native-manifest.json")
+        with open(mpath, "w", encoding="utf-8") as f:
+            json.dump({"schemaVersion": 1, "mnnCommit": "old", "ndkVersion": "old",
+                       "androidApi": 24, "abi": "arm64-v8a", "flags": [],
+                       "note": "legacy rebuild note", "files": []}, f)
+        rc = vnb.main(["--generate", "--dir", tmp, "--manifest", mpath])
+        self.assertEqual(rc, 0)
+        with open(mpath, "r", encoding="utf-8") as f:
+            new = json.load(f)
+        self.assertEqual(new["note"], "legacy rebuild note")
+        self.assertEqual(new["ndkVersion"], "26.1.10909125")
+        self.assertIn("opencl_probe", new["flags"])
 
 
 # ---------------------------------------------------------------------------

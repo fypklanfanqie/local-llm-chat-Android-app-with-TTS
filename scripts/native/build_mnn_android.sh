@@ -63,6 +63,17 @@ die() { printf '\033[1;31m[build_mnn error]\033[0m %s\n' "$*" >&2; exit 1; }
 [[ -n "${ANDROID_NDK_HOME:-}" ]] || die "ANDROID_NDK_HOME must point to NDK $NDK_VERSION (r26b)."
 [[ -d "$ANDROID_NDK_HOME" ]] || die "ANDROID_NDK_HOME not found: $ANDROID_NDK_HOME"
 
+# NDK 版本防漂移（fail-fast）：source.properties 的 Pkg.Revision 必须与 pinned
+# NDK_VERSION 一致。Google 的 source.properties 格式为 "Pkg.Revision = 26.1.10909125"
+# （纯点分版本号，无 r 前缀、无 "r26b" 简写），故精确匹配；一旦传入其它版本
+# （如 CI 误装 27.2），在编译前即报错，避免产出与 manifest ndkVersion 不符的混源产物。
+NDK_SOURCE_PROP="$ANDROID_NDK_HOME/source.properties"
+[[ -f "$NDK_SOURCE_PROP" ]] || die "NDK source.properties not found: $NDK_SOURCE_PROP (expected NDK $NDK_VERSION)"
+NDK_INSTALLED="$(sed -n 's/^Pkg\.Revision[[:space:]]*=[[:space:]]*//p' "$NDK_SOURCE_PROP" | head -n1)"
+[[ -n "$NDK_INSTALLED" ]] || die "cannot read Pkg.Revision from $NDK_SOURCE_PROP (expected NDK $NDK_VERSION)"
+[[ "$NDK_INSTALLED" == "$NDK_VERSION" ]] \
+    || die "NDK version mismatch: $ANDROID_NDK_HOME is '$NDK_INSTALLED', expected '$NDK_VERSION' (r26b)"
+
 NDK_TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
 [[ -f "$NDK_TOOLCHAIN" ]] || die "NDK toolchain not found: $NDK_TOOLCHAIN (expected NDK $NDK_VERSION)"
 

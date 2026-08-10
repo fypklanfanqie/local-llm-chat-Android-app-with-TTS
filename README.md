@@ -63,7 +63,7 @@
 | 语言 · Language | Kotlin 2.0.0 |
 | UI | Jetpack Compose (Material3, BOM 2024.06) |
 | 构建 · Build | AGP 8.5.0, JDK 17+, compileSdk/targetSdk 34, minSdk 24 |
-| 本地推理 · Local inference | MNN (CPU / OpenCL GPU / QNN NPU)，arm64-v8a only · NDK 27.2 |
+| 本地推理 · Local inference | MNN (CPU / OpenCL GPU / QNN NPU)，arm64-v8a only · NDK 26.1（预编译库重编版本） |
 | 数据 · Data | Room 2.6.1, DataStore 1.1.1 |
 | 网络 · Network | Retrofit 2.11, OkHttp 4.12 |
 | 媒体 · Media | Media3 1.3.1 (ExoPlayer), Coil 2.6 |
@@ -92,7 +92,7 @@ com.chatbyyourside/
 ### 环境要求 · Prerequisites
 
 - Android SDK（compileSdk 34）
-- NDK 27.2.12479018
+- NDK 27.2.12479018（AGP 工具链声明，对应 `app/build.gradle.kts` 的 `ndkVersion`；与 native 重编的 NDK 26.1.10909125 独立，见下方「说明」）
 - JDK 17+
 
 ### 说明 · Notes

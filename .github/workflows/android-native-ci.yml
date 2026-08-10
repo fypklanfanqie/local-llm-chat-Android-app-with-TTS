@@ -19,11 +19,15 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android SDK + NDK r27c
+      - name: Setup Android SDK + NDK r26b
         uses: android-actions/setup-android@v3
         with:
           api-level: 34
-          ndk-version: "27.2.12479018"
+          # android-actions/setup-android（v3/v4）没有 ndk-version 输入——该键只会被
+          # runner 静默忽略，旧工作流的 27.2 从未真正安装过。NDK 需经 sdkmanager
+          # 包语法安装，落盘于 $ANDROID_HOME/ndk/<version>（26.1 与
+          # build_mnn_android.sh 的 NDK_VERSION / manifest ndkVersion 单一事实源一致）。
+          packages: "tools platform-tools ndk;26.1.10909125"
 
       - name: JVM unit tests
         run: |
@@ -35,8 +39,13 @@ jobs:
           python3 -m py_compile scripts/native/verify_native_bundle.py
 
       - name: Pinned native build
+        env:
+          # setup-android 只导出 ANDROID_HOME / ANDROID_SDK_ROOT，不导出
+          # ANDROID_NDK_HOME；build_mnn_android.sh 预检要求该变量，故按 sdkmanager
+          # 安装布局显式指定（与 manifest ndkVersion 26.1.10909125 一致）。
+          ANDROID_NDK_HOME: "${{ env.ANDROID_HOME }}/ndk/26.1.10909125"
         run: |
-          # 复用 scripts/native/build_mnn_android.sh（NDK r27c + pinned MNN commit + 16KiB 对齐）
+          # 复用 scripts/native/build_mnn_android.sh（NDK 26.1.10909125 + pinned MNN commit + 16KiB 对齐）
           bash scripts/native/build_mnn_android.sh
 
       - name: Native verifier (16KiB + manifest hashes)

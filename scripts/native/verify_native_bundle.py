@@ -484,11 +484,17 @@ def verify_bundle(bundle_dir: str, manifest_path: str, readelf_path: Optional[st
 # ---------------------------------------------------------------------------
 def generate_manifest(bundle_dir: str, mnn_commit: str = MNN_COMMIT,
                       ndk_version: str = NDK_VERSION, android_api: int = ANDROID_API,
-                      abi: str = ABI, flags: Optional[List[str]] = None) -> dict:
-    """Scan ``bundle_dir`` and produce a manifest dict from the actual binaries."""
+                      abi: str = ABI, flags: Optional[List[str]] = None,
+                      note: Optional[str] = None) -> dict:
+    """Scan ``bundle_dir`` and produce a manifest dict from the actual binaries.
+
+    ``flags`` default mirrors the committed ``native-manifest.json`` (Task 8 review:
+    includes the ``opencl_probe`` flag). ``note`` is optional; when provided the
+    emitted manifest carries a ``note`` key (e.g. the rebuild provenance text).
+    """
     if flags is None:
         flags = ["llm", "low_memory", "cpu_weight_dequant_gemm", "transformer_fuse",
-                 "arm82", "opencl", "16k_pages"]
+                 "arm82", "opencl", "16k_pages", "opencl_probe"]
     files = []
     for name in sorted(os.listdir(bundle_dir)):
         if not name.endswith(".so"):
@@ -512,7 +518,7 @@ def generate_manifest(bundle_dir: str, mnn_commit: str = MNN_COMMIT,
             "buildId": build_id,
             "ptLoadAlignment": align_str,
         })
-    return {
+    manifest = {
         "schemaVersion": 1,
         "mnnCommit": mnn_commit,
         "ndkVersion": ndk_version,
@@ -521,6 +527,9 @@ def generate_manifest(bundle_dir: str, mnn_commit: str = MNN_COMMIT,
         "flags": flags,
         "files": files,
     }
+    if note is not None:
+        manifest["note"] = note
+    return manifest
 
 
 def _print_summary(result: CheckResult, bundle_dir: str, manifest_path: str) -> None:
@@ -554,9 +563,18 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     if args.generate:
+        # 保留旧 manifest 的 note（重编来源/排除声明等人工维护的元信息）：
+        # 重编后 --generate 重写 manifest 时不丢失；旧文件缺失/损坏则静默跳过。
+        note = None
+        if os.path.isfile(args.manifest):
+            try:
+                with open(args.manifest, "r", encoding="utf-8") as f:
+                    note = json.load(f).get("note")
+            except (OSError, json.JSONDecodeError):
+                note = None
         manifest = generate_manifest(
             args.dir, mnn_commit=args.mnn_commit, ndk_version=args.ndk_version,
-            android_api=args.android_api, abi=args.abi,
+            android_api=args.android_api, abi=args.abi, note=note,
         )
         with open(args.manifest, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
