@@ -150,6 +150,36 @@ class MnnRuntimeIntegrationTest {
     }
 
     @Test
+    fun multiTokenStepStillEnforcesMaxTokens() {
+        val fx = requireHandle()
+        val sb = StringBuilder()
+        // step=4 > maxTokens=3：修复前内层 for 一轮生成 4 token 直接越过上限 -> generatedTokens=4
+        // 超发；修复后内层逐 token 复核 maxTokens，must 在触顶前拦截。模型若提前自然 EOS 也通过。
+        val summary = runBlocking {
+            fx.backend.generateStreamMessages(
+                messages = messages(), maxTokens = 3, temperature = 0.8f, topP = 0.9f,
+                repeatPenalty = 1.2f, enableThinking = false,
+                onToken = { sb.append(it); true },
+                batchMaxBytes = 256, batchMaxMs = 16, downgradeReasons = emptyList(),
+                executionControl = null,
+                powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
+                requestedMode = null, effectiveMode = null, loadConfigHash = null,
+                attemptTrace = emptyList(), coldLoadMs = null, warmLoadMs = null,
+                decodeStepTokens = 4,
+            )
+        }
+        assertNotNull(summary)
+        val s = summary!!
+        assertTrue("step=4 时 gen_len（${s.generatedTokens}）仍不应超过 maxTokens=3", s.generatedTokens <= 3)
+        assertTrue(
+            "原因应为 MAX_TOKENS 或 EOS（模型 3 token 内自然结束），got ${s.completionReason}",
+            s.completionReason == "MAX_TOKENS" || s.completionReason == "EOS",
+        )
+        // 摘要回读实际生效步长：4 在 native clamp 范围 [1,4] 内，原样生效。
+        assertEquals("decodeStepTokens 应回读 4", 4, s.decodeStepTokens)
+    }
+
+    @Test
     fun cjkAndEmojiOutputIsWellFormedUtf8() {
         val fx = requireHandle()
         val sb = StringBuilder()
