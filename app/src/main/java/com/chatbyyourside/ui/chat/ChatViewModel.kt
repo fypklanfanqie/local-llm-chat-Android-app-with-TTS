@@ -58,6 +58,13 @@ class ChatViewModel(
     /** 最近一次历史快照，供深度思考开关切换时重渲染（show/hide 思考过程）。 */
     private var latestHistory: List<ChatMessage> = emptyList()
 
+    /**
+     * 乐观完成消息：assistant 已落库但 Room Flow 尚未回填该行的临时桥。
+     * Room 快照包含同一 databaseId 或切走会话时才清除（见 [renderMessages]），
+     * 防止延迟 Flow 覆盖刚展示的完成回复（修复首轮回答消失）。
+     */
+    private var pendingFinal: PendingFinal? = null
+
     init {
         // 监听活跃角色变化：加载角色信息。
         // 只绑定 activeCharacter（不绑会话映射），避免 setActiveConversation 触发重复 loadCharacter / 重播语音。
@@ -66,6 +73,7 @@ class ChatViewModel(
                 container.settingsRepository.activeCharacter.collect { charId ->
                     streamingJob?.cancel()
                     container.chatProviderManager.cancelAll()
+                    pendingFinal = null
                     loadCharacter(charId)
                 }
             } catch (e: CancellationException) { throw e }
@@ -227,35 +235,23 @@ class ChatViewModel(
     }
 
     private fun renderMessages(history: List<ChatMessage>) {
-        // 流式输出期间，历史 Flow 刷新不应抹掉正在生成的 streaming 消息，否则会闪烁
-        // 仅在当前确有流式生成（isStreaming=true）时保留 streaming 气泡；切会话/角色时
-        // isStreaming 已同步置 false，避免旧会话的 streaming 气泡在历史 Flow 先于 streamingJob
-        // finally 触发时被错误拼进新会话列表。
+        // 统一走 ChatTimelineReconciler：Room 快照 + 流式气泡 + 乐观完成消息协调渲染。
+        // - 流式输出期间保留 streaming 气泡（仅 isStreaming=true 时，避免切会话/角色后旧气泡串台）；
+        // - Room 以行 ID 确认完成消息前保留 pendingFinal，杜绝延迟 Flow 覆盖（回答消失）；
+        // - 跨会话 pending 丢弃并清除。
         val streaming = if (_uiState.value.isStreaming) {
             _uiState.value.messages.firstOrNull { it.id == "streaming" }
         } else null
-        if (history.isEmpty()) {
-            val msgs = if (streaming != null) listOf(streaming) else emptyList()
-            _uiState.update { it.copy(messages = msgs, showWelcome = streaming == null) }
-            return
-        }
-        val showThink = _uiState.value.deepThinkingEnabled
-        val messages = history.mapIndexed { idx, msg ->
-            val src = if (showThink) msg.content else MarkdownParser.stripThink(msg.content)
-            val segments = MarkdownParser.parseWithThink(src, isStreaming = false)
-            DisplayMessage(
-                // 用 timestamp+idx 生成稳定 id，避免清屏重发后同槽位折叠状态串到新代码块
-                id = "msg-${msg.timestamp}-$idx",
-                role = msg.role,
-                content = msg.content,
-                segments = segments,
-                sender = if (msg.role == "user") "YOU" else (_uiState.value.characterName.ifEmpty { "AI" }),
-                images = msg.images,
-                files = msg.files,
-            )
-        }
-        val finalMessages = if (streaming != null) messages + streaming else messages
-        _uiState.update { it.copy(messages = finalMessages, showWelcome = false) }
+        val result = ChatTimelineReconciler.reconcile(
+            history = history,
+            activeConversationId = _activeConversationId.value,
+            pendingFinal = pendingFinal,
+            streaming = streaming,
+            showThink = _uiState.value.deepThinkingEnabled,
+            characterName = _uiState.value.characterName,
+        )
+        if (result.pendingResolved) pendingFinal = null
+        _uiState.update { it.copy(messages = result.messages, showWelcome = result.showWelcome) }
     }
 
     // ===== 会话管理 =====
@@ -266,6 +262,7 @@ class ChatViewModel(
             val charId = _uiState.value.characterId
             streamingJob?.cancel()
             container.chatProviderManager.cancelAll()
+            pendingFinal = null
             val newId = container.conversationRepository.create(charId)
             container.settingsRepository.setActiveConversation(charId, newId)
             _activeConversationId.value = newId
@@ -291,6 +288,7 @@ class ChatViewModel(
         viewModelScope.launch {
             streamingJob?.cancel()
             container.chatProviderManager.cancelAll()
+            pendingFinal = null
             val charId = _uiState.value.characterId
             container.settingsRepository.setActiveConversation(charId, id)
             _activeConversationId.value = id
@@ -306,6 +304,10 @@ class ChatViewModel(
         viewModelScope.launch {
             val charId = _uiState.value.characterId
             container.conversationRepository.delete(id)
+            // 删除的若是当前活跃会话（或其 pending 所属会话），同步清理，防止残留串台。
+            if (id == _activeConversationId.value || pendingFinal?.conversationId == id) {
+                pendingFinal = null
+            }
             if (id == _activeConversationId.value) {
                 val remaining = container.conversationRepository.listByCharacter(charId)
                 val target = remaining.firstOrNull()
@@ -383,6 +385,7 @@ class ChatViewModel(
             // 的 onToken 回调继续更新 UI 造成状态混乱。
             streamingJob?.cancel()
             container.chatProviderManager.cancelAll()
+            pendingFinal = null
             container.chatProviderManager.switchProvider(type)
             _uiState.update { s ->
                 s.copy(
@@ -555,38 +558,41 @@ class ChatViewModel(
                     else -> "完成: $genTokens chunks"
                 }
                 val assistantMessage = ChatMessage(role = "assistant", content = displayResponse, modelContent = modelText)
-                container.chatRepository.addMessage(charId, convId, assistantMessage)
+                val assistantRowId = container.chatRepository.addMessage(charId, convId, assistantMessage)
                 // 刷新会话 updatedAt，把它顶到列表最前
                 container.conversationRepository.touch(convId)
 
                 // 同步构建 assistant DisplayMessage 替换 streaming 气泡，确保 UI 即时显示完整回复。
                 // 不依赖异步 Room Flow 回填——本地模型 prefill 完成到 DB invalidation 到达之间有可感知
                 // 延迟，若仅移除 streaming 而不补 assistant，用户会看到消息短暂消失（首次对话尤其明显）。
+                // 关键改进：以 addMessage 返回的**行 ID** 构造乐观完成消息（key=`msg-$assistantRowId`），
+                // 与 Room 回填后的渲染 key 一致，并登记 pendingFinal。renderMessages 据此在 Room 确认前
+                // 保留该回复、确认后只显示一次，杜绝延迟/旧 Flow 覆盖完成回复（回答消失竞态）。
                 val finalShowThink = _uiState.value.deepThinkingEnabled
                 val assistantSrc = if (finalShowThink) displayResponse else MarkdownParser.stripThink(displayResponse)
                 val assistantDisplay = DisplayMessage(
-                    id = "msg-assistant-${assistantMessage.timestamp}",
+                    id = "msg-$assistantRowId",
                     role = "assistant",
                     content = displayResponse,
                     segments = MarkdownParser.parseWithThink(assistantSrc, isStreaming = false),
                     sender = state.characterName.ifEmpty { "AI" },
                 )
+                pendingFinal = PendingFinal(
+                    conversationId = convId,
+                    databaseId = assistantRowId,
+                    message = assistantDisplay,
+                )
                 _uiState.update { s ->
                     val msgs = s.messages.toMutableList()
                     val streamIdx = msgs.indexOfFirst { it.id == "streaming" }
-                    // 判断 DB Flow 是否已把“本次回复”回填为最后一条非 streaming 消息
-                    // （content 与 response 完全一致）。只看最后一条：历史 assistant 后面还有
-                    // 本次 user + streaming，不会误判；这修复了第 2+ 条回复完成时被旧逻辑
-                    // （any assistant）当成“已回填”而删除 streaming、又未补 assistant 导致的短暂消失。
-                    val lastNonStream = msgs.lastOrNull { it.id != "streaming" }
-                    val backfilled = lastNonStream != null &&
-                        lastNonStream.role == "assistant" &&
-                        lastNonStream.content == displayResponse
-                    if (streamIdx >= 0) {
-                        if (backfilled) msgs.removeAt(streamIdx)
-                        else msgs[streamIdx] = assistantDisplay
-                    } else if (!backfilled) {
-                        msgs.add(assistantDisplay)
+                    // 若 Room 回填已先于乐观替换到达（msgs 已含同 id 的 assistant 行），
+                    // 只移除 streaming，绝不重复添加；否则以乐观消息替换 streaming。
+                    val alreadyRendered = msgs.any { it.id == assistantDisplay.id }
+                    if (alreadyRendered) {
+                        if (streamIdx >= 0) msgs.removeAt(streamIdx)
+                    } else {
+                        if (streamIdx >= 0) msgs[streamIdx] = assistantDisplay
+                        else msgs.add(assistantDisplay)
                     }
                     s.copy(messages = msgs, isStreaming = false, showTyping = false)
                 }
@@ -598,6 +604,7 @@ class ChatViewModel(
                 // 回滚：删除已落库的用户消息（无对应回复，避免孤儿），恢复输入框内容，
                 // 让用户可直接重试而无需重输（重发产生新消息，不会重复）。
                 if (userMsgId != 0L) runCatching { container.chatRepository.deleteMessage(userMsgId) }
+                pendingFinal = null
                 _uiState.update { s ->
                     val msgs = s.messages.filterNot { it.id == "streaming" }.toMutableList()
                     s.copy(

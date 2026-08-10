@@ -54,11 +54,14 @@ internal fun ChatHistoryEntity.toMessage(): ChatMessage = ChatMessage(
     fileNames = decodeStringList(fileNamesJson),
     timestamp = timestamp,
     modelContent = modelContent,
+    // 回填 Room 自增主键：持久消息的稳定标识（Compose key + 完成消息协调）。
+    databaseId = id,
 )
 
 /**
  * 领域消息 -> 实体。[modelContent] 持久化（本地助手消息存原始文本）；用户消息/云端消息为 null。
  * 注：[ChatMessage.multimodalImages] 运行时字段不持久化（仅发送给 API）。
+ * [ChatMessage.databaseId] 为应用内标识，不随实体持久化：id 恒为 0，由 Room 自增生成（@Insert 忽略其值）。
  */
 internal fun ChatMessage.toEntity(characterId: String, conversationId: Long): ChatHistoryEntity = ChatHistoryEntity(
     characterId = characterId,

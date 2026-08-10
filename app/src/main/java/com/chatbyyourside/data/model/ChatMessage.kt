@@ -27,6 +27,16 @@ data class ChatMessage(
      * - 用户消息 / 云端消息 / 旧库行：为 null，回退 `content`（[com.chatbyyourside.data.repository.toMessage] + 调用方 `modelContent ?: content`）。
      */
     val modelContent: String? = null,
+    /**
+     * Room 主键（应用内使用，不持久化为列）。
+     *
+     * 由 [com.chatbyyourside.data.repository.toMessage] 从 Room 自增主键回填，用于：
+     * - 持久消息的 Compose key（`msg-$databaseId`），使乐观完成消息与 Room 回填后的消息保持同一 key；
+     * - [com.chatbyyourside.ui.chat.ChatTimelineReconciler] 以行 ID 判断 Room 是否已确认完成消息，
+     *   杜绝「首次回答短暂显示后消失」竞态，且两次相同文本的回答不会混淆。
+     * 新建消息为 null，插入后由 [com.chatbyyourside.ui.chat.ChatViewModel.sendMessage] 用返回值回填。
+     */
+    val databaseId: Long? = null,
 )
 
 @Serializable

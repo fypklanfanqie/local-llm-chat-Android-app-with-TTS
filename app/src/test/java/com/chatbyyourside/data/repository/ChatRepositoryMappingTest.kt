@@ -38,6 +38,28 @@ class ChatRepositoryMappingTest {
     }
 
     @Test
+    fun toMessage_backfillsDatabaseIdFromRoomPrimaryKey() {
+        // Task 2：持久消息以 Room 主键为稳定标识（Compose key + 完成消息协调）。
+        val entity = ChatHistoryEntity(
+            id = 42, characterId = "c1", conversationId = 1,
+            role = "assistant", content = "display", modelContent = "raw", timestamp = 100,
+        )
+        val msg = entity.toMessage()
+        assertEquals(42L, msg.databaseId)
+    }
+
+    @Test
+    fun toEntity_leavesDatabaseIdToRoomAutoGenerate() {
+        // databaseId 为应用内标识，不持久化：toEntity 恒产生 id=0，由 Room 自增。
+        val msg = ChatMessage(
+            role = "assistant", content = "display", modelContent = "raw",
+            timestamp = 100, databaseId = 99,
+        )
+        val entity = msg.toEntity(characterId = "c1", conversationId = 1)
+        assertEquals(0L, entity.id)
+    }
+
+    @Test
     fun toEntity_persistsModelContent() {
         val msg = ChatMessage(role = "assistant", content = "display", modelContent = "raw", timestamp = 100)
         val entity = msg.toEntity(characterId = "c1", conversationId = 1)
