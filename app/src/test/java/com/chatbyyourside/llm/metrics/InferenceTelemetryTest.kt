@@ -216,4 +216,46 @@ class InferenceTelemetryTest {
         assertEquals(BackendType.MNN_CPU, decoded.backend)
         assertEquals(0, decoded.generatedTokens) // 默认值
     }
+
+    @Test
+    fun benchmarkSummary_task5P95Fields_defaultToNull() {
+        // Task 5：新增 P95 字段必须可空默认 null，保证旧构造点与旧 JSON 前向兼容
+        val s = BenchmarkSummary()
+        assertNull(s.medianTtftMs)
+        assertNull(s.medianDecodeTps)
+        assertNull(s.decodeStdDev)
+        assertNull(s.peakPssMb)
+        assertNull(s.maxThermalStatus)
+        assertNull(s.kvReuseRate)
+        assertNull(s.p95TtftMs)
+        assertNull(s.p95DecodeTps)
+    }
+
+    @Test
+    fun benchmarkSummary_serializesP95FieldsRoundTrip() {
+        // 新字段参与序列化（旧 JSON 缺字段靠默认值兜底，新 JSON 全字段可往返）
+        val original = BenchmarkSummary(
+            medianTtftMs = 120f,
+            medianDecodeTps = 40f,
+            decodeStdDev = 3.5f,
+            peakPssMb = 800L,
+            maxThermalStatus = 2,
+            kvReuseRate = 0.5f,
+            p95TtftMs = 250f,
+            p95DecodeTps = 45f,
+        )
+        val s: String = json.encodeToString(original)
+        val decoded: BenchmarkSummary = json.decodeFromString(s)
+        assertEquals(original, decoded)
+    }
+
+    @Test
+    fun benchmarkSummary_decodesLegacyJsonWithoutP95Fields() {
+        // 旧版本 JSON 无 P95 字段：ignoreUnknownKeys + 默认值应解码为 null（前向兼容）
+        val s = """{"medianTtftMs":100.0,"medianDecodeTps":30.0,"decodeStdDev":2.0,"peakPssMb":500,"maxThermalStatus":1,"kvReuseRate":0.6}"""
+        val decoded: BenchmarkSummary = json.decodeFromString(s)
+        assertEquals(100f, decoded.medianTtftMs!!, 0.0001f)
+        assertNull(decoded.p95TtftMs)
+        assertNull(decoded.p95DecodeTps)
+    }
 }

@@ -6,6 +6,7 @@ import com.chatbyyourside.llm.metrics.CompletionReason
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
 import com.chatbyyourside.llm.metrics.mean
 import com.chatbyyourside.llm.metrics.median
+import com.chatbyyourside.llm.metrics.p95
 import com.chatbyyourside.llm.metrics.sampleStandardDeviation
 import com.chatbyyourside.llm.metrics.summarize
 import org.junit.Assert.assertEquals
@@ -119,6 +120,80 @@ class BenchmarkStatisticsTest {
         assertEquals(150f, s.medianTtftMs!!, 0.0001f)
         // 只应纳入 12/18 -> 中位数 15
         assertEquals(15f, s.medianDecodeTps!!, 0.0001f)
+    }
+
+    // ------------------------------------------------------------------
+    // Task 5：P95 分位数（线性插值口径：pos = 0.95 * (n - 1)）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun p95_linearInterpolatesBetweenNeighbors() {
+        // 1..20：pos = 0.95*19 = 18.05 -> sorted[18]=19 + 0.05*(20-19) = 19.05
+        val vals = (1..20).map { it.toFloat() }
+        assertEquals(19.05f, p95(vals)!!, 0.0001f)
+    }
+
+    @Test
+    fun p95_oddCount_interpolatesNearMax() {
+        // [1,2,3]：pos = 0.95*2 = 1.9 -> 2 + 0.9*(3-2) = 2.9
+        assertEquals(2.9f, p95(listOf(1f, 2f, 3f))!!, 0.0001f)
+    }
+
+    @Test
+    fun p95_evenCount_twoSamples_weightedTowardMax() {
+        // [10,20]：pos = 0.95*1 = 0.95 -> 10 + 0.95*(20-10) = 19.5
+        assertEquals(19.5f, p95(listOf(10f, 20f))!!, 0.0001f)
+    }
+
+    @Test
+    fun p95_unsortedInput_isSortedFirst() {
+        assertEquals(19.05f, p95((20 downTo 1).map { it.toFloat() })!!, 0.0001f)
+    }
+
+    @Test
+    fun p95_single_returnsItself() {
+        assertEquals(7f, p95(listOf(7f))!!, 0.0001f)
+    }
+
+    @Test
+    fun p95_empty_returnsNull() {
+        assertNull(p95(emptyList()))
+    }
+
+    @Test
+    fun summarize_fillsP95Fields() {
+        val records = listOf(
+            turn(gid = "a", ttft = 100f, decodeTps = 10f),
+            turn(gid = "b", ttft = 200f, decodeTps = 20f),
+            turn(gid = "c", ttft = 300f, decodeTps = 30f),
+        )
+        val s: BenchmarkSummary = summarize(records)
+        // ttft p95：pos = 0.95*2 = 1.9 -> 200 + 0.9*(300-200) = 290
+        assertEquals(290f, s.p95TtftMs!!, 0.0001f)
+        // decode p95：同型 -> 20 + 0.9*(30-20) = 29
+        assertEquals(29f, s.p95DecodeTps!!, 0.0001f)
+    }
+
+    @Test
+    fun summarize_p95AppliesPositiveFilter() {
+        // 零值/缺失轮次（ttft=0、decodeTps=null）同样不得污染 P95
+        val records = listOf(
+            turn(gid = "ok1", ttft = 120f, decodeTps = 12f),
+            turn(gid = "ok2", ttft = 180f, decodeTps = 18f),
+            turn(gid = "fail", ttft = 0f, decodeTps = null),
+        )
+        val s = summarize(records)
+        // 仅 120/180 纳入：pos = 0.95*1 = 0.95 -> 120 + 0.95*(180-120) = 177
+        assertEquals(177f, s.p95TtftMs!!, 0.0001f)
+        // 仅 12/18 纳入：12 + 0.95*6 = 17.7
+        assertEquals(17.7f, s.p95DecodeTps!!, 0.0001f)
+    }
+
+    @Test
+    fun summarize_emptyRecords_p95FieldsNull() {
+        val s = summarize(emptyList())
+        assertNull(s.p95TtftMs)
+        assertNull(s.p95DecodeTps)
     }
 
     private fun turn(

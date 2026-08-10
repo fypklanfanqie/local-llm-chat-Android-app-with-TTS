@@ -145,7 +145,7 @@ data class InferenceTurnRecord(
 )
 
 /**
- * 多轮基准汇总（中位数 + 离散度），只纳入冷态/合格样本。
+ * 多轮基准汇总（中位数 + P95 + 离散度），只纳入冷态/合格样本。
  */
 @Serializable
 data class BenchmarkSummary(
@@ -157,6 +157,11 @@ data class BenchmarkSummary(
     val maxThermalStatus: Int? = null,
     /** KV 复用率：kvReuse==true 的样本占比（0..1）。 */
     val kvReuseRate: Float? = null,
+    // ---- Task 5：P95 尾延迟/尾吞吐（>0 过滤口径与 median 一致）----
+    /** P95 首字延迟（ms）。 */
+    val p95TtftMs: Float? = null,
+    /** P95 解码吞吐（tokens/s）。 */
+    val p95DecodeTps: Float? = null,
 )
 
 // ----------------------------------------------------------------------------------
@@ -194,6 +199,22 @@ fun sampleStandardDeviation(values: List<Float>): Float? {
     return sqrt(sq / (values.size - 1)).toFloat()
 }
 
+/**
+ * 第 95 百分位（升序 + 线性插值，Task 5 Step 6）。
+ *
+ * 口径：`pos = 0.95 * (n - 1)`，取 `sorted[floor(pos)]` 与 `sorted[ceil(pos)]` 按小数部分插值；
+ * 单样本返回其本身，空列表返回 null——与 [median] 的「可空、不抛异常」风格一致。
+ */
+fun p95(values: List<Float>): Float? {
+    if (values.isEmpty()) return null
+    val sorted = values.sorted()
+    val pos = 0.95 * (sorted.size - 1)
+    val lo = pos.toInt()
+    val hi = minOf(lo + 1, sorted.size - 1)
+    val frac = (pos - lo).toFloat()
+    return sorted[lo] + (sorted[hi] - sorted[lo]) * frac
+}
+
 /** 由记录列表构建基准汇总。空列表返回全 null 字段。 */
 fun summarize(records: List<InferenceTurnRecord>): BenchmarkSummary {
     if (records.isEmpty()) return BenchmarkSummary()
@@ -209,6 +230,8 @@ fun summarize(records: List<InferenceTurnRecord>): BenchmarkSummary {
         medianPrefillTps = median(prefillTps),
         medianDecodeTps = median(decodeTps),
         decodeStdDev = sampleStandardDeviation(decodeTps),
+        p95TtftMs = p95(ttfts),
+        p95DecodeTps = p95(decodeTps),
         peakPssMb = pss.maxOrNull(),
         maxThermalStatus = thermal.maxOrNull(),
         kvReuseRate = reuseRate,
