@@ -16,7 +16,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -147,43 +146,8 @@ fun ChatScreen(
         factory = viewModelFactory { initializer { ChatViewModel(app, container) } }
     )
     val state by viewModel.uiState.collectAsState()
-    val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
-
-    // 自动滚动到底部：消息数量变化或最后一条内容增长（流式输出）时触发。
-    // 仅在已贴近底部时跟随，避免流式输出时把用户向上翻看历史的操作强制拉回底部。
-    // 用 scrollToItem（瞬时，非动画）：animateScrollToItem 在流式期间 lastContent 频繁变化会导致
-    // LaunchedEffect 反复取消/重启，动画被中断后 LazyColumn layoutInfo 可能不一致，造成跳顶。
-    var didInitialScroll by remember { mutableStateOf(false) }
-    var userAtBottom by remember { mutableStateOf(true) }
-
-    LaunchedEffect(Unit) {
-        snapshotFlow {
-            val info = listState.layoutInfo
-            val lastIdx = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-            val total = info.totalItemsCount
-            Triple(lastIdx, total, listState.isScrollInProgress)
-        }.collect { (lastIdx, total, isScrolling) ->
-            if (total > 0 && !isScrolling) {
-                userAtBottom = lastIdx >= total - 2
-            }
-        }
-    }
-
-    val messagesSize = state.messages.size
-    val lastContent = state.messages.lastOrNull()?.content
-    LaunchedEffect(messagesSize, lastContent) {
-        if (state.messages.isEmpty()) return@LaunchedEffect
-        kotlinx.coroutines.delay(16)
-        val totalItems = listState.layoutInfo.totalItemsCount
-        if (totalItems <= 0) return@LaunchedEffect
-        val atBottom = !didInitialScroll || userAtBottom
-        if (atBottom && !listState.isScrollInProgress) {
-            listState.scrollToItem(totalItems - 1)
-            didInitialScroll = true
-        }
-    }
+    // 自动滚动与「回到底部」逻辑已内聚到 ChatMessageList（像素级底部判定 + 用户接管策略）。
 
     val context = LocalContext.current
     val imagePicker = rememberLauncherForActivityResult(
@@ -298,30 +262,11 @@ fun ChatScreen(
                         },
                     )
                 } else {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp),
-                        contentPadding = PaddingValues(vertical = 10.dp),
-                    ) {
-                        items(state.messages, key = { it.id }) { msg ->
-                            MessageBubble(
-                                message = msg,
-                                state = state,
-                                characterImage = state.characterImage,
-                                characterName = state.characterName,
-                                onTts = { viewModel.playTts(msg) },
-                            )
-                        }
-                        if (state.showTyping) {
-                            item {
-                                TypingIndicator(
-                                    imageUrl = state.characterImage,
-                                    name = state.characterName,
-                                )
-                            }
-                        }
-                    }
+                    ChatMessageList(
+                        state = state,
+                        onTts = { viewModel.playTts(it) },
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 }
 
                 val ttsActive = state.ttsLoadingIndex >= 0 || state.ttsPlayingIndex >= 0
@@ -706,7 +651,7 @@ private fun LangBubble(
 }
 
 @Composable
-private fun MessageBubble(
+internal fun MessageBubble(
     message: DisplayMessage,
     state: ChatUiState,
     characterImage: String,
@@ -1079,7 +1024,7 @@ private fun SubtitleBar(jp: String, cn: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun TypingIndicator(imageUrl: String, name: String) {
+internal fun TypingIndicator(imageUrl: String, name: String) {
     val glass = chatGlass()
     Row(verticalAlignment = Alignment.Top) {
         ChatAvatar(imageUrl = imageUrl, name = name, size = AiAvatarSize)
