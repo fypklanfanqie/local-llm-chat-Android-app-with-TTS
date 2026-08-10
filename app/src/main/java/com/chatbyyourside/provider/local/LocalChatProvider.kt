@@ -304,7 +304,9 @@ class LocalChatProvider(
                             topP = AppConfig.LLM.DEFAULT_TOP_P,
                             repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
                             enableThinking = deepThinking,
-                            downgradeReasons = listOfNotNull(promptPlan.downgradeReason),
+                            // Task 5：把类型化计划降级原因并入遥测，区分 KV miss 是窗口变化、配置重载还是后端健康降级。
+                            downgradeReasons = (listOfNotNull(promptPlan.downgradeReason) +
+                                resolvedPlan.downgradeReasons.map { it.name }).distinct(),
                             executionControl = executionControl,
                             resolvedPlan = resolvedPlan,
                             onToken = { token ->
