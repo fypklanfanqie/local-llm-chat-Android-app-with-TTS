@@ -15,10 +15,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * MNN 运行时权威集成测试（Task 16 Step 3）。
+ * MNN 运行时权威集成测试（Task 16 Step 3；Task 1 v2 场景追加）。
  *
- * 覆盖：JNI handshake、类加载（API 24+ 无高版本类型崩）、短 CPU 生成、取消、两轮 KV 复用、
- * 生命周期 release。无真实模型 fixture 时以明确原因跳过（不静默通过）。
+ * 覆盖：JNI handshake、类加载（API 24+ 无高版本类型崩）、短 CPU 生成、EOS / max tokens 终止、
+ * 取消（策略截断）、CJK/emoji UTF-8 完整性、两轮 KV 复用、生命周期 release。
+ * 无真实模型 fixture 时以明确原因跳过（不静默通过）。
  */
 @RunWith(AndroidJUnit4::class)
 class MnnRuntimeIntegrationTest {
@@ -92,6 +93,92 @@ class MnnRuntimeIntegrationTest {
         assertNotNull(summary)
         assertTrue("应产出可见文本", sb.isNotBlank())
         assertTrue("gen_len>0", summary!!.generatedTokens > 0)
+    }
+
+    @Test
+    fun eosOrMaxTokensTerminatesWithConsistentSummary() {
+        val fx = requireHandle()
+        val sb = StringBuilder()
+        val summary = runBlocking {
+            fx.backend.generateStreamMessages(
+                messages = messages(), maxTokens = 64, temperature = 0.8f, topP = 0.9f,
+                repeatPenalty = 1.2f, enableThinking = false,
+                onToken = { sb.append(it); true },
+                batchMaxBytes = 256, batchMaxMs = 16, downgradeReasons = emptyList(),
+                executionControl = null,
+                powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
+                requestedMode = null, effectiveMode = null, loadConfigHash = null,
+                attemptTrace = emptyList(), coldLoadMs = null, warmLoadMs = null,
+            )
+        }
+        assertNotNull(summary)
+        val s = summary!!
+        assertTrue(
+            "完成原因应为 native 推导的 EOS/MAX_TOKENS（got ${s.completionReason}）",
+            s.completionReason == "EOS" || s.completionReason == "MAX_TOKENS",
+        )
+        if (s.completionReason == "EOS") {
+            assertTrue("EOS 应产出可见文本", sb.isNotBlank())
+        }
+        // v2 契约：默认步长 1（旧 native v1 摘要解析回填默认值，新 native v2 摘要亦为 1，两态一致）。
+        assertEquals("decodeStepTokens 应回填默认 1", 1, s.decodeStepTokens)
+    }
+
+    @Test
+    fun maxTokensLimitIsEnforced() {
+        val fx = requireHandle()
+        val sb = StringBuilder()
+        val summary = runBlocking {
+            fx.backend.generateStreamMessages(
+                messages = messages(), maxTokens = 2, temperature = 0.8f, topP = 0.9f,
+                repeatPenalty = 1.2f, enableThinking = false,
+                onToken = { sb.append(it); true },
+                batchMaxBytes = 256, batchMaxMs = 16, downgradeReasons = emptyList(),
+                executionControl = null,
+                powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
+                requestedMode = null, effectiveMode = null, loadConfigHash = null,
+                attemptTrace = emptyList(), coldLoadMs = null, warmLoadMs = null,
+            )
+        }
+        assertNotNull(summary)
+        val s = summary!!
+        assertTrue("gen_len（${s.generatedTokens}）不应超过 maxTokens=2", s.generatedTokens <= 2)
+        assertTrue(
+            "原因应为 MAX_TOKENS 或 EOS（模型 2 token 内自然结束），got ${s.completionReason}",
+            s.completionReason == "MAX_TOKENS" || s.completionReason == "EOS",
+        )
+    }
+
+    @Test
+    fun cjkAndEmojiOutputIsWellFormedUtf8() {
+        val fx = requireHandle()
+        val sb = StringBuilder()
+        val summary = runBlocking {
+            fx.backend.generateStreamMessages(
+                messages = listOf(
+                    ChatMessage(role = "system", content = "你是中文测试助手。你的每条回复都必须以中文为主，可以适当包含 emoji 表情符号。"),
+                    ChatMessage(role = "user", content = "请用一句话介绍你自己，必须包含中文，并带上一个 emoji。"),
+                ),
+                maxTokens = 128, temperature = 0.8f, topP = 0.9f, repeatPenalty = 1.2f,
+                enableThinking = false,
+                onToken = { sb.append(it); true },
+                batchMaxBytes = 256, batchMaxMs = 16, downgradeReasons = emptyList(),
+                executionControl = null,
+                powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
+                requestedMode = null, effectiveMode = null, loadConfigHash = null,
+                attemptTrace = emptyList(), coldLoadMs = null, warmLoadMs = null,
+            )
+        }
+        assertNotNull(summary)
+        assertTrue("应产出可见中文文本", sb.isNotBlank())
+        // UTF-8 字符边界完整：拼接文本不含 U+FFFD（流式批处理切分不得破坏多字节序列）。
+        assertTrue("出现 U+FFFD（UTF-8 序列被批边界截断）：$sb", sb.indexOf('\uFFFD') < 0)
+        // 字节级完整性：Kotlin 拼接字节数与 native 摘要 callbackBytes 一致（每个字节恰好一次）。
+        assertEquals(
+            "native 摘要 callbackBytes ≠ Kotlin 拼接字节数",
+            summary!!.callbackBytes,
+            sb.toByteArray(Charsets.UTF_8).size.toLong(),
+        )
     }
 
     @Test
