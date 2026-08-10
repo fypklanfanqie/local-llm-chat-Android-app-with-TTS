@@ -298,7 +298,20 @@ class LocalChatProvider(
             //   探测失败自然回落 COOLDOWN -> 计划走 CPU 链，不阻塞 CPU 路径。
             val wantsGpuPath = preference == BackendPreference.AUTO || preference == BackendPreference.MNN_GPU
             val openclHealth = if (backendManager.mnnGpuSupported && wantsGpuPath) {
-                healthCoordinator.resolveForGpu(modelConfigFingerprint(modelPath)).state
+                val health = healthCoordinator.resolveForGpu(modelConfigFingerprint(modelPath))
+                // Task 3 review M-5：决策理由有值时记录（COOLDOWN/BLACKLISTED 用 warn，其余 info）——
+                // 便于从日志定位 OpenCL 被排除/降级/重新验证的原因，而不只是看到最终 state。
+                health.reason?.let { reason ->
+                    val msg = "OpenCL 健康决策: state=${health.state} reason=$reason"
+                    if (health.state == OpenClHealthState.COOLDOWN ||
+                        health.state == OpenClHealthState.CRASH_BLACKLISTED
+                    ) {
+                        Log.w(TAG, msg)
+                    } else {
+                        Log.i(TAG, msg)
+                    }
+                }
+                health.state
             } else {
                 OpenClHealthState.UNKNOWN
             }

@@ -37,13 +37,18 @@ class BackendManager(
     private val cpuBoostController: CpuBoostController,
     /** Task 3：后端健康协调器（AppContainer 注入真实实例；测试可传 null 或 fake）。 */
     private val healthCoordinator: BackendHealthCoordinator? = null,
+    /** 后端工厂（Task 3 review M-3 测试注入点）：默认真实 [MnnBackend]；JVM 单测注入 fake
+     *  [InferenceBackend] 以驱动 attempt 成功/失败路径（真实 MnnBackend 依赖 native，无法纯 JVM 构造）。 */
+    private val backendFactory: (MnnMode) -> InferenceBackend = { mode ->
+        MnnBackend(context, mode, cpuBoostController)
+    },
 ) {
     private val selector = BackendSelector(context)
     /** 整次请求（加载 + fallback + JNI）串行，防新请求改写旧请求共享的 abort/lifecycle 状态。 */
     private val generationMutex = Mutex()
-    private val mnnCpuBackend = MnnBackend(context, MnnMode.CPU, cpuBoostController)
-    private val mnnGpuBackend = MnnBackend(context, MnnMode.GPU_OPENCL, cpuBoostController)
-    private val mnnNpuBackend = MnnBackend(context, MnnMode.NPU_QNN, cpuBoostController)
+    private val mnnCpuBackend: InferenceBackend = backendFactory(MnnMode.CPU)
+    private val mnnGpuBackend: InferenceBackend = backendFactory(MnnMode.GPU_OPENCL)
+    private val mnnNpuBackend: InferenceBackend = backendFactory(MnnMode.NPU_QNN)
 
     /** 设备能力（惰性计算一次） */
     val deviceCapability: BackendSelector.DeviceCapability by lazy { selector.collectDeviceInfo() }
@@ -245,9 +250,12 @@ class BackendManager(
                     if (attempt.backend == BackendType.MNN_GPU) markSessionFailed(BackendType.MNN_GPU)
                     if (attempt.backend == BackendType.MNN_NPU) markSessionFailed(BackendType.MNN_NPU)
                     // Task 3：加载失败叠加持久 LOAD 类别健康记录（非 CPU 后端；CPU 恒兜底不记，
-                    // 与 markSessionFailed 的「CPU 不黑名单」语义一致）。
+                    // 与 markSessionFailed 的「CPU 不黑名单」语义一致）。Task 3 review M-4：
+                    // 健康记录是旁路，写失败（如 DataStore I/O）不得使整次 generate 失败。
                     if (attempt.backend != BackendType.MNN_CPU) {
-                        healthCoordinator?.afterLoadFailure(attempt.backend, attempt.variant, modelFingerprint)
+                        recordHealthWrite("afterLoadFailure") {
+                            healthCoordinator?.afterLoadFailure(attempt.backend, attempt.variant, modelFingerprint)
+                        }
                     }
                     runCatching { releaseBackend(attempt.backend) }
                     continue
@@ -280,12 +288,18 @@ class BackendManager(
                     val completionReason = executionControl?.reason()
                         ?: (backend as? MnnBackend)?.lastTurnRecord?.completionReason
                         ?: summary?.completionReason?.let(CompletionReason::valueOf)
-                    // Task 3：非错误生成完成 -> 升 MODEL_OK（持久健康记录）。条件按裁决：
-                    // generateStreamMessages 正常返回（未抛异常）且 completionReason 非 BACKEND_FAILURE。
-                    // 生成异常走下方 catch 记 GENERATION；取消/超时/热停是 requestStop 提前返回路径，
-                    // 不抛异常且 reason 非 BACKEND_FAILURE，故不误记为失败、本 attempt 后端已可用。
-                    if (completionReason != CompletionReason.BACKEND_FAILURE) {
-                        healthCoordinator?.markModelOk(attempt.backend, attempt.variant, modelFingerprint)
+                    // Task 3 review I-1：仅「完成一次非错误生成」的字面语义才升 MODEL_OK——
+                    // 完成原因须在 {EOS, MAX_TOKENS, POLICY_TRUNCATION} 内。USER_CANCEL/TIMEOUT/
+                    // THERMAL_STOP 是中断（requestStop 提前返回、不抛异常），不代表后端已证明可用；
+                    // 若也标记，持续挂起（watchdog 超时但从不抛异常）的 OpenCL 每轮都被重标可用、
+                    // 永不进入冷却升级，健康记录恒为「已证明可用」的谎言状态。null/其它原因同样不记。
+                    // M-1：与失败路径一致，CPU 恒兜底不记录（CPU-only 设备不再每轮白写 CPU 键
+                    // MODEL_OK，DataStore 全量重编码 + 磁盘写位于 generationMutex 内、返回前）。
+                    // M-4：健康记录是旁路，写失败不得被误判为生成失败（否则会触发回退 + 黑名单）。
+                    if (completionReason in COMPLETED_REASONS && attempt.backend != BackendType.MNN_CPU) {
+                        recordHealthWrite("markModelOk") {
+                            healthCoordinator?.markModelOk(attempt.backend, attempt.variant, modelFingerprint)
+                        }
                     }
                     return@withLock GenerationResult(
                         summary = summary,
@@ -299,8 +313,11 @@ class BackendManager(
                     // Task 3：生成异常才记持久 GENERATION 失败（非 CPU 后端；CPU 恒兜底不记）。
                     // 取消/超时/热停是 requestStop 提前返回的路径，不抛异常，不会进入本分支；
                     // CancellationException 已在上面单独 rethrow——故此处只可能是真实后端异常。
+                    // Task 3 review M-4：健康记录是旁路，写失败不得让整次 generate 失败。
                     if (attempt.backend != BackendType.MNN_CPU) {
-                        healthCoordinator?.afterGenerationFailure(attempt.backend, attempt.variant, modelFingerprint)
+                        recordHealthWrite("afterGenerationFailure") {
+                            healthCoordinator?.afterGenerationFailure(attempt.backend, attempt.variant, modelFingerprint)
+                        }
                     }
                     if (executionControl != null && executionControl.remainingTokens() < maxTokens) {
                         // 已有可见输出后禁止透明换后端，否则两个模型的 delta 会拼成一条且 KV/语义均失配。
@@ -360,9 +377,11 @@ class BackendManager(
     /** 非挂起中断：原因由请求级 control 先行写入；这里只在活跃生成期发布 abort，不释放 native。 */
     fun cancel() {
         if (!generating) return
-        mnnCpuBackend.cancelNow()
-        mnnGpuBackend.cancelNow()
-        mnnNpuBackend.cancelNow()
+        // 后端实例可为注入的 fake（Task 3 review M-3）：cancelNow 是 MnnBackend 独有，
+        // 非 MnnBackend 的注入实例无需 abort（fake 无 native 生成）。
+        (mnnCpuBackend as? MnnBackend)?.cancelNow()
+        (mnnGpuBackend as? MnnBackend)?.cancelNow()
+        (mnnNpuBackend as? MnnBackend)?.cancelNow()
     }
 
     /** 当前活跃后端的指标（按 [lastUsedBackend] 取） */
@@ -469,6 +488,20 @@ class BackendManager(
         }
     }
 
+    /**
+     * Task 3 review M-4：健康记录写入统一旁路。
+     *
+     * 健康记录是旁路数据，任何写入异常（DataStore I/O 失败、协程取消竞态等）都不得影响推理本身：
+     * - [afterLoadFailure] 原在 try 外——DataStore edit 抛 IOException 会直接使整次 generate 失败；
+     * - [markModelOk] 原在 try 内——抛异常会被下方 catch 误判为 GENERATION 失败，触发回退 + 黑名单；
+     * - [afterGenerationFailure] 原在 catch 块内——抛异常会改写整次 generate 的失败形态。
+     * 三处一律经本方法包裹，失败仅记日志。
+     */
+    private suspend fun recordHealthWrite(tag: String, block: suspend () -> Unit) {
+        runCatching { block() }
+            .onFailure { Log.w(TAG, "健康记录写入失败（忽略，不影响推理）[$tag]: ${it.message}") }
+    }
+
     data class GenerationResult(
         /** native 返回的 GenerationSummary（null=摘要解析失败/未走 native）。全文不再整份携带，
          *  由 LocalChatProvider 作为唯一累加器拼接；此摘要仅供指标/完成原因上报。 */
@@ -482,5 +515,13 @@ class BackendManager(
 
     companion object {
         private const val TAG = "BackendManager"
+
+        /** Task 3 review I-1：「完成一次非错误生成」的完成原因集合——仅这些记 MODEL_OK。
+         *  中断（USER_CANCEL/TIMEOUT/THERMAL_STOP）与后端错误不是完成，不得证明后端可用。 */
+        private val COMPLETED_REASONS = setOf(
+            CompletionReason.EOS,
+            CompletionReason.MAX_TOKENS,
+            CompletionReason.POLICY_TRUNCATION,
+        )
     }
 }
