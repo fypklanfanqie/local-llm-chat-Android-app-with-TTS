@@ -395,7 +395,7 @@ class BackendManager(
 
             // Task 4 链末端兜底：GPU 空输出回退后循环耗尽（计划仅含 GPU attempt，或后续 attempt
             // 加载/生成全部失败）时，原样返回最后一次可回退的 GPU 空结果。回退本身只是新增一次
-            // CPU 重试机会，不应把「可回退的空输出」误报成「所有后端尝试均失败」（裁决 3 测试 e）。
+            // CPU 重试机会，不应把「可回退的空输出」误报成「所有后端尝试均失败」（测试清单 e）。
             lastEmptyFallback?.let { (summary, backend, completionReason) ->
                 return@withLock GenerationResult(
                     summary = summary,
