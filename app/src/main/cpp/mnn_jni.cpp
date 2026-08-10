@@ -250,13 +250,22 @@ class ThinkBoundaryScanner {
 public:
     explicit ThinkBoundaryScanner(long long t_start_us) : t_start_us_(t_start_us) {}
 
-    // 追加一个完整 UTF-8 字符；首次命中 </think> 记 hit_us_。
+    // 追加一个 chunk（单次回调，可能含多个完整 UTF-8 字符）；首次命中 </think> 记 hit_us_。
+    // 命中判定在追加后的完整窗口上进行：Utf8StreamProcessor 会把单次 write 内全部完整字符合成
+    // 一个 chunk（如 "</think>好"），若只取末 8 字节等值比较会因标签后紧跟正文而漏检；find 命中
+    // 即记录并清空窗口，未命中再截断窗口（供跨 chunk 的标签头继续拼装）。
     void feed(const std::string &utf8Char) {
         if (hit_) return;
         tail_.append(utf8Char);
         const size_t kTagSize = 8;  // "</think>" 长度
+        if (tail_.find("</think>") != std::string::npos) {
+            hit_ = true;
+            hit_us_ = nowUs() - t_start_us_;
+            tail_.clear();  // 命中后窗口不再需要（hit_ 已短路后续 feed）
+            return;
+        }
+        // 未命中：仅保留末 8 字节。标签全 ASCII、UTF-8 续字节恒 >=0x80，截断不会误匹配。
         if (tail_.size() > kTagSize) tail_ = tail_.substr(tail_.size() - kTagSize);
-        if (tail_ == "</think>") { hit_ = true; hit_us_ = nowUs() - t_start_us_; }
     }
 
     bool hit() const { return hit_; }
@@ -545,7 +554,10 @@ static void session_prefill(GenerationSession &s, const ChatMessages &history, s
 // EOS/maxTokens/shouldAbort，保证取消粒度与 decodeStepTokens 一致——即使 step>1 也在 1 token 内响应。
 static void session_decode(GenerationSession &s, AndroidSteppingStreamState &stream_state) {
     while (!s.stop_requested && !s.generate_text_end && s.current_size < s.max_tokens) {
-        for (int i = 0; i < s.decode_step && !s.stop_requested && !s.generate_text_end && !s.error_stage; ++i) {
+        // 内层逐 token 复核 maxTokens：step>1 时一轮内也可能触顶，须在 generate(1) 前拦截
+        // （与下方 EOS/abort 检查并列），保证 generatedTokens 恒 <= max_tokens。
+        for (int i = 0; i < s.decode_step && s.current_size < s.max_tokens
+                && !s.stop_requested && !s.generate_text_end && !s.error_stage; ++i) {
             try {
                 s.llm->generate(1);
             } catch (const std::exception &e) {
