@@ -208,6 +208,10 @@ class BackendManager(
         // Task 4：输出策略（GPU 首 delta 前空输出回退 CPU 等；带默认值，旧调用方不受影响——
         // 默认 DISABLED 使未显式启用的调用保持既有行为）。
         outputPolicy: GenerationOutputPolicy = GenerationOutputPolicy(),
+        // Task 6：native decode 步长（1=逐 token 默认；2..4=多 token 步进，native clamp 到 [1,4]）。
+        // 生成期参数（不参与模型加载指纹）；LocalChatProvider 从 resolvedPlan.decodeStepTokens 传入
+        // （该值已经 resolver 认证门禁：未认证组合恒为 1）。
+        decodeStepTokens: Int = 1,
     ): GenerationResult = generationMutex.withLock {
         val plan = resolvedPlan ?: throw IllegalStateException("Task 7 起 generate 必须提供 resolvedPlan")
         val attempts = plan.attempts
@@ -295,6 +299,8 @@ class BackendManager(
                         thinkingRequested = thinkingRequested,
                         templateCapability = templateCapability,
                         thinkingClassifier = thinkingClassifier,
+                        // Task 6：透传认证门禁后的 decode 步长（未认证组合为 1）。
+                        decodeStepTokens = decodeStepTokens,
                     )
                     val completionReason = executionControl?.reason()
                         ?: (backend as? MnnBackend)?.lastTurnRecord?.completionReason

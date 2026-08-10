@@ -378,6 +378,8 @@ class LocalChatProvider(
                             templateCapability = templateCapability.name,
                             thinkingClassifier = thinkingClassifier,
                             outputPolicy = outputPolicy,
+                            // Task 6：多 token 步进经认证门禁后由 plan 携带（未认证恒为 1，native 逐 token）。
+                            decodeStepTokens = resolvedPlan.decodeStepTokens,
                             onToken = { token ->
                                 // Task 2 旁路：分类器观察未装饰的原始流（截断后仍继续观察真实到达的
                                 // token，使 raw/body 字节计数完整），增量 O(1)，不进渲染路径。
