@@ -140,12 +140,20 @@ class LocalChatProvider(
      *   matchesCpuVariant 只认该变体）；
      * - native 身份 = [MnnBridge.runtimeInfo]；握手缺席（null）时返回 null 不查询——
      *   认证键含 native 身份（[InferenceCertificationStore.certKey] 五分量），无身份无法匹配。
+     *
+     * Task 7 review M-6：[modelFingerprint] 由调用方计算并传入（与 OpenCL 健康键同源复用，
+     * 每轮只算一次）；[lookaheadRequested] = false 时短路返回 null（认证记录只门禁 lookahead /
+     * 多 token 步进，请求关闭则无门禁意义——Task 7 认证恒 step=1）。
      */
-    private suspend fun loadCertifiedOptions(modelPath: String): CertifiedInferenceOptions? {
+    private suspend fun loadCertifiedOptions(
+        modelFingerprint: String,
+        lookaheadRequested: Boolean,
+    ): CertifiedInferenceOptions? {
+        if (!lookaheadRequested) return null
         val runtime = MnnBridge.runtimeInfo ?: return null
         val key = InferenceCertificationStore.certKey(
             deviceFingerprint = BackendHealthCoordinator.deviceFingerprintOf(),
-            modelFingerprint = modelConfigFingerprint(modelPath),
+            modelFingerprint = modelFingerprint,
             variant = RuntimeVariant.CPU_OPTIMIZED.name,
             nativeBuildId = runtime.nativeBuildId,
             mnnCommit = runtime.mnnCommit,
@@ -345,8 +353,11 @@ class LocalChatProvider(
             // - AUTO / 显式 GPU：按持久健康记录解析，需要时同步跑一次隔离探测（5s 超时）再解析；
             //   探测失败自然回落 COOLDOWN -> 计划走 CPU 链，不阻塞 CPU 路径。
             val wantsGpuPath = preference == BackendPreference.AUTO || preference == BackendPreference.MNN_GPU
+            // Task 7 review M-6：model 指纹每轮只算一次——GPU 健康键与认证键同源复用
+            // （此前 GPU 路径下每轮重算两次：resolveForGpu + loadCertifiedOptions）。
+            val modelFingerprint = modelConfigFingerprint(modelPath)
             val openclHealth = if (backendManager.mnnGpuSupported && wantsGpuPath) {
-                val health = healthCoordinator.resolveForGpu(modelConfigFingerprint(modelPath))
+                val health = healthCoordinator.resolveForGpu(modelFingerprint)
                 // Task 3 review M-5：决策理由有值时记录（COOLDOWN/BLACKLISTED 用 warn，其余 info）——
                 // 便于从日志定位 OpenCL 被排除/降级/重新验证的原因，而不只是看到最终 state。
                 health.reason?.let { reason ->
@@ -366,7 +377,7 @@ class LocalChatProvider(
             // Task 7：认证门禁查证——当前 device+model+CPU 变体+native 组合的基准认证记录。
             // lookahead / 多 token 步进只在存在认证证据时被 resolver 门禁启用（用户 legacy 请求
             // 只是使用既有认证的许可）；无认证回落安全默认（lookahead=false / step=1）。
-            val certifiedOptions = loadCertifiedOptions(modelPath)
+            val certifiedOptions = loadCertifiedOptions(modelFingerprint, lookahead)
             val resolvedPlan = InferenceProfileResolver(context.cacheDir, modelPath).resolve(
                 // Task 8：热降级后的有效模式（MODERATE+ 恒 BALANCED，撤销 sustained）。
                 mode = decision?.effectiveMode ?: performanceMode,

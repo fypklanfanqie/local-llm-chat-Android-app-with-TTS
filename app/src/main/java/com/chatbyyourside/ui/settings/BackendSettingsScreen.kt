@@ -62,6 +62,7 @@ import com.chatbyyourside.ui.glass.GlassListRow
 import com.chatbyyourside.ui.glass.GlassListSection
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -156,7 +157,18 @@ fun BackendSettingsScreen(
         }
     }
     // 最近一次生成记录（跨会话存活于 BackendManager 实例；无记录时展示「暂无生成记录」）。
-    val lastTurn = container.backendManager.lastTurnRecord()
+    // Task 7 review M-5：BackendManager 的记录是 @Volatile 字段（无 State/Flow 源），生成完成只写
+    // 字段不会触发重组；produceState 以 generationId 为键 + 1s 轮询重读——本屏存续期间生成结束后
+    // ≤1s 内「最近一次生成」自动刷新；回屏/其他重组时键变（新 generationId）立即重读。
+    val lastTurn by produceState<InferenceTurnRecord?>(
+        initialValue = container.backendManager.lastTurnRecord(),
+        key1 = container.backendManager.lastTurnRecord()?.generationId,
+    ) {
+        while (true) {
+            value = container.backendManager.lastTurnRecord()
+            delay(1_000)
+        }
+    }
 
     // 基准认证入口状态（运行中禁用按钮；完成后在诊断区展示最近一次判定原因）。
     var benchmarkRunning by remember { mutableStateOf(false) }
@@ -288,6 +300,8 @@ fun BackendSettingsScreen(
                         val t = v.toInt().coerceIn(1, 8)
                         if (t != threads) scope.launch { container.settingsRepository.setLlmParams(threads = t) }
                     },
+                    // Task 7 review I-2：基准运行期间冻结参数，保证基线 vs 候选在同一配置下测量。
+                    enabled = !benchmarkRunning,
                     valueRange = 1f..8f,
                     steps = 6,
                 )
@@ -301,6 +315,7 @@ fun BackendSettingsScreen(
                     BasicTextField(
                         value = contextInput,
                         onValueChange = { contextInput = it.filter { ch -> ch.isDigit() } },
+                        enabled = !benchmarkRunning,
                         modifier = Modifier
                             .width(72.dp)
                             .onFocusChanged { state ->
@@ -326,6 +341,7 @@ fun BackendSettingsScreen(
                         val coerced = coerceContextLen(v.toInt())
                         if (coerced != contextLen) scope.launch { container.settingsRepository.setLlmParams(contextLen = coerced) }
                     },
+                    enabled = !benchmarkRunning,
                     valueRange = MIN_CONTEXT_LEN.toFloat()..MAX_CONTEXT_LEN.toFloat(),
                     steps = (MAX_CONTEXT_LEN - MIN_CONTEXT_LEN) / CONTEXT_LEN_STEP - 1,
                 )
@@ -359,7 +375,7 @@ fun BackendSettingsScreen(
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(if (selected) scheme.primary.copy(alpha = 0.16f) else scheme.surface.copy(alpha = 0.5f))
                                 .border(1.dp, if (selected) scheme.primary else scheme.outline.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
-                                .clickable { scope.launch { container.settingsRepository.setLlmParams(maxTokens = size) } }
+                                .clickable(enabled = !benchmarkRunning) { scope.launch { container.settingsRepository.setLlmParams(maxTokens = size) } }
                                 .padding(vertical = 8.dp),
                             contentAlignment = Alignment.Center,
                         ) {
@@ -432,6 +448,7 @@ fun BackendSettingsScreen(
                     Switch(
                         checked = cpuBoost,
                         onCheckedChange = { scope.launch { container.settingsRepository.setLlmCpuBoost(it) } },
+                        enabled = !benchmarkRunning,
                     )
                 },
                 showDivider = true,
@@ -443,6 +460,7 @@ fun BackendSettingsScreen(
                     Switch(
                         checked = lookahead,
                         onCheckedChange = { scope.launch { container.settingsRepository.setLlmLookahead(it) } },
+                        enabled = !benchmarkRunning,
                     )
                 },
                 showDivider = true,
@@ -453,8 +471,10 @@ fun BackendSettingsScreen(
                 subtitle = "跑基线 vs lookahead 两轮固定解码对比：收益 ≥10% 且无 TTFT/内存回归才认证启用（约 1–2 分钟，期间请勿退出）",
                 onClick = {
                     if (benchmarkRunning) return@GlassListRow
+                    // Task 7 review M-1：同步置位防双击竞态——Compose 快照写入对同线程后续读取立即可见，
+                    // 同帧第二次点击在此被拒，避免两个基准并发（浪费 1-2 分钟且 last-writer-wins）。
+                    benchmarkRunning = true
                     scope.launch {
-                        benchmarkRunning = true
                         val result = withContext(Dispatchers.IO) {
                             try {
                                 runLookaheadCertification(context, container, container.benchmarkRunner)
@@ -468,7 +488,7 @@ fun BackendSettingsScreen(
                         benchmarkRunning = false
                         when (result) {
                             is LookaheadCertificationDecision.Certified ->
-                                Toast.makeText(context, "基准通过：lookahead 已认证并生效", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "基准通过：lookahead 已认证（打开旧开关后生效）", Toast.LENGTH_SHORT).show()
                             is LookaheadCertificationDecision.NotCertified ->
                                 Toast.makeText(
                                     context,
@@ -676,6 +696,7 @@ fun templateCapabilityText(cap: ThinkingTemplateCapability?): String = when (cap
  * - 请求开启 + 模板能力未知 -> 「开关可能无效」（不猜测）；
  * - 请求开启 + 观察到思考段（ENABLED）-> 「已生效」；
  * - 未请求但出现完整思考段（THINKING_DISABLE_NOT_EFFECTIVE）-> 「关闭未生效」（Task 2 硬性要求口径）；
+ * - 请求关闭但效果 UNKNOWN（截断/失败/空响应生成）-> 「未能确认生效」，不声称「已生效」；
  * - 其余（请求开启未确认 / 请求关闭）-> 如实陈述，不声称「已关闭」之外的事实。
  */
 fun thinkingStatusText(
@@ -692,6 +713,9 @@ fun thinkingStatusText(
     thinkingRequested == true -> "请求开启 → 未确认生效"
     thinkingEffective == ThinkingEffect.THINKING_DISABLE_NOT_EFFECTIVE.name ->
         "请求关闭 → 关闭未生效（仍出现思考段）"
+    // Task 7 review M-3：效果 UNKNOWN（截断/失败/空响应生成）不是「已生效」的证据，只陈述未能确认。
+    thinkingEffective == ThinkingEffect.UNKNOWN.name ->
+        "请求关闭 → 未能确认生效"
     else -> "请求关闭 → 已生效"
 }
 
@@ -841,6 +865,12 @@ private suspend fun runLookaheadCertification(
     container: AppContainer,
     runner: LocalInferenceBenchmarkRunner,
 ): LookaheadCertificationDecision {
+    // Task 7 review I-1：生成进行中禁止并发跑基准——两轮 generate 与聊天生成并发跑同一
+    // BackendManager/共享 native 模型，releaseOthers/ensureAttemptLoaded 会中途换/释放已加载
+    // 模型，聊天回复损坏或基准样本无效。
+    if (container.backendManager.isGenerating()) {
+        return LookaheadCertificationDecision.NotCertified(listOf("当前有生成任务进行中，请稍后再试"))
+    }
     if (runner.isThermallyHot()) {
         return LookaheadCertificationDecision.NotCertified(listOf("设备过热，基准未执行（请降温后重试）"))
     }
@@ -851,6 +881,11 @@ private suspend fun runLookaheadCertification(
     if (activeModelId.isNullOrBlank() || modelPath == null) {
         return LookaheadCertificationDecision.NotCertified(listOf("未选择本地模型或模型文件缺失"))
     }
+    // Task 7 review M-2：native 握手缺席快速失败——此前跑完 2×4 轮才在判定链发现身份缺失，
+    // 白费 1-2 分钟。文案与判定链 Reject 原因一致。
+    val runtime = MnnBridge.runtimeInfo ?: return LookaheadCertificationDecision.NotCertified(
+        listOf("native 构建身份缺失（握手缺席），无法认证"),
+    )
     // 指纹与认证记录键同源（Task 6 M-3）：device = deviceFingerprintOf，model = config.json 内容哈希。
     val deviceFingerprint = BackendHealthCoordinator.deviceFingerprintOf()
     val modelFingerprint = modelConfigFingerprint(modelPath)
@@ -893,13 +928,12 @@ private suspend fun runLookaheadCertification(
         deviceFingerprint = deviceFingerprint,
         configHash = configHash,
     )
-    val runtime = MnnBridge.runtimeInfo
     val decision = decideLookaheadCertification(
         baseline = baseline,
         candidate = candidate,
         case = case,
-        nativeBuildId = runtime?.nativeBuildId ?: "",
-        mnnCommit = runtime?.mnnCommit ?: "",
+        nativeBuildId = runtime.nativeBuildId,
+        mnnCommit = runtime.mnnCommit,
         nowElapsedMs = SystemClock.elapsedRealtime(),
     )
     // Promote 才落盘（toCertifiedOptions 已保证 native 身份齐备）；Reject 仅展示原因。

@@ -101,6 +101,18 @@ class BackendDiagnosticsTextTest {
     }
 
     @Test
+    fun disableRequestedWithUnknownEffectDoesNotClaimEffective() {
+        // Task 7 review M-3：请求关闭但效果 UNKNOWN（截断/失败/空响应生成）：不得声称「已生效」。
+        val text = thinkingStatusText(
+            thinkingRequested = false,
+            thinkingEffective = ThinkingEffect.UNKNOWN.name,
+            templateCapability = ThinkingTemplateCapability.SUPPORTED,
+        )
+        assertTrue(text.contains("未能确认生效"))
+        assertTrue(!text.contains("已生效"))
+    }
+
+    @Test
     fun requestedWithoutEvidenceDoesNotClaimEffective() {
         // 请求开启但无 ENABLED 证据（如生成被截断）：不得声称「已生效」。
         val text = thinkingStatusText(
