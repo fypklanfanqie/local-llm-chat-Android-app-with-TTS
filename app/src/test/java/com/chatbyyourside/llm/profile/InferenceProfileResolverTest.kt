@@ -327,4 +327,69 @@ class InferenceProfileResolverTest {
         val openclJson = p.attempts.first { it.variant == RuntimeVariant.OPENCL }.nativeConfigJson
         assertFalse(openclJson.contains("speculative_type"))
     }
+
+    // ===== Task 7 M-4：基准候选旁路的合成认证路径 =====
+
+    /**
+     * 构造 runner 候选旁路的合成认证记录（[CandidateOverrides] -> 合成 cert 的形态）：
+     * device/model 指纹留空（resolver 只匹配 variant，不读指纹）、variant 恒 CPU_OPTIMIZED、
+     * native 身份来自运行时握手。
+     */
+    private fun syntheticCandidateCert(
+        lookahead: Boolean,
+        step: Int = 1,
+    ) = CertifiedInferenceOptions(
+        deviceFingerprint = "",
+        modelFingerprint = "",
+        variant = RuntimeVariant.CPU_OPTIMIZED.name,
+        nativeBuildId = "runtime-build",
+        mnnCommit = "runtime-commit",
+        lookahead = lookahead,
+        decodeStepTokens = step,
+    )
+
+    @Test
+    fun syntheticCandidateCertWithEmptyFingerprintsEnablesLookahead() {
+        // runner 候选旁路（M-4）依赖的契约：合成认证（空 device/model 指纹）在「用户请求」同值
+        // 传入时放行候选配置——否则基准永远测不到 lookahead 候选（认证流无法闭环）。
+        val p = plan(
+            BackendPreference.MNN_CPU,
+            lookahead = true,
+            certifiedOptions = syntheticCandidateCert(lookahead = true),
+        )
+
+        assertFalse(p.downgradeReasons.contains(DowngradeReason.LOOKAHEAD_UNCERTIFIED))
+        assertTrue("合成认证应放行 lookahead 候选", p.powerPolicy.lookahead)
+        assertTrue("native config 应含 speculative_type", cpuOptimizedJson(p).contains("speculative_type"))
+    }
+
+    @Test
+    fun syntheticCandidateCertEnablesDecodeStepCandidate() {
+        // 候选旁路同时支持步进候选（decodeStepTokens=2）：合成认证后 plan 取候选步长。
+        val p = plan(
+            BackendPreference.MNN_CPU,
+            lookahead = false,
+            certifiedOptions = syntheticCandidateCert(lookahead = false, step = 2),
+        )
+
+        assertEquals("合成认证应放行步进候选", 2, p.decodeStepTokens)
+        assertFalse("未请求 lookahead 时仍不启用", p.powerPolicy.lookahead)
+    }
+
+    @Test
+    fun syntheticCandidateCertLookaheadFalseKeepsBaselineOff() {
+        // 基线旁路（lookahead=false）：runner 以候选值覆盖「用户请求」输入（buildPlan 的
+        // lookahead = candidateOverrides.lookahead，而非设置快照 legacy 值）——legacy 开关开
+        // 也不会被放大到基线，基线恒关闭，且不产生 LOOKAHEAD_UNCERTIFIED 噪音
+        // （旁路语义下无「用户请求未认证」：请求输入本身即候选值）。
+        val p = plan(
+            BackendPreference.MNN_CPU,
+            lookahead = false, // runner 旁路传入的覆盖值
+            certifiedOptions = syntheticCandidateCert(lookahead = false),
+        )
+
+        assertFalse("基线旁路应保持 lookahead=false", p.powerPolicy.lookahead)
+        assertFalse(cpuOptimizedJson(p).contains("speculative_type"))
+        assertFalse("覆盖值语义下不应有未认证降级噪音", p.downgradeReasons.contains(DowngradeReason.LOOKAHEAD_UNCERTIFIED))
+    }
 }

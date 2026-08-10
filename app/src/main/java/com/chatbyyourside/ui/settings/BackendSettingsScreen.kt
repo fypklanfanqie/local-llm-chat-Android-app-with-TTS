@@ -24,19 +24,47 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.os.SystemClock
+import android.widget.Toast
 import com.chatbyyourside.AppContainer
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.llm.LlmMemoryEstimator
+import com.chatbyyourside.llm.backend.BackendHealthCoordinator
+import com.chatbyyourside.llm.backend.BackendManager
 import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendSelector
 import com.chatbyyourside.llm.backend.BackendType
+import com.chatbyyourside.llm.backend.MnnBridge
 import com.chatbyyourside.llm.backend.NpuSupportDetector
+import com.chatbyyourside.llm.backend.modelConfigFingerprint
+import com.chatbyyourside.llm.benchmark.BenchmarkSample
+import com.chatbyyourside.llm.benchmark.BenchmarkScenarioResult
+import com.chatbyyourside.llm.benchmark.CandidateOverrides
+import com.chatbyyourside.llm.benchmark.CertifiedInferenceOptions
+import com.chatbyyourside.llm.benchmark.ExperimentalPromotionPolicy
+import com.chatbyyourside.llm.benchmark.InferenceBackendQuadrant
+import com.chatbyyourside.llm.benchmark.InferenceBenchmarkCase
+import com.chatbyyourside.llm.benchmark.InferenceBenchmarkScenario
+import com.chatbyyourside.llm.benchmark.InferenceCertificationStore
+import com.chatbyyourside.llm.benchmark.LocalInferenceBenchmarkRunner
+import com.chatbyyourside.llm.benchmark.PromotionDecision
+import com.chatbyyourside.llm.metrics.InferenceTurnRecord
+import com.chatbyyourside.llm.profile.DeviceRuntimeFingerprint
+import com.chatbyyourside.llm.profile.DowngradeReason
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
+import com.chatbyyourside.llm.profile.RuntimeVariant
+import com.chatbyyourside.llm.template.ThinkingEffect
+import com.chatbyyourside.llm.template.ThinkingTemplateCapability
+import com.chatbyyourside.llm.template.ThinkingTemplateCapabilityResolver
+import com.chatbyyourside.provider.local.ModelPathResolver
 import com.chatbyyourside.ui.glass.GlassListRow
 import com.chatbyyourside.ui.glass.GlassListSection
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.util.Locale
 
 /**
  * 推理引擎设置页（独立路由）：性能模式、设备能力、后端选项、推理参数、高级（诊断）旧开关、回退链。
@@ -424,4 +452,183 @@ private const val CONTEXT_LEN_STEP = 512
 private fun coerceContextLen(value: Int): Int {
     val snapped = ((value + CONTEXT_LEN_STEP / 2) / CONTEXT_LEN_STEP) * CONTEXT_LEN_STEP
     return snapped.coerceIn(MIN_CONTEXT_LEN, MAX_CONTEXT_LEN)
+}
+
+// ==========================================================================
+// Task 7：诊断摘要与认证闭环的纯逻辑（全部 JVM 可测；UI 只做渲染，不做分支）
+// ==========================================================================
+
+/** 最近一次生成的诊断行（label -> value）。 */
+data class TurnDiagnosticRow(val label: String, val value: String)
+
+/**
+ * 模板能力展示文案（Task 7 Step 5）。
+ *
+ * **约束**：UNKNOWN / UNSUPPORTED 时绝不声称「思考已关闭」——UNKNOWN 是信息不足（模板不可见/
+ * 解析失败），开关可能仍然有效也可能无效；UNSUPPORTED 是「开关必然被忽略」，但也不等于模型不
+ * 支持思考（可能无条件思考）。两者文案都只陈述能力事实。
+ */
+fun templateCapabilityText(cap: ThinkingTemplateCapability?): String = when (cap) {
+    ThinkingTemplateCapability.SUPPORTED -> "模板含思考分支（开关可生效）"
+    ThinkingTemplateCapability.UNSUPPORTED -> "模板不含思考分支（开关无效）"
+    ThinkingTemplateCapability.UNKNOWN -> "模板能力未知：思考开关可能无效"
+    null -> "未选择模型/无法解析"
+}
+
+/**
+ * 思考开关的请求/实际效果合并文案（Task 7 Step 2）。
+ *
+ * 把 thinkingRequested（用户请求）与 thinkingEffective（实际观察到的效果）按模板能力合并展示：
+ * - 请求开启 + 模板不支持 -> 「开关无效」；
+ * - 请求开启 + 模板能力未知 -> 「开关可能无效」（不猜测）；
+ * - 请求开启 + 观察到思考段（ENABLED）-> 「已生效」；
+ * - 未请求但出现完整思考段（THINKING_DISABLE_NOT_EFFECTIVE）-> 「关闭未生效」（Task 2 硬性要求口径）；
+ * - 其余（请求开启未确认 / 请求关闭）-> 如实陈述，不声称「已关闭」之外的事实。
+ */
+fun thinkingStatusText(
+    thinkingRequested: Boolean?,
+    thinkingEffective: String?,
+    templateCapability: ThinkingTemplateCapability?,
+): String = when {
+    thinkingRequested == true && templateCapability == ThinkingTemplateCapability.UNSUPPORTED ->
+        "请求开启 → 模板不支持（开关无效）"
+    thinkingRequested == true && templateCapability == ThinkingTemplateCapability.UNKNOWN ->
+        "请求开启 → 模板能力未知（开关可能无效）"
+    thinkingRequested == true && thinkingEffective == ThinkingEffect.ENABLED.name ->
+        "请求开启 → 已生效"
+    thinkingRequested == true -> "请求开启 → 未确认生效"
+    thinkingEffective == ThinkingEffect.THINKING_DISABLE_NOT_EFFECTIVE.name ->
+        "请求关闭 → 关闭未生效（仍出现思考段）"
+    else -> "请求关闭 → 已生效"
+}
+
+/**
+ * 回退/降级原因的可读文案：已知枚举映射中文，未知字符串原样保留（不做猜测，也不崩溃）。
+ */
+fun downgradeReasonText(reason: String): String = when (reason) {
+    BackendManager.EMPTY_GPU_OUTPUT_FALLBACK -> "GPU 空输出回退 CPU"
+    DowngradeReason.LOOKAHEAD_UNCERTIFIED.name -> "lookahead 未认证（未启用）"
+    DowngradeReason.OPENCL_UNHEALTHY.name -> "OpenCL 健康异常（未入链）"
+    DowngradeReason.QNN_UNAVAILABLE_IN_STANDARD_BUILD.name -> "标准构建不含 QNN（解析为 CPU）"
+    DowngradeReason.THERMAL.name -> "高温降级"
+    DowngradeReason.MEMORY.name -> "内存受限"
+    DowngradeReason.BACKEND_UNAVAILABLE.name -> "后端不可用"
+    DowngradeReason.UNSUPPORTED_SETTING.name -> "设置不再支持"
+    else -> reason
+}
+
+/**
+ * 当前模型+变体（CPU_OPTIMIZED）的认证状态文案（Task 7 Step 2 认证状态行）。
+ * null = 该组合无认证记录：lookahead / 多 token 步进均关闭（resolver 门禁默认）。
+ */
+fun certificationStatusText(cert: CertifiedInferenceOptions?): String = when {
+    cert == null -> "未认证（lookahead / 步进均关闭）"
+    cert.lookahead && cert.decodeStepTokens > 1 -> "已认证：lookahead + 多 token 步进 ${cert.decodeStepTokens}"
+    cert.lookahead -> "已认证：lookahead"
+    cert.decodeStepTokens > 1 -> "已认证：多 token 步进 ${cert.decodeStepTokens}"
+    else -> "已认证（逐 token 基线）"
+}
+
+/**
+ * 由最近一次生成记录 + 模板能力派生诊断行（Task 7 Step 2）。
+ *
+ * 纯函数（JVM 可测）：无记录返回空列表（UI 显示「暂无生成记录」占位）；行内容覆盖
+ * 思考（请求/实际）、实际后端 + 尝试轨迹、回退原因、阶段计时。认证状态行由调用方单独渲染
+ * （数据源是认证存储而非生成记录，见 [certificationStatusText]）。
+ */
+fun diagnosticRows(
+    record: InferenceTurnRecord?,
+    templateCapability: ThinkingTemplateCapability?,
+): List<TurnDiagnosticRow> {
+    if (record == null) return emptyList()
+    val rows = mutableListOf<TurnDiagnosticRow>()
+    rows += TurnDiagnosticRow(
+        label = "深度思考",
+        value = thinkingStatusText(record.thinkingRequested, record.thinkingEffective, templateCapability),
+    )
+    val backend = record.backend?.displayName ?: "未知"
+    val trace = if (record.attemptTrace.isEmpty()) "" else " · 尝试: ${record.attemptTrace.joinToString(" → ")}"
+    rows += TurnDiagnosticRow(label = "实际后端", value = "$backend$trace")
+    if (record.downgradeReasons.isNotEmpty()) {
+        rows += TurnDiagnosticRow(
+            label = "回退/降级",
+            value = record.downgradeReasons.joinToString("；") { downgradeReasonText(it) },
+        )
+    }
+    val timings = buildList {
+        record.prefillMs?.let { add("prefill ${it}ms") }
+        record.decodeMs?.let { add("decode ${it}ms") }
+        record.ttftMs?.let { add("TTFT ${it}ms") }
+        record.decodeTps?.let { add("${String.format(Locale.US, "%.1f", it)} tok/s") }
+        record.kvReuse?.let { add(if (it) "KV 复用" else "KV 未复用") }
+    }
+    if (timings.isNotEmpty()) rows += TurnDiagnosticRow(label = "阶段计时", value = timings.joinToString(" · "))
+    return rows
+}
+
+/** 由一轮基准结果构造 [BenchmarkSample]（认证闭环的 evaluate 输入）。 */
+fun benchmarkSampleFrom(result: BenchmarkScenarioResult): BenchmarkSample = BenchmarkSample(
+    decodeTpsMedian = result.summary.medianDecodeTps ?: 0f,
+    ttftMsMedian = result.summary.medianTtftMs,
+    peakPssMb = result.summary.peakPssMb?.toFloat(),
+    sampleCount = result.recordedSampleCount,
+    hotStart = !result.coolRun,
+)
+
+/** 认证闭环判定结果（evaluate → toCertifiedOptions 的纯映射；落盘由调用方执行）。 */
+sealed interface LookaheadCertificationDecision {
+    /** 判定 Promote 且 native 身份齐备：可落盘的认证记录。 */
+    data class Certified(val options: CertifiedInferenceOptions) : LookaheadCertificationDecision
+
+    /** 判定 Reject（或无法认证）：展示原因。 */
+    data class NotCertified(val reasons: List<String>) : LookaheadCertificationDecision
+}
+
+/**
+ * Lookahead 认证闭环的纯判定链（Task 7 Step 3）：基线（lookahead=false）vs 候选（lookahead=true）
+ * 两轮 FIXED_DECODE 结果 → [ExperimentalPromotionPolicy.evaluate] → Promote 时
+ * [InferenceCertificationStore.toCertifiedOptions]（lookaheadEvidence=true、native 身份由调用方
+ * 传入）→ [LookaheadCertificationDecision.Certified]；Reject / native 身份缺失 → NotCertified(原因)。
+ *
+ * 纯函数 JVM 可测（不触 Android）；落盘（save）由调用方（UI 入口）在 IO 线程执行。
+ * **键派生一致性约束（Task 6 M-3）**：本函数产出的认证记录键
+ * （[InferenceCertificationStore.certKey] = device+model+variant+native 五分量）必须与生产查证
+ * 侧（[com.chatbyyourside.provider.local.LocalChatProvider] 按相同五分量查证）一致——调用方构造
+ * [case] 时 device/model 指纹必须与生产侧同源（[BackendHealthCoordinator.deviceFingerprintOf] /
+ * [modelConfigFingerprint]），本函数不校验指纹真实性。
+ */
+fun decideLookaheadCertification(
+    baseline: BenchmarkScenarioResult,
+    candidate: BenchmarkScenarioResult,
+    case: InferenceBenchmarkCase,
+    nativeBuildId: String,
+    mnnCommit: String,
+    nowElapsedMs: Long,
+): LookaheadCertificationDecision {
+    val decision = ExperimentalPromotionPolicy.evaluate(
+        benchmarkSampleFrom(baseline),
+        benchmarkSampleFrom(candidate),
+    )
+    if (decision is PromotionDecision.Reject) {
+        return LookaheadCertificationDecision.NotCertified(decision.reasons)
+    }
+    val options = InferenceCertificationStore.toCertifiedOptions(
+        case = case,
+        decision = decision,
+        nativeBuildId = nativeBuildId,
+        mnnCommit = mnnCommit,
+        // Task 7 范围只做 lookahead 对比实验：候选步长恒 1（步进认证留未来实验）。
+        decodeStepTokens = 1,
+        // 本基准即 lookahead 开 vs 关对比，产生 lookahead 证据（Task 6 I-1 调用纪律）。
+        lookaheadEvidence = true,
+        configHash = case.configHash,
+        nowElapsedMs = nowElapsedMs,
+    )
+    return if (options != null) {
+        LookaheadCertificationDecision.Certified(options)
+    } else {
+        LookaheadCertificationDecision.NotCertified(
+            listOf("native 构建身份缺失（握手缺席），无法认证"),
+        )
+    }
 }
