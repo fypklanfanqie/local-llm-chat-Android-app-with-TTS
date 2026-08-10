@@ -493,29 +493,21 @@ class ChatViewModel(
                     })
                 }
 
-                // 性能浮窗：记录生成起点，重置速率（Token 速率由下方回调实时更新，不依赖 500ms 刷新）
+                // 性能浮窗：重置速率与日志。实时 Token 速率由浮窗读 MnnBackend 原子快照（native tps），
+                // 不再按流式 chunk 近似计数（Task 4：批处理后 chunk 数≠token 数）。
                 container.performanceCollector.updateTokenRate(0f)
                 container.performanceCollector.updateLog("生成中…")
-                val genStart = SystemClock.elapsedRealtime()
-                var genTokens = 0
-                // 流式 UI 节流：见 STREAM_THROTTLE_MS。lastStreamRenderMs 在同一条消息的串行回调内访问，
-                // onChunk 由 nativeGenerateStream 同步回调（同一 IO 线程、一次一个），无需同步。
+                // 流式 UI 节流：见 STREAM_THROTTLE_MS。onChunk 由 LocalStreamRenderPump 渲染协程
+                // （节流放行）与 finish（同步终帧）串行调用，lastStreamRenderMs 无需同步。
                 var lastStreamRenderMs = 0L
 
                 // 调用 Provider
                 val showThink = _uiState.value.deepThinkingEnabled
-                // 流式 UI 节流：见 STREAM_THROTTLE_MS。lastStreamRenderMs 在同一条消息的串行回调内访问，
-                // onChunk 由 nativeGenerateStream 同步回调（同一 IO 线程、一次一个），无需同步。
                 val onChunk: (String) -> Unit = { accumulated ->
-                    // 性能浮窗：按 chunk 近似计数 token，实时更新 tok/s 与日志
-                    genTokens++
-                    val elapsedSec = (SystemClock.elapsedRealtime() - genStart) / 1000f
-                    container.performanceCollector.updateTokenRate(if (elapsedSec > 0) genTokens / elapsedSec else 0f)
-                    container.performanceCollector.updateLog("已生成 $genTokens tokens")
                     // 节流：仅首块或距上次重渲染 >= STREAM_THROTTLE_MS 时才重解析 Markdown + 重组列表。
                     // 末块若被跳过，下方完成路径会用完整 displayResponse 覆盖并落库，不会丢字。
                     val now = SystemClock.elapsedRealtime()
-                    if (genTokens == 1 || now - lastStreamRenderMs >= STREAM_THROTTLE_MS) {
+                    if (lastStreamRenderMs == 0L || now - lastStreamRenderMs >= STREAM_THROTTLE_MS) {
                         lastStreamRenderMs = now
                         // 流式更新
                         val streamingMsg = DisplayMessage(
@@ -540,11 +532,13 @@ class ChatViewModel(
                 // 本地：走 chatTyped 取展示文本 + 模型原始文本（modelContent）；云端：返回展示文本，modelContent=null。
                 val displayResponse: String
                 val modelText: String?
+                var generatedTokens = 0   // native 实测生成 token 数（仅本地有意义；云端 0）
                 var localCompletionReason: com.chatbyyourside.llm.metrics.CompletionReason? = null
                 if (provider is LocalChatProvider) {
                     val localResult = provider.chatTyped(apiMessages, onChunk)
                     displayResponse = localResult.displayText
                     modelText = localResult.modelText
+                    generatedTokens = localResult.generation?.generatedTokens ?: 0
                     localCompletionReason = localResult.generation?.completionReason
                 } else {
                     displayResponse = provider.chat(apiMessages, onChunk)
@@ -552,10 +546,11 @@ class ChatViewModel(
                 }
 
                 // 流式完成 -> 移除临时 streaming 消息，落库持久化；明确区分 timeout/max-token。
+                // token 数取 native 实测 generatedTokens（批处理后回调数≠token 数）。
                 termReason = when (localCompletionReason) {
                     com.chatbyyourside.llm.metrics.CompletionReason.TIMEOUT -> "生成超时"
                     com.chatbyyourside.llm.metrics.CompletionReason.MAX_TOKENS -> "达到生成上限"
-                    else -> "完成: $genTokens chunks"
+                    else -> "完成: $generatedTokens tokens"
                 }
                 val assistantMessage = ChatMessage(role = "assistant", content = displayResponse, modelContent = modelText)
                 val assistantRowId = container.chatRepository.addMessage(charId, convId, assistantMessage)

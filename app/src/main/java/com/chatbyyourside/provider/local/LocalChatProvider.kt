@@ -27,7 +27,9 @@ import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.metrics.CompletionReason
 import com.chatbyyourside.perfmon.BackendType as PerfmonBackendType
 import com.chatbyyourside.provider.ChatProvider
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -241,18 +243,21 @@ class LocalChatProvider(
                         "anchorChanged=${promptPlan.anchorChanged} reason=${promptPlan.downgradeReason}",
                 )
             }
-            // Task 4 Step 3：本地是**唯一**原始回复累加器——native 不再返回全文，[accumulated] 由
-            // 流式 delta 拼接；BackendManager 只带回 GenerationSummary（指标/完成原因）。
-            val accumulated = StringBuilder()
+            // Task 4 Step 3：本地是**唯一**原始回复累加器——native 不再返回全文，[LocalStreamRenderPump]
+            // 持有 [accumulated] 由流式 delta 拼接；BackendManager 只带回 GenerationSummary（指标/完成原因）。
             var truncated = false  // onToken 截断后置位，后续 token 不再累积、持续返回 false 让 native abort
             // 增量剧本检测（Task 4 Step 5）：每 token 只扫新增区间 + 最长角色名重叠窗口（O(1) 空间、
-            // 无重扫），替代旧实现每块对全文 [indexOf] 的 O(n²)。cutAbsoluteIndex 与 [accumulated] 下标
-            // 对齐（同序从空喂入）。
+            // 无重扫），替代旧实现每块对全文 [indexOf] 的 O(n²)。cutAbsoluteIndex 与全文累加器下标
+            // 对齐（同序从空喂入，由解码线程串行调用）。
             val scriptDetector = IncrementalScriptDetector(SCRIPT_NAMES)
-            // Task 4 Step 6：`<think>` 装饰仅在渲染节流放行时进行（首 delta 必发保证即时性）。
-            // 原生批处理已削减回调次数，此处再避免每个批次都整串 toString + renderLocalThink；
-            // 末批被跳过不影响最终落库（完成路径用 displayText 覆盖流式气泡）。
-            var lastRenderMs = 0L
+            // Task 4 Step 6：`<think>` 装饰与 UI 回调移入独立渲染协程（LocalStreamRenderPump），
+            // 解码回调只做增量 append + 剧本检测 + conflated 信号，不再整串 toString + renderLocalThink，
+            // 避免同步工作直接推迟下一次 generate(1)。首块立即渲染保证即时性；末帧由 finish 兜底。
+            val renderScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val renderPump = LocalStreamRenderPump(scope = renderScope, minIntervalMs = RENDER_THROTTLE_MS)
+            renderPump.decorate = { renderLocalThink(it, shouldFoldThink) }
+            renderPump.onChunk = { onChunk(it) }
+            renderPump.start()
             val safetyPolicy = GenerationSafetyPolicy.forMode(
                 performanceMode,
                 promptPlan.reservedOutputTokens,
@@ -304,17 +309,14 @@ class LocalChatProvider(
                             resolvedPlan = resolvedPlan,
                             onToken = { token ->
                                 if (!truncated) {
-                                    accumulated.append(token)
+                                    // 同步回调只做三件事：append、剧本检测截断、并发渲染信号——不做任何字符串
+                                    // 整段拷贝/装饰/UI 更新，让 generate(1) 尽快回到 MNN 解码。
+                                    renderPump.append(token)
                                     // 兜底截断：增量检测「角色名：」多角色剧本标记 -> 截到标记前并停止。
                                     val cutPos = scriptDetector.append(token).cutAbsoluteIndex
                                     if (cutPos != null) {
-                                        accumulated.setLength(cutPos)
+                                        renderPump.truncateTo(cutPos)
                                         truncated = true
-                                    }
-                                    val now = SystemClock.elapsedRealtime()
-                                    if (lastRenderMs == 0L || now - lastRenderMs >= RENDER_THROTTLE_MS || truncated) {
-                                        lastRenderMs = now
-                                        onChunk(renderLocalThink(accumulated.toString(), shouldFoldThink))
                                     }
                                 }
                                 // false -> abort + POLICY_TRUNCATION；max-token 由 native 硬边界返回 MAX_TOKENS。
@@ -326,6 +328,13 @@ class LocalChatProvider(
                     }
                 }
             } finally {
+                // 取消渲染协程并同步渲染最终帧；renderScope 随后回收。
+                try {
+                    renderPump.finish()
+                } catch (e: Exception) {
+                    Log.w(TAG, "renderPump.finish 异常（忽略）: ${e.message}")
+                }
+                renderScope.cancel()
                 activeExecutionControl.compareAndSet(executionControl, null)
             }
             previousPromptAnchor = promptPlan.anchor
@@ -349,7 +358,7 @@ class LocalChatProvider(
             // （修复「输出中可折叠、输出完不可折叠」--之前未见 </think> 时落库不补起始 <think>，
             // parseWithThink 失配变纯文本）。被 max_tokens 截断在思考中途时保留未闭合 <think>，
             // 半截思考仍可折叠查看、不泄漏到正文。
-            val finalRaw = accumulated.toString()
+            val finalRaw = renderPump.snapshot()
             val finalText = renderLocalThink(finalRaw, shouldFoldThink)
             val displayText = finalText.ifBlank { "(本地模型未生成回复)" }
             // 原始模型输出（与 native syncPromptCache 逐字节一致）：本地累加器即最终原始文本。
