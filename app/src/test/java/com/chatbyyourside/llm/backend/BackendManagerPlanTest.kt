@@ -10,6 +10,7 @@ import com.chatbyyourside.llm.metrics.CompletionReason
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.InferenceProfileResolver
+import com.chatbyyourside.llm.profile.OpenClHealthState
 import com.chatbyyourside.llm.profile.PowerPolicy
 import com.chatbyyourside.llm.profile.ResolvedInferencePlan
 import com.chatbyyourside.llm.profile.RuntimeVariant

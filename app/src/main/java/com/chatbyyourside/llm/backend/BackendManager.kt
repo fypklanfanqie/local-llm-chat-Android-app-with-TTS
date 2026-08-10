@@ -236,7 +236,7 @@ class BackendManager(
             MnnBridge.abort = executionControl?.reason() != null
         }
         try {
-            for (attempt in attempts) {
+            for ((attemptIndex, attempt) in attempts.withIndex()) {
                 if (executionControl?.canTryNextBackend() == false) break
                 // 会话级失败黑名单（GPU/NPU；CPU 不黑名单）：命中则跳过该尝试，避免每轮重载再失败。
                 if (isSessionFailed(attempt.backend)) continue
@@ -323,11 +323,20 @@ class BackendManager(
                             thinkingRequested = thinkingRequested ?: false,
                         )
                     ) {
-                        Log.w(
-                            TAG,
-                            "GPU 空输出回退 CPU: reason=${summary?.completionReason} " +
-                                "class=${thinkingClassifier?.lastEmptyResponseClass}",
-                        )
+                        if (attemptIndex < attempts.lastIndex) {
+                            Log.w(
+                                TAG,
+                                "GPU 空输出回退 CPU: reason=${summary?.completionReason} " +
+                                    "class=${thinkingClassifier?.lastEmptyResponseClass}",
+                            )
+                        } else {
+                            // 链末端（无后续 CPU attempt）：并非回退，只是记录结果供循环后原样返回。
+                            Log.w(
+                                TAG,
+                                "GPU 空输出且无 CPU 可回退，原样返回: reason=${summary?.completionReason} " +
+                                    "class=${thinkingClassifier?.lastEmptyResponseClass}",
+                            )
+                        }
                         // 裁决 7：回退原因并入后续 attempt 的遥测 downgradeReasons。
                         attemptDowngradeReasons = (attemptDowngradeReasons + EMPTY_GPU_OUTPUT_FALLBACK).distinct()
                         // 链末端兜底：记录本次可回退结果，循环耗尽时原样返回（见循环后判定）。

@@ -26,6 +26,11 @@ import com.chatbyyourside.llm.template.EmptyResponseClass
 object GenerationOutcomeClassifier {
 
     /**
+     * 注意：**「计划链中确实存在可用的后续 CPU attempt」条件由调度层承担，本谓词不含该条件**——
+     * [BackendManager] 的 attempt 循环（推进 / 会话失败黑名单 / canTryNextBackend）与链末端兜底
+     * （无后续 attempt 时原样返回本次可回退结果）负责检查可用性；本谓词只回答
+     * 「这一次空输出是否值得发起回退」。
+     *
      * @param policy 本轮输出策略（[LocalChatProvider] 按后端偏好构造）。
      * @param backend 刚完成生成的尝试后端。
      * @param completionReason 本轮终止原因（请求级 reason 优先，其次单 attempt 摘要）。

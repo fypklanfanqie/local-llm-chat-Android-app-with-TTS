@@ -61,16 +61,18 @@ class GenerationOutcomeClassifierTest {
         }
     }
 
-    /** 非 GPU 后端（CPU）即使其余条件全满足也不回退。 */
+    /** 非 GPU 后端（CPU/NPU）即使其余条件全满足也不回退（`backend != MNN_GPU` 门对两者同样生效）。 */
     @Test
-    fun cpuBackend_neverFallsBack() {
-        for (clazz in listOf(
-            EmptyResponseClass.EOS_EMPTY,
-            EmptyResponseClass.MAX_TOKENS_EMPTY,
-            EmptyResponseClass.TEMPLATE_SUPPRESSED_OUTPUT,
-            EmptyResponseClass.THINK_ONLY,
-        )) {
-            assertFalse("CPU 后端 + $clazz 不应回退", eligible(backend = BackendType.MNN_CPU, emptyResponseClass = clazz))
+    fun nonGpuBackends_neverFallBack() {
+        for (backend in listOf(BackendType.MNN_CPU, BackendType.MNN_NPU)) {
+            for (clazz in listOf(
+                EmptyResponseClass.EOS_EMPTY,
+                EmptyResponseClass.MAX_TOKENS_EMPTY,
+                EmptyResponseClass.TEMPLATE_SUPPRESSED_OUTPUT,
+                EmptyResponseClass.THINK_ONLY,
+            )) {
+                assertFalse("$backend 后端 + $clazz 不应回退", eligible(backend = backend, emptyResponseClass = clazz))
+            }
         }
     }
 
