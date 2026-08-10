@@ -74,9 +74,11 @@ class InferenceProfileResolver(
         }
         // Task 6：多 token 步进门禁——无认证默认 1（native 逐 token，Task 1 clamp [1,4]）；
         // 仅当该组合认证了步进收益（decodeStepTokens>1）且变体匹配时才 >1。
+        // Task 6 review M-2：生效值 coerceIn(1,4) 纵深防御——损坏记录（如 step=99）不再直传 native
+        // （native 已有 clamp [1,4]，此为 Kotlin 侧双保险）。
         val effectiveStep = if (cert != null && cert.decodeStepTokens > 1 &&
             cert.matchesCpuVariant()
-        ) cert.decodeStepTokens else 1
+        ) cert.decodeStepTokens.coerceIn(1, 4) else 1
 
         // 尝试链：QNN 永不进 AUTO；标准版显式选 NPU 也解析为 CPU（保留已存设置但标不支持）。
         val openclEligible = openclHealth == OpenClHealthState.PROBE_OK ||

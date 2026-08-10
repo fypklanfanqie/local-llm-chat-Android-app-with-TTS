@@ -114,6 +114,12 @@ interface BackendHealthRecordStore {
  *
  * 键 = [BackendHealthKey]；值 = JSON 序列化的 [HealthRecord]。指纹变化（OTA/驱动/模型替换/策略
  * 版本）导致键变化 -> 旧黑名单/基准自然失效。普通失败跳过、黑名单语义与重置策略见 [BackendHealthPolicy]。
+ *
+ * **键粒度分歧（与 [com.chatbyyourside.llm.benchmark.InferenceCertificationStore.certKey] 有意不同，
+ * 勿盲目统一，Task 6 review M-1）**：健康键为 device+model+backend+variant、**不含 native 身份**——
+ * 健康记录跨 native 重建存活（旧构建的失败教训仍适用于新构建的同一后端，「缓用」语义保守）；
+ * 认证键含 nativeBuildId/mnnCommit——认证证据绑定具体二进制，native 重建即失效。两方向都保守：
+ * 健康记录尽量复用、认证尽量失效。
  */
 class BackendHealthStore(private val context: Context) : BackendHealthRecordStore {
 

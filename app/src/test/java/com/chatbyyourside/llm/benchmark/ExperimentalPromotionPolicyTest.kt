@@ -2,6 +2,7 @@ package com.chatbyyourside.llm.benchmark
 
 import com.chatbyyourside.llm.profile.RuntimeVariant
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -75,18 +76,24 @@ class ExperimentalPromotionPolicyTest {
         val record = InferenceCertificationStore.toCertifiedOptions(
             case = case(),
             decision = d,
+            nativeBuildId = "build-1",
+            mnnCommit = "abc123",
             decodeStepTokens = 1,
+            // lookahead 基准（开 vs 关对比）-> 产生 lookahead 证据。
+            lookaheadEvidence = true,
             configHash = "candidate-cfg",
             nowElapsedMs = 42_000L,
         )
 
         assertNotNull("Promote 应产出认证记录", record)
         record!!.let {
-            // 身份分量来自用例；native 构建身份取 MnnBridge.runtimeInfo（JVM 测试为握手缺席 -> 空串）。
+            // 身份分量来自用例 + 调用方传入的 native 构建身份（Task 6 review I-2：不再读 MnnBridge）。
             assertEquals("device-a", it.deviceFingerprint)
             assertEquals("model-a", it.modelFingerprint)
             assertEquals("CPU 象限应映射到 CPU_OPTIMIZED 变体", RuntimeVariant.CPU_OPTIMIZED.name, it.variant)
-            assertTrue("lookahead 认证路径应记录 lookahead 证据", it.lookahead)
+            assertEquals("build-1", it.nativeBuildId)
+            assertEquals("abc123", it.mnnCommit)
+            assertTrue("lookahead 基准应记录 lookahead 证据", it.lookahead)
             assertEquals("未测步进时记录 1", 1, it.decodeStepTokens)
             assertEquals("candidate-cfg", it.certifiedConfigHash)
             assertEquals(42_000L, it.certifiedAtElapsedMs)
@@ -98,7 +105,10 @@ class ExperimentalPromotionPolicyTest {
         val record = InferenceCertificationStore.toCertifiedOptions(
             case = case(InferenceBackendQuadrant.GPU_THINKING_ON),
             decision = PromotionDecision.Promote,
+            nativeBuildId = "build-1",
+            mnnCommit = "abc123",
             decodeStepTokens = 1,
+            lookaheadEvidence = true,
             configHash = null,
             nowElapsedMs = 1L,
         )
@@ -112,13 +122,18 @@ class ExperimentalPromotionPolicyTest {
         val record = InferenceCertificationStore.toCertifiedOptions(
             case = case(),
             decision = PromotionDecision.Promote,
+            nativeBuildId = "build-1",
+            mnnCommit = "abc123",
             decodeStepTokens = 2,
+            // 纯步进基准（step=2 vs 1）不产生 lookahead 证据（Task 6 review I-1）。
+            lookaheadEvidence = false,
             configHash = null,
             nowElapsedMs = 1L,
         )
 
         assertNotNull(record)
         assertEquals("认证步长应原样记录", 2, record!!.decodeStepTokens)
+        assertFalse("纯步进认证不得记录 lookahead 证据", record.lookahead)
     }
 
     @Test
@@ -128,7 +143,46 @@ class ExperimentalPromotionPolicyTest {
 
         assertNull(
             "Reject 不应产出认证记录",
-            InferenceCertificationStore.toCertifiedOptions(case(), d, decodeStepTokens = 1, configHash = null, nowElapsedMs = 1L),
+            InferenceCertificationStore.toCertifiedOptions(
+                case(), d,
+                nativeBuildId = "build-1",
+                mnnCommit = "abc123",
+                decodeStepTokens = 1,
+                lookaheadEvidence = true,
+                configHash = null,
+                nowElapsedMs = 1L,
+            ),
+        )
+    }
+
+    @Test
+    fun promotedCandidateWithoutNativeIdentityProducesNoRecord() {
+        // Task 6 review I-2：握手缺席（nativeBuildId/mnnCommit 空/空白）时不得生成认证记录——
+        // 否则认证键退化为 device+model+variant 三分量，native 重建后旧二进制证据继续启用
+        // 步进/lookahead（证据错配）。无 native 身份证明不认证。
+        assertNull(
+            "nativeBuildId 为空不应认证",
+            InferenceCertificationStore.toCertifiedOptions(
+                case(), PromotionDecision.Promote,
+                nativeBuildId = "",
+                mnnCommit = "abc123",
+                decodeStepTokens = 1,
+                lookaheadEvidence = true,
+                configHash = null,
+                nowElapsedMs = 1L,
+            ),
+        )
+        assertNull(
+            "mnnCommit 空白不应认证",
+            InferenceCertificationStore.toCertifiedOptions(
+                case(), PromotionDecision.Promote,
+                nativeBuildId = "build-1",
+                mnnCommit = "  ",
+                decodeStepTokens = 1,
+                lookaheadEvidence = true,
+                configHash = null,
+                nowElapsedMs = 1L,
+            ),
         )
     }
 }

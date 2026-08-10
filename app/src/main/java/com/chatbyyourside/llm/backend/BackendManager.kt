@@ -10,6 +10,7 @@ import com.chatbyyourside.llm.backend.MnnBackend.MnnMode
 import com.chatbyyourside.llm.metrics.CompletionReason
 import com.chatbyyourside.llm.profile.BackendAttempt
 import com.chatbyyourside.llm.profile.ResolvedInferencePlan
+import com.chatbyyourside.llm.profile.RuntimeVariant
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
 import com.chatbyyourside.llm.template.ThinkingOutputClassifier
@@ -211,6 +212,8 @@ class BackendManager(
         // Task 6：native decode 步长（1=逐 token 默认；2..4=多 token 步进，native clamp 到 [1,4]）。
         // 生成期参数（不参与模型加载指纹）；LocalChatProvider 从 resolvedPlan.decodeStepTokens 传入
         // （该值已经 resolver 认证门禁：未认证组合恒为 1）。
+        // Task 6 review I-3：步进认证仅对 CPU_OPTIMIZED 变体生效（见 generate 内按变体守卫），
+        // GPU/兼容变体恒 1；GPU 步进认证留未来扩展。
         decodeStepTokens: Int = 1,
     ): GenerationResult = generationMutex.withLock {
         val plan = resolvedPlan ?: throw IllegalStateException("Task 7 起 generate 必须提供 resolvedPlan")
@@ -284,6 +287,11 @@ class BackendManager(
                     val backend = backendFor(attempt.backend)
                     // 提前标记当前后端：供性能浮窗在生成中查询此后的 native 指标（tps 等）。
                     lastUsedBackend = attempt.backend
+                    // Task 6 review I-3：步进认证按变体守卫——plan 级 decodeStepTokens 是
+                    // CPU_OPTIMIZED（基准认证变体）的证据；OPENCL（GPU 无步进认证）与
+                    // CPU_COMPATIBILITY（兜底，非基准配置）恒 1，防止认证证据错配
+                    // （CPU_OPTIMIZED 的 step 证据作用于 GPU/兼容变体）。GPU 步进认证留未来扩展。
+                    val step = if (attempt.variant == RuntimeVariant.CPU_OPTIMIZED) decodeStepTokens else 1
                     val summary = backend.generateStreamMessages(
                         messages, attemptMaxTokens, temperature, topP, repeatPenalty, enableThinking, onToken,
                         effectiveBatchBytes, effectiveBatchMs, attemptDowngradeReasons, executionControl,
@@ -299,8 +307,8 @@ class BackendManager(
                         thinkingRequested = thinkingRequested,
                         templateCapability = templateCapability,
                         thinkingClassifier = thinkingClassifier,
-                        // Task 6：透传认证门禁后的 decode 步长（未认证组合为 1）。
-                        decodeStepTokens = decodeStepTokens,
+                        // Task 6：透传认证门禁后的 decode 步长（未认证组合为 1；按变体守卫见上）。
+                        decodeStepTokens = step,
                     )
                     val completionReason = executionControl?.reason()
                         ?: (backend as? MnnBackend)?.lastTurnRecord?.completionReason

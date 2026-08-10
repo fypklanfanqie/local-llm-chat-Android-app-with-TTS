@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.chatbyyourside.llm.backend.MnnBridge
 import com.chatbyyourside.llm.profile.RuntimeVariant
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -52,6 +51,7 @@ data class CertifiedInferenceOptions(
  * 键 = [certKey]（device+model+variant+native 组合的 SHA-256 前 16 hex）；值 = JSON 序列化的
  * [CertifiedInferenceOptions]。指纹变化（OTA/驱动/模型替换/native 重建）-> 键变化 -> 旧认证自然失效，
  * 与 [com.chatbyyourside.llm.backend.BackendHealthStore] 的 map 持久化模式一致。
+ * 键粒度与健康存储的分歧（含原因）见 [certKey] KDoc——有意为之，勿盲目统一（Task 6 review M-1）。
  *
  * **线程数认证不在本任务范围**：CPU 线程数保持热准入机制（min(用户, 大核, 温控)）；四象限基准数据
  * 由 [LocalInferenceBenchmarkRunner] 产出（Task 5），Task 7 接 UI 后用户/未来流程可按相同组合键
@@ -108,6 +108,12 @@ class InferenceCertificationStore(private val context: Context) {
          *
          * 任一分量变化（换设备/换模型/变体变化/native 重建或 MNN commit 升级）即新键，
          * 旧认证自然失效——认证的正是「该组合上有基准证据的收益」。
+         *
+         * **粒度分歧（与 [com.chatbyyourside.llm.backend.BackendHealthStore.keyFor] 有意不同，
+         * 勿盲目统一，Task 6 review M-1）**：健康键为 device+model+backend+variant、**不含 native
+         * 身份**——健康记录跨 native 重建存活（旧构建的失败教训仍适用于新构建的同一后端，「缓用」
+         * 语义保守）；本认证键含 nativeBuildId/mnnCommit——认证是「该二进制上实测的收益」，native
+         * 重建即证据失效。两方向都保守：健康记录尽量复用、认证尽量失效。
          */
         fun certKey(
             deviceFingerprint: String,
@@ -124,23 +130,38 @@ class InferenceCertificationStore(private val context: Context) {
          * 认证记录映射（纯函数，JVM 可测）：[PromotionDecision.Promote] -> 生成 [CertifiedInferenceOptions]
          * 记录；[PromotionDecision.Reject]（或任何非 Promote 决策）-> null（不记录）。
          *
-         * [case] 提供 device/model/象限指纹；native 构建身份（[CertifiedInferenceOptions.nativeBuildId] /
-         * [mnnCommit]）取自 [MnnBridge.runtimeInfo]（与 [BenchmarkScenarioResult] 同源；握手缺席/纯 JVM
-         * 为 null）。变体由象限推导：GPU 象限 -> [RuntimeVariant.OPENCL]，CPU 象限 -> [RuntimeVariant.CPU_OPTIMIZED]
+         * [case] 提供 device/model/象限指纹；native 构建身份（[nativeBuildId]/[mnnCommit]）**由调用方
+         * 传入**（Task 7 基准触发从 [BenchmarkScenarioResult] 同源取 [MnnBridge.runtimeInfo]；本映射
+         * 不读 [MnnBridge]，保持纯映射 JVM 可测）。**任一分量为空/空白时返回 null（不生成认证记录）**——
+         * 认证键含 native 身份（[certKey] 五分量），握手缺席（runtimeInfo==null）时若仍记录，键退化为
+         * device+model+variant 三分量：应用更新 native 后同键不变，旧二进制证据会在新构建上继续启用
+         * 步进/lookahead（证据错配）。无 native 身份证明不认证。
+         * 变体由象限推导：GPU 象限 -> [RuntimeVariant.OPENCL]，CPU 象限 -> [RuntimeVariant.CPU_OPTIMIZED]
          * （lookahead / 多 token 步进只对 CPU 组合有意义，resolver 门禁只认 CPU_OPTIMIZED 认证）。
          *
+         * @param nativeBuildId native 构建身份（[MnnBridge.runtimeInfo] 同源）；空/空白 -> 返回 null。
+         * @param mnnCommit MNN commit（同上）；空/空白 -> 返回 null。
          * @param decodeStepTokens 被认证候选实测的 decode 步长（1=仅 lookahead 认证；2..4=步进认证）。
+         * @param lookaheadEvidence 本次基准是否产生 lookahead 证据（lookahead 开 vs 关对比基准 -> true；
+         *        纯步进基准（step=2 vs 1）-> false）。认证记录按此字段落 lookahead——纯步进认证不得
+         *        留下 lookahead=true 的记录，否则用户请求 lookahead 时 resolver 无 lookahead 基准证据
+         *        仍启用 speculative_type（证据错配启用）。
          * @param configHash 认证时的候选配置哈希（诊断用途）。
          * @param nowElapsedMs 认证时刻（SystemClock.elapsedRealtime 语义）。
          */
         fun toCertifiedOptions(
             case: InferenceBenchmarkCase,
             decision: PromotionDecision,
+            nativeBuildId: String,
+            mnnCommit: String,
             decodeStepTokens: Int,
+            lookaheadEvidence: Boolean,
             configHash: String?,
             nowElapsedMs: Long,
         ): CertifiedInferenceOptions? {
             if (decision !is PromotionDecision.Promote) return null
+            // 无 native 身份证明不认证（见 KDoc）：握手缺席的基准结果不产生认证记录。
+            if (nativeBuildId.isBlank() || mnnCommit.isBlank()) return null
             val variant = if (case.quadrant.usesGpu) {
                 RuntimeVariant.OPENCL.name
             } else {
@@ -150,11 +171,11 @@ class InferenceCertificationStore(private val context: Context) {
                 deviceFingerprint = case.deviceFingerprint,
                 modelFingerprint = case.modelFingerprint,
                 variant = variant,
-                nativeBuildId = MnnBridge.runtimeInfo?.nativeBuildId ?: "",
-                mnnCommit = MnnBridge.runtimeInfo?.mnnCommit ?: "",
-                // 本映射只用于「lookahead 候选」的认证（基准对比的就是 lookahead 开 vs 关）；
-                // 步进证据经 decodeStepTokens 记录。lookahead=false 的认证组合不存在于本映射路径。
-                lookahead = true,
+                nativeBuildId = nativeBuildId,
+                mnnCommit = mnnCommit,
+                // lookahead 证据由基准类型决定（lookaheadEvidence），不做硬编码：纯步进基准
+                // （step=2 vs 1）不产生 lookahead 证据，record.lookahead=false 防止门禁误启用。
+                lookahead = lookaheadEvidence,
                 decodeStepTokens = decodeStepTokens,
                 certifiedConfigHash = configHash,
                 certifiedAtElapsedMs = nowElapsedMs,

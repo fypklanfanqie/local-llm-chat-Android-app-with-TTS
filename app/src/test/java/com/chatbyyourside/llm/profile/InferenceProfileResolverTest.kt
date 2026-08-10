@@ -288,6 +288,18 @@ class InferenceProfileResolverTest {
     }
 
     @Test
+    fun decodeStepTokensClampedToFourWhenCertificationRecordCorrupted() {
+        // Task 6 review M-2：损坏记录（step=99）经 coerceIn(1,4) 收敛，不直传 native
+        // （native 已有 clamp [1,4]，此为 Kotlin 侧纵深防御）。
+        val p = plan(
+            BackendPreference.MNN_CPU,
+            certifiedOptions = cert(step = 99),
+        )
+
+        assertEquals("越界步长应收敛到 4", 4, p.decodeStepTokens)
+    }
+
+    @Test
     fun lookaheadAndStepGatesAreIndependent() {
         // 认证既有 lookahead 证据又有步进证据：用户请求 lookahead -> 两者都生效。
         val p = plan(
