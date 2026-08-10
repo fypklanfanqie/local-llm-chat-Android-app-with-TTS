@@ -32,9 +32,10 @@ import java.io.File
  * 默认本地推理基准运行器（Task 5 Step 4/5，契约 + 核心循环实现）。
  *
  * 实现 [LocalInferenceBenchmarkRunner] 的采样循环：
- * - **热检查**：[isThermallyHot] 用注入的 [ThermalMonitor]（可空）判 SEVERE+ 为热；
- *   未注入时默认构造一个 ThermalMonitor——未调用 startThermalMonitoring 前热读取恒为 NONE
- *   （不拒绝），需真实热防护的调用方请注入已启动监控的实例。
+ * - **热检查**：[isThermallyHot] 用注入的 [ThermalMonitor]（可空）判 SEVERE+ 为热；未注入时
+ *   自建 monitor 并调 [ThermalMonitor.startThermalMonitoring] 进入采样状态（Task 5 review I-1）。
+ *   API 29+/PowerManager 缺席（或注入实例未启动监控）时为 no-op，热读取恒为 NONE——基准默认
+ *   不拒绝热态；需真实热防护的调用方（Task 7 UI 入口）请注入已启动监控的实例。
  * - **采样循环**：`warmupRounds` 预热轮（丢弃）+ `recordedRounds` 记录轮（入样本）；每轮调
  *   [BackendManager.generate]（固定中文探针 prompt + 固定采样参数），取
  *   [BackendManager.lastTurnRecord] 为样本；热态样本丢弃并记入 [BenchmarkScenarioResult.discardedReasons]。
@@ -49,15 +50,22 @@ import java.io.File
  * fixture（如两轮 KV 复用构造、长 prefill prompt）——本实现所有场景共用同一固定探针，
  * 场景主要决定冷启动行为与归档维度。
  */
-class DefaultLocalInferenceBenchmarkRunner(
+open class DefaultLocalInferenceBenchmarkRunner(
     private val context: Context,
     private val backendManager: BackendManager,
     private val settings: SettingsRepository,
     private val thermalMonitor: ThermalMonitor? = null,
 ) : LocalInferenceBenchmarkRunner {
+    // open 仅供仪器测试桩化 isThermallyHot 验证热守卫（Task 5 review M-4）；生产不子类化。
 
     private val effectiveThermalMonitor: ThermalMonitor = thermalMonitor
-        ?: ThermalMonitor(context) { DEFAULT_BIG_CORE_COUNT }
+        ?: ThermalMonitor(context) { DEFAULT_BIG_CORE_COUNT }.apply {
+            // Task 5 review I-1：自建 monitor 也必须启动采样，否则 currentLevel 恒为 NONE、
+            // isThermallyHot 恒 false——热态样本不会被丢弃（「rejecting hot runs」默认不生效）。
+            // startThermalMonitoring 可重复调用安全（内部 started 守卫）、无主线程要求；
+            // API<29 或 PowerManager 缺席时为 no-op，热读取恒为 NONE（基准默认不拒绝，见类 KDoc）。
+            startThermalMonitoring { /* 基准只读取热档位，不消费降频回调 */ }
+        }
 
     private val templateResolver = ThinkingTemplateCapabilityResolver()
 
@@ -114,6 +122,13 @@ class DefaultLocalInferenceBenchmarkRunner(
         }
 
         val summary = summarize(samples)
+        // Task 5 review I-2：实际后端分布按样本级 record.backend 统计——样本级字段不落盘，
+        // 归档后经 actualBackendCounts 可追溯「真 GPU」与「回退 CPU」（backendVariant 只记
+        // 计划首个尝试，OpenCL 加载失败落到 CPU attempt 时无法分辨）。
+        val actualBackendCounts = samples
+            .mapNotNull { it.backend?.name }
+            .groupingBy { it }
+            .eachCount()
         val coolRun = samples.isNotEmpty() && discardedReasons.none { it.startsWith(REASON_THERMALLY_HOT) }
         return BenchmarkScenarioResult(
             scenario = scenario,
@@ -127,6 +142,7 @@ class DefaultLocalInferenceBenchmarkRunner(
             quadrant = quadrant,
             thinkingRequested = quadrant.thinkingEnabled,
             backendVariant = plan.firstAttempt?.variant?.name,
+            actualBackendCounts = actualBackendCounts,
             nativeBuildId = MnnBridge.runtimeInfo?.nativeBuildId,
             mnnCommit = MnnBridge.runtimeInfo?.mnnCommit,
         )
@@ -134,6 +150,13 @@ class DefaultLocalInferenceBenchmarkRunner(
 
     override suspend fun runReliability(case: InferenceBenchmarkCase, rounds: Int): ReliabilityResult {
         require(rounds >= 0) { "rounds 必须 >= 0" }
+        // Task 5 review M-3：热守卫入口早退——热降频同样污染可靠性样本。ReliabilityResult 无
+        // coolRun 拒绝通道（与 run() 的 rejectedResult 语义不同型，返回全 NO_RECORD 会被误当
+        // 伪有效结果归档），故抛异常让调用方明确感知（本函数既有 require 亦为抛错风格）；
+        // 调用方（Task 7 UI 入口）应先用 isThermallyHot() 查询或捕获本异常。
+        if (isThermallyHot()) {
+            throw IllegalStateException("设备过热，可靠性基准未执行")
+        }
         val snapshot = settings.getLocalInferenceSettingsNow()
         val modelPath = resolveModelPath(snapshot)
         val classes = mutableMapOf<String, Int>()
@@ -151,7 +174,7 @@ class DefaultLocalInferenceBenchmarkRunner(
                 val cls = record?.emptyResponseClass ?: NO_RECORD_CLASS
                 classes[cls] = (classes[cls] ?: 0) + 1
                 if (cls == EmptyResponseClass.NONE.name) nonEmptyCount++
-                if (record?.downgradeReasons?.contains(EMPTY_GPU_OUTPUT_FALLBACK) == true) fallbackCount++
+                if (record?.downgradeReasons?.contains(BackendManager.EMPTY_GPU_OUTPUT_FALLBACK) == true) fallbackCount++
             }
         } else if (rounds > 0) {
             classes[NO_MODEL_CLASS] = rounds
@@ -292,12 +315,6 @@ class DefaultLocalInferenceBenchmarkRunner(
 
         /** 未选模型时全部轮次的分类占位。 */
         private const val NO_MODEL_CLASS = "NO_MODEL"
-
-        /**
-         * GPU 空输出回退 CPU 的遥测降级原因——与 [BackendManager] 的私有常量同值（Task 4）。
-         * BackendManager 仅在 Task 4 回退路径追加该原因，故此处以字面量复用以计数回退轮次。
-         */
-        private const val EMPTY_GPU_OUTPUT_FALLBACK = "EMPTY_GPU_OUTPUT_FALLBACK"
 
         /** 默认构造 ThermalMonitor 时的大核数兜底（仅用于 recommendedThreadCount 比例，不影响本类逻辑）。 */
         private const val DEFAULT_BIG_CORE_COUNT = 4

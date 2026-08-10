@@ -23,8 +23,9 @@ private val Context.benchmarkResultStore by preferencesDataStore(name = "benchma
  * 契约约束：仅持久化 [BenchmarkScenarioResult.coolRun]=true 的结果；热态/噪声结果不落盘。
  * 覆盖式更新：同键再 save 直接覆盖旧值。
  *
- * 注意：契约 [BenchmarkResultStore.load] 无象限维度，故依次尝试四个象限键返回首个命中
- * （同一场景+指纹下一般仅一份冷态结果；Task 7 接入 UI 如需按象限查询可在此之上加带象限的键）。
+ * 契约 [BenchmarkResultStore.load] 的 quadrant 为可空（Task 5 review M-1）：非 null 时直取
+ * 该象限键；null 时依次尝试四个象限键返回首个命中（同一场景+指纹下一般仅一份冷态结果，
+ * 保留既有首命中兼容）。
  */
 class DataStoreBenchmarkResultStore(
     context: Context,
@@ -50,20 +51,38 @@ class DataStoreBenchmarkResultStore(
         scenario: InferenceBenchmarkScenario,
         deviceFingerprint: String,
         configFingerprint: String,
+        quadrant: InferenceBackendQuadrant? = null,
     ): BenchmarkScenarioResult? {
         val prefs = context.benchmarkResultStore.data.first()
-        for (quadrant in InferenceBackendQuadrant.entries) {
-            val key = keyOf(scenario, deviceFingerprint, configFingerprint, quadrant)
+        // M-1：非 null 时直取该象限键，不受「枚举序首命中」遮蔽（GPU/CPU 同存时按象限精确读回）。
+        if (quadrant != null) {
+            return decodeOrNull(prefs[stringPreferencesKey(keyOf(scenario, deviceFingerprint, configFingerprint, quadrant))])
+        }
+        for (candidate in InferenceBackendQuadrant.entries) {
+            val key = keyOf(scenario, deviceFingerprint, configFingerprint, candidate)
             val raw = prefs[stringPreferencesKey(key)] ?: continue
-            return runCatching { json.decodeFromString<BenchmarkScenarioResult>(raw) }
-                .getOrElse {
-                    Log.w(TAG, "基准结果 JSON 解析失败（忽略）: $key ${it.message}")
-                    null
-                }
+            decodeOrNull(raw)?.let { return it }
         }
         return null
     }
 
+    /** 键值 JSON 解码（解析失败仅记日志返回 null，容忍脏数据）。 */
+    private fun decodeOrNull(raw: String?): BenchmarkScenarioResult? {
+        if (raw == null) return null
+        return runCatching { json.decodeFromString<BenchmarkScenarioResult>(raw) }
+            .getOrElse {
+                Log.w(TAG, "基准结果 JSON 解析失败（忽略）: ${it.message}")
+                null
+            }
+    }
+
+    /**
+     * 组装归档键：`scenario.storageKey|quadrant|deviceFingerprint|configFingerprint`。
+     *
+     * Task 5 review M-7：键以 `|` 分隔——storageKey/deviceFingerprint/configFingerprint 均
+     * **不得含 `|` 字符**（否则键维度串位、四象限分键失效）。指纹由调用方构造、可控，本实现
+     * 不做转义；若未来指纹来源不可控，需改为转义或 length-prefix 编码。
+     */
     private fun keyOf(
         scenario: InferenceBenchmarkScenario,
         deviceFingerprint: String,

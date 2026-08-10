@@ -583,8 +583,10 @@ class BackendManager(
     companion object {
         private const val TAG = "BackendManager"
 
-        /** Task 4：GPU 空输出回退 CPU 的遥测降级原因（并入后续 attempt 的 downgradeReasons）。 */
-        private const val EMPTY_GPU_OUTPUT_FALLBACK = "EMPTY_GPU_OUTPUT_FALLBACK"
+        /** Task 4：GPU 空输出回退 CPU 的遥测降级原因（并入后续 attempt 的 downgradeReasons）。
+         *  internal（Task 5 review M-2）：可靠性基准 [com.chatbyyourside.llm.benchmark.DefaultLocalInferenceBenchmarkRunner]
+         *  需按此原因计数回退轮次，引用共享常量而非字面量复制。 */
+        internal const val EMPTY_GPU_OUTPUT_FALLBACK = "EMPTY_GPU_OUTPUT_FALLBACK"
 
         /** Task 3 review I-1：「完成一次非错误生成」的完成原因集合——仅这些记 MODEL_OK。
          *  中断（USER_CANCEL/TIMEOUT/THERMAL_STOP）与后端错误不是完成，不得证明后端可用。 */

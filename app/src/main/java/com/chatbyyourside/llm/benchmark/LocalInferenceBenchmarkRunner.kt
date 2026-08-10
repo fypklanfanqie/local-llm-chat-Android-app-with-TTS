@@ -53,6 +53,9 @@ enum class InferenceBenchmarkScenario(
  * @param quadrant 被测象限（CPU/GPU × 思考开/关，Task 5 Step 3）；旧构造点/旧记录为 null。
  * @param thinkingRequested 本轮是否请求了深度思考。
  * @param backendVariant 计划首个尝试的运行时变体名（如 OPENCL / CPU_OPTIMIZED / CPU_COMPATIBILITY）。
+ * @param actualBackendCounts 实际样本后端分布（样本级 record.backend.name -> 样本数；Task 5 review I-2）。
+ *        样本级 [com.chatbyyourside.llm.metrics.InferenceTurnRecord] 不随结果持久化，实际后端真相
+ *        （GPU 象限 OpenCL 加载失败回退 CPU 等）经本字段可追溯；空 map=正常完成但零样本，null=拒绝/旧记录。
  * @param nativeBuildId native 构建 ID（MnnBridge 运行时握手信息；握手缺席为 null）。
  * @param mnnCommit 钉定 MNN commit（native 握手信息；握手缺席为 null）。
  */
@@ -70,6 +73,7 @@ data class BenchmarkScenarioResult(
     val quadrant: InferenceBackendQuadrant? = null,
     val thinkingRequested: Boolean? = null,
     val backendVariant: String? = null,
+    val actualBackendCounts: Map<String, Int>? = null,
     val nativeBuildId: String? = null,
     val mnnCommit: String? = null,
 )
@@ -137,6 +141,13 @@ interface LocalInferenceBenchmarkRunner {
      * **失败样本不得用重试替换**——每轮只执行一次，[ReliabilityResult.totalRounds] 恒等于实际
      * 执行的轮数，[ReliabilityResult.nonEmptySuccessRate] 以 [totalRounds] 为分母。
      *
+     * 热守卫（Task 5 review M-3）：入口 [isThermallyHot] 为真时抛 [IllegalStateException]
+     * （与 [run] 的 coolRun 拒绝语义一致——热态不产出样本；[ReliabilityResult] 无 coolRun
+     * 拒绝通道，故以异常显式表达，绝不静默产出全 NO_RECORD 的伪有效结果）。
+     *
+     * 归档身份（Task 5 review M-8）：模型/设备/配置指纹以 [case] 字段为准，调用方负责与
+     * 实际执行环境一致（本实现不校验指纹真实性）。
+     *
      * @param case 用例坐标（场景/象限/模型/设备/配置指纹）。
      * @param rounds 固定轮数（默认 20）。
      */
@@ -150,9 +161,17 @@ interface LocalInferenceBenchmarkRunner {
  */
 interface BenchmarkResultStore {
     suspend fun save(result: BenchmarkScenarioResult)
+
+    /**
+     * 读取该场景+指纹的冷态结果（未命中/非冷态未落盘返回 null）。
+     *
+     * @param quadrant 象限过滤（Task 5 review M-1）；null = 保留既有行为：依次尝试四个
+     *        象限键返回首个命中（同一场景+指纹下一般仅一份冷态结果，兼容旧调用方）。
+     */
     suspend fun load(
         scenario: InferenceBenchmarkScenario,
         deviceFingerprint: String,
         configFingerprint: String,
+        quadrant: InferenceBackendQuadrant? = null,
     ): BenchmarkScenarioResult?
 }
