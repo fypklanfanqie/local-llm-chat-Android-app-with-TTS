@@ -1,6 +1,7 @@
 package com.chatbyyourside.llm.template
 
 import com.chatbyyourside.llm.metrics.CompletionReason
+import com.chatbyyourside.llm.metrics.InferenceStage
 
 /**
  * 思考开关的实际效果（Task 2）。
@@ -189,10 +190,13 @@ class ThinkingOutputClassifier(
      *
      * @param completionReason 本轮终止原因（后端推导后的最终值）。
      * @param generatedTokens 本轮生成 token 数（用于区分 prefill/decode 阶段失败）。
+     * @param errorStage native 出错阶段（[InferenceStage] 枚举名字符串；无错误/未知为 null）。
+     *        PREFILL/DECODE_FAILURE 判定优先用本值，缺失时才回退 [generatedTokens] 近似。
      */
     fun finish(
         completionReason: CompletionReason,
         generatedTokens: Int,
+        errorStage: String? = null,
     ): ClassificationResult {
         val hasBodyText = firstBodyOffset != null
         val thinkTagSeen = sawThinkOpen || sawThinkClose
@@ -200,7 +204,7 @@ class ThinkingOutputClassifier(
             hasBodyText -> EmptyResponseClass.NONE
             thinkTagSeen -> EmptyResponseClass.THINK_ONLY
             rawBytes > 0L -> EmptyResponseClass.WHITESPACE_ONLY
-            else -> classifyEmptyByReason(completionReason, generatedTokens)
+            else -> classifyEmptyByReason(completionReason, generatedTokens, errorStage)
         }
         val thinkingEffect = when {
             // 硬性要求（Task 2 Step 4）：请求关闭仍出现完整思考段。
@@ -219,6 +223,7 @@ class ThinkingOutputClassifier(
     private fun classifyEmptyByReason(
         reason: CompletionReason,
         generatedTokens: Int,
+        errorStage: String?,
     ): EmptyResponseClass = when (reason) {
         CompletionReason.EOS ->
             // 启发式：请求思考 + 模板含分支 + EOS 零输出——疑似模板渲染吞掉了响应。
@@ -230,10 +235,15 @@ class ThinkingOutputClassifier(
         CompletionReason.USER_CANCEL, CompletionReason.POLICY_TRUNCATION -> EmptyResponseClass.CANCELLED
         CompletionReason.TIMEOUT -> EmptyResponseClass.TIMEOUT
         CompletionReason.THERMAL_STOP -> EmptyResponseClass.THERMAL_STOP
-        // 零 token 多为 prefill/加载阶段失败；已有 token 则为 decode 阶段失败（启发式）。
+        // PREFILL/DECODE_FAILURE 优先用 native errorStage（PREFILL/DECODE 明确区分）；
+        // 缺失时回退近似：零 token 多为 prefill/加载阶段失败，已有 token 则为 decode 阶段失败。
         CompletionReason.BACKEND_FAILURE ->
-            if (generatedTokens <= 0) EmptyResponseClass.PREFILL_FAILURE
-            else EmptyResponseClass.DECODE_FAILURE
+            when (errorStage) {
+                InferenceStage.PREFILL.name -> EmptyResponseClass.PREFILL_FAILURE
+                InferenceStage.DECODE.name -> EmptyResponseClass.DECODE_FAILURE
+                else -> if (generatedTokens <= 0) EmptyResponseClass.PREFILL_FAILURE
+                    else EmptyResponseClass.DECODE_FAILURE
+            }
     }
 
     companion object {

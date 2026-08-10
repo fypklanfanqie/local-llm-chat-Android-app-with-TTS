@@ -12,6 +12,7 @@ import com.chatbyyourside.llm.profile.BackendAttempt
 import com.chatbyyourside.llm.profile.ResolvedInferencePlan
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
+import com.chatbyyourside.llm.template.ThinkingOutputClassifier
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -189,13 +190,12 @@ class BackendManager(
         enableThinking: Boolean,
         onToken: (String) -> Boolean,
         downgradeReasons: List<String> = emptyList(),
-        // Task 2：思考请求 / 模板能力 / 思考效果 / 空响应分类（遥测信封透传；带默认值，旧调用方不受影响）。
-        // 前两项在生成前已知；后两项由 LocalChatProvider 在生成结束后完成分类，经
-        // [attachTurnThinkingClassification] 补记（finalize 已执行，无法经本参数链传入）。
+        // Task 2：思考请求 / 模板能力（生成前已知，信封透传）+ 分类器实例（MnnBackend 在 finally
+        // 内收口分类并入 finalize；取代原 provider 侧补记路径，避免加载期/首 attempt 前取消时
+        // 补记到上一轮记录）。带默认值，旧调用方不受影响。
         thinkingRequested: Boolean? = null,
         templateCapability: String? = null,
-        thinkingEffective: String? = null,
-        emptyResponseClass: String? = null,
+        thinkingClassifier: ThinkingOutputClassifier? = null,
         executionControl: GenerationExecutionControl? = null,
         resolvedPlan: ResolvedInferencePlan? = null,
     ): GenerationResult = generationMutex.withLock {
@@ -262,11 +262,10 @@ class BackendManager(
                         attemptTrace = plan.attempts.map { it.variant.name },
                         coldLoadMs = if (lastLoadKind == LoadKind.COLD) lastLoadMs else null,
                         warmLoadMs = if (lastLoadKind == LoadKind.WARM) lastLoadMs else null,
-                        // Task 2：思考请求 / 模板能力（信封透传；分类结果生成结束后补记）。
+                        // Task 2：思考请求 / 模板能力信封透传 + 分类器实例（分类在 finally 内收口并入 finalize）。
                         thinkingRequested = thinkingRequested,
                         templateCapability = templateCapability,
-                        thinkingEffective = thinkingEffective,
-                        emptyResponseClass = emptyResponseClass,
+                        thinkingClassifier = thinkingClassifier,
                     )
                     return@withLock GenerationResult(
                         summary = summary,
@@ -348,18 +347,6 @@ class BackendManager(
     /** 当前活跃后端最近一次生成的遥测记录（Task 2）；供 LocalChatResult 汇总。三类后端均为 MnnBackend。 */
     fun lastTurnRecord(): InferenceTurnRecord? =
         (backendFor(lastUsedBackend) as? MnnBackend)?.lastTurnRecord
-
-    /**
-     * Task 2：补记思考效果 / 空响应分类到最近一次遥测记录。
-     *
-     * 分类器在 generate 返回后才能拿到最终 completionReason/generatedTokens 收口分类，
-     * 而 telemetry.finalize 已在后端 finally 执行，故由 LocalChatProvider 在生成结束后调用本方法
-     * （经 MnnBackend 以 copy 方式写回记录，见 [MnnBackend.updateLastTurnClassification]）。
-     */
-    fun attachTurnThinkingClassification(thinkingEffective: String?, emptyResponseClass: String?) {
-        (backendFor(lastUsedBackend) as? MnnBackend)
-            ?.updateLastTurnClassification(thinkingEffective, emptyResponseClass)
-    }
 
     /** 当前是否有推理在进行（供性能浮窗决定取 native 实时 tps 还是归零）*/
     fun isGenerating(): Boolean = generating

@@ -3,6 +3,7 @@ package com.chatbyyourside.llm.backend
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
+import com.chatbyyourside.llm.template.ThinkingOutputClassifier
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.PowerPolicy
 
@@ -108,15 +109,14 @@ interface InferenceBackend {
         /** Task 1 v2：native decode 步长（1=逐 token，默认；2..4=多 token 步进，native clamp 到 [1,4]）。
          *  即使 step>1，native 每步内仍逐 token 检查 EOS/maxTokens/abort，取消粒度恒为 1 token。 */
         decodeStepTokens: Int = 1,
-        // Task 2：思考请求 / 模板能力 / 思考效果 / 空响应分类（遥测信封；带默认值，旧调用方不受影响）。
+        // Task 2：思考请求 / 模板能力 / 思考分类器（遥测信封；带默认值，旧调用方不受影响）。
         /** 本轮是否请求了深度思考（deepThinking 设置值）。 */
         thinkingRequested: Boolean? = null,
         /** 模板能力枚举名（ThinkingTemplateCapability）。 */
         templateCapability: String? = null,
-        /** 思考效果枚举名（ThinkingEffect；分类结果由 provider 在生成结束后补记）。 */
-        thinkingEffective: String? = null,
-        /** 空响应分类枚举名（EmptyResponseClass）。 */
-        emptyResponseClass: String? = null,
+        /** 思考分类器实例：实现方在生成结束 finally 内收口分类（ThinkingEffect / EmptyResponseClass），
+         *  随遥测 finalize 一并写入记录（取代原 provider 侧补记路径）。 */
+        thinkingClassifier: ThinkingOutputClassifier? = null,
     ): NativeGenerationSummary?
 
     /** 流式批处理 Balanced 默认参数（Task 6 性能模式接入前的稳定取值，与设计文档 §流式行一致）。 */

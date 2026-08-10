@@ -326,9 +326,11 @@ class LocalChatProvider(
                                 resolvedPlan.downgradeReasons.map { it.name }).distinct(),
                             executionControl = executionControl,
                             resolvedPlan = resolvedPlan,
-                            // Task 2：思考请求与模板能力随生成信封透传（分类结果在生成结束后补记，见下）。
+                            // Task 2：思考请求 / 模板能力 / 分类器在调用点一次传齐；分类在 MnnBackend
+                            // 的 finally 内收口并入遥测记录（取代原 provider 侧补记路径）。
                             thinkingRequested = deepThinking,
                             templateCapability = templateCapability.name,
+                            thinkingClassifier = thinkingClassifier,
                             onToken = { token ->
                                 // Task 2 旁路：分类器观察未装饰的原始流（截断后仍继续观察真实到达的
                                 // token，使 raw/body 字节计数完整），增量 O(1)，不进渲染路径。
@@ -389,28 +391,9 @@ class LocalChatProvider(
             // 原始模型输出（与 native syncPromptCache 逐字节一致）：本地累加器即最终原始文本。
             val modelText = finalRaw
             val record = backendManager.lastTurnRecord()
-            // Task 2：分类器用最终完成原因收口——思考效果与空响应分类需 completionReason/generatedTokens，
-            // 在 generate() 返回前无法判定（telemetry.finalize 已在后端 finally 执行），故在 provider 侧
-            // 完成分类后补记到最近一次遥测记录（记录其余字段不变）。
-            val classification = thinkingClassifier.finish(
-                completionReason = result.completionReason ?: record?.completionReason
-                    ?: CompletionReason.BACKEND_FAILURE,
-                generatedTokens = record?.generatedTokens ?: 0,
-            )
-            if (record != null) {
-                backendManager.attachTurnThinkingClassification(
-                    thinkingEffective = classification.thinkingEffect.name,
-                    emptyResponseClass = classification.emptyResponseClass.name,
-                )
-            }
-            Log.i(
-                TAG,
-                "thinking 分类: requested=$deepThinking capability=$templateCapability " +
-                    "effect=${classification.thinkingEffect} empty=${classification.emptyResponseClass} " +
-                    "open=${thinkingClassifier.sawThinkOpen} close=${thinkingClassifier.sawThinkClose} " +
-                    "rawBytes=${thinkingClassifier.rawBytes} bodyBytes=${thinkingClassifier.bodyBytes} " +
-                    "firstBodyOffset=${thinkingClassifier.firstBodyOffset}",
-            )
+            // Task 2：思考分类已随生成在 MnnBackend finally 内收口并入遥测记录（四字段齐全），
+            // provider 侧不再补记——避免加载期/首 attempt 前取消（本轮无 attempt 执行 finalize）时
+            // 分类被写进上一轮记录（污染）且 generatedTokens 取错。
             if (modelText.isNotEmpty() && record != null && record.generatedTokens > 0) {
                 measuredAssistantText = modelText
                 measuredAssistantTokens = record.generatedTokens
