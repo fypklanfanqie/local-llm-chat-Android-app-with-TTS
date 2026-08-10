@@ -44,7 +44,10 @@ from typing import List, Optional
 # Constants
 # ---------------------------------------------------------------------------
 MNN_COMMIT = "af0142bcc7b76b7a5128373e285683dc04f55f69"
-NDK_VERSION = "27.2.12479018"
+# NDK 版本与 build_mnn_android.sh 的 NDK_VERSION 保持单一事实源（Task 8 统一为
+# 26.1.10909125，与 native-manifest.json ndkVersion 一致）。此常量仅作为 --generate
+# 未显式传 --ndk-version 时的默认值；构建脚本总是显式传入。
+NDK_VERSION = "26.1.10909125"
 ANDROID_API = 24
 ABI = "arm64-v8a"
 MIN_PT_LOAD_ALIGN = 0x4000  # 16 KiB pages

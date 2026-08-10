@@ -5,7 +5,7 @@
 #   libMNN.so            — MNN LLM engine (LLM + low-mem + ARM82 + OpenCL, QNN OFF)
 #   libmnn_jni.so        — MNN backend JNI wrapper (app/src/main/cpp/mnn_jni.cpp)
 #   libcpu_sys_jni.so    — CPU affinity JNI wrapper (app/src/main/cpp/cpu_affinity_jni.cpp)
-#   libc++_shared.so     — matching r27c libc++ runtime
+#   libc++_shared.so     — matching 26.1.10909125 (r26b) libc++ runtime
 #
 # Every standard .so is built for Android 15 16 KiB pages (PT_LOAD p_align >= 0x4000)
 # and is recorded in app/src/main/jniLibs/native-manifest.json, then verified by
@@ -14,7 +14,7 @@
 # Design reference: docs/superpowers/specs/2026-08-08-mnn-adaptive-inference-optimization-design.md
 #
 # Environment:
-#   ANDROID_NDK_HOME (required) — path to NDK 27.2.12479018 (r27c)
+#   ANDROID_NDK_HOME (required) — path to NDK 26.1.10909125 (r26b)
 #   HTTP_PROXY / HTTPS_PROXY    — optional; respected as-is, NEVER set by this script
 #   MNN_BUILD_STAGING           — optional ASCII-only build dir (default: ~/mnn-build)
 #                                 The repo path may contain non-ASCII chars which break
@@ -26,9 +26,17 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Pinned versions (single source of truth — keep in sync with native-manifest.json,
 # CMakeLists.txt CHAT_MNN_COMMIT, and MnnBridge.EXPECTED_MNN_COMMIT).
+#
+# NDK 版本说明（Task 8 统一）：仓库内预编译 .so 全部为本机 NDK 26.1.10909125 (r26b)
+# 重编产物（manifest note 与提交 11ddc83 "local NDK 26 rebuild" 为准；本地暂存区
+# CMakeCache 的 ANDROID_NDK 亦指向 26.1.10909125）。脚本曾写 27.2.12479018 (r27c)，
+# 但从未产出过任何入库二进制，故统一回 26.1.10909125，与 manifest ndkVersion 及
+# buildId/sha256 保持单一事实源。
+# 若未来升级 NDK 27 重编：必须同步更新 manifest 的 ndkVersion 与全部 buildId/sha256
+# （本脚本第 5 步会以 --generate 依据实际产物自动重新生成 manifest，随后 verify 校验）。
 # ---------------------------------------------------------------------------
 MNN_COMMIT="af0142bcc7b76b7a5128373e285683dc04f55f69"
-NDK_VERSION="27.2.12479018"
+NDK_VERSION="26.1.10909125"
 ANDROID_API=24
 ANDROID_ABI="arm64-v8a"
 
@@ -52,7 +60,7 @@ die() { printf '\033[1;31m[build_mnn error]\033[0m %s\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
-[[ -n "${ANDROID_NDK_HOME:-}" ]] || die "ANDROID_NDK_HOME must point to NDK $NDK_VERSION (r27c)."
+[[ -n "${ANDROID_NDK_HOME:-}" ]] || die "ANDROID_NDK_HOME must point to NDK $NDK_VERSION (r26b)."
 [[ -d "$ANDROID_NDK_HOME" ]] || die "ANDROID_NDK_HOME not found: $ANDROID_NDK_HOME"
 
 NDK_TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
@@ -169,7 +177,7 @@ cp -f "$MNN_INSTALL/lib/libMNN.so"      "$JNI_LIBS_DIR/libMNN.so"
 cp -f "$JNI_BUILD/libmnn_jni.so"        "$JNI_LIBS_DIR/libmnn_jni.so"
 cp -f "$JNI_BUILD/libcpu_sys_jni.so"    "$JNI_LIBS_DIR/libcpu_sys_jni.so"
 
-# Matching r27c libc++_shared.so (same toolchain as libMNN/JNI — ABI consistency).
+# Matching 26.1.10909125 (r26b) libc++_shared.so (same toolchain as libMNN/JNI — ABI consistency).
 LIBCPP_SRC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
 [[ -f "$LIBCPP_SRC" ]] || LIBCPP_SRC="$ANDROID_NDK_HOME/sources/cxx-stl/llvm-libc++/libs/$ANDROID_ABI/libc++_shared.so"
 [[ -f "$LIBCPP_SRC" ]] || die "libc++_shared.so not found in NDK"
