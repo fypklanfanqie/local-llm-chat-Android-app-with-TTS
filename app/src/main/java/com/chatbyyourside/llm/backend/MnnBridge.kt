@@ -60,16 +60,18 @@ class MnnBridge {
         @Volatile
         private var mnnLibLoaded = false
 
-        /** 期望的 JNI ABI 版本与钉定 MNN commit（与 native-manifest.json、CMake 编译定义对齐）。 */
-        private const val EXPECTED_JNI_ABI = 1
-        private const val EXPECTED_MNN_COMMIT = "af0142bcc7b76b7a5128373e285683dc04f55f69"
+        /** 期望的 JNI ABI 版本与钉定 MNN commit（与 native-manifest.json、CMake 编译定义对齐）。
+         *  internal 供 MnnRuntimeIntegrationTest 精确断言 summary_v2 缺失分支的诊断文案。 */
+        internal const val EXPECTED_JNI_ABI = 1
+        internal const val EXPECTED_MNN_COMMIT = "af0142bcc7b76b7a5128373e285683dc04f55f69"
 
         /** native 回传的运行时信息（库加载后解析一次）。null=握手缺席（旧构建）或解析失败。 */
         @Volatile
         internal var runtimeInfo: MnnRuntimeInfo? = null
             private set
 
-        /** 运行时信息诊断：null=正常；非空=ABI/commit 不符或握手不可用（供 UI/日志展示）。 */
+        /** 运行时信息诊断：null=正常；非空=ABI/commit 不符、summary_v2 能力缺失或握手不可用
+         *  （供 UI/日志展示；final review C1：旧 native 构建可据此显式检出）。 */
         @Volatile
         var runtimeDiagnostic: String? = null
             private set
@@ -101,11 +103,15 @@ class MnnBridge {
                     return
                 }
                 runtimeInfo = info
+                // final review C1：capabilities 缺 summary_v2 时显式点名（旧 native 构建可检出），
+                // 与既有 ABI/commit 诊断并列；runtimeInfo==null 的宽放语义（上文 run 分支）不改动。
                 runtimeDiagnostic = when {
                     info.abiVersion != EXPECTED_JNI_ABI ->
                         "JNI ABI 不匹配：native=${info.abiVersion}, 期望=$EXPECTED_JNI_ABI"
                     info.mnnCommit != EXPECTED_MNN_COMMIT ->
                         "MNN commit 不匹配：native=${info.mnnCommit}, 期望=$EXPECTED_MNN_COMMIT"
+                    !info.capabilities.contains(CAPABILITY_SUMMARY_V2) ->
+                        "native 未包含 summary_v2（旧构建），v2 遥测/步进不可用"
                     else -> null
                 }
                 Log.i(TAG, "runtimeInfo abi=${info.abiVersion} commit=${info.mnnCommit} buildId=${info.nativeBuildId} caps=${info.capabilities}")
@@ -136,9 +142,13 @@ class MnnBridge {
         /**
          * 能力集标记：v2 GenerationSummary 契约（Task 1）。native 宣告该能力后 Kotlin 侧
          * 才应消费 v2 观测字段（thinkingConfigAccepted / reasoningEndUs / firstBodyDeltaUs /
-         * decodeStepTokens / errorCode）。Task 8 发布门禁据此拒绝旧 native；本任务（Task 1）
-         * 不做拒绝——v1 兼容路径（[com.chatbyyourside.llm.metrics.NativeGenerationSummary.parse]
-         * 回填默认值）继续可用。
+         * decodeStepTokens / errorCode）。
+         *
+         * 消费点（final review C1 门禁）：[hasSummaryV2Capability] 由 [BackendManager.generate]
+         * 在 decode 步进门禁处消费（缺失时强制 decodeStepTokens=1，使旧 .so 的静默 v1 语义显式化）；
+         * [runtimeDiagnostic] 在能力缺失时点名提示（旧构建可检出）。v1 兼容路径
+         * （[com.chatbyyourside.llm.metrics.NativeGenerationSummary.parse] 回填默认值）继续可用——
+         * 门禁不阻止 v1 使用，仅 v2 增强不可用。
          */
         const val CAPABILITY_SUMMARY_V2 = "summary_v2"
 

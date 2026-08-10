@@ -92,12 +92,14 @@ class AppContainer(private val context: Context) {
     }
 
     // Task 3：后端健康协调器（OpenCL 探测/健康记录单点）。BackendManager 与 LocalChatProvider 共享
-    // 同一实例，避免两套状态。deviceFingerprint 含 Build/OS/native 栈身份——指纹变化即健康键变化，
-    // 旧黑名单与基准自然失效。modelFingerprint 由调用方按当前模型逐轮传入（模型切换即新键）。
+    // 同一实例，避免两套状态。健康键设备指纹 = healthDeviceFingerprintOf（Build/OS/SoC/ABI + 策略，
+    // 不含 native 身份——native 重建不改变健康键，旧构建的失败教训仍适用于新构建，final review I2）。
+    // 认证键设备指纹用 deviceFingerprintOf（含 native 身份，另经 certKey 显式 native 分量绑定）。
+    // modelFingerprint 由调用方按当前模型逐轮传入（模型切换即新键）。
     val backendHealthCoordinator: BackendHealthCoordinator by lazy {
         BackendHealthCoordinator(
             store = backendHealthStore,
-            deviceFingerprint = BackendHealthCoordinator.deviceFingerprintOf(),
+            deviceFingerprint = BackendHealthCoordinator.healthDeviceFingerprintOf(),
             probeRunner = OpenClProbeRunner.real(context),
         )
     }

@@ -64,6 +64,13 @@ class BackendManager(
     var lastUsedBackend: BackendType = BackendType.MNN_CPU
         private set
 
+    /** config.json 指纹惰性缓存（final review M-6）：按模型路径键控，路径不变则指纹不变。
+     *  generate 由 [generationMutex] 串行，无需并发同步；[doReleaseAll]（模型删除/冷启动释放）清空。 */
+    @Volatile
+    private var fingerprintCachePath: String? = null
+    @Volatile
+    private var fingerprintCacheValue: String = ""
+
     /** MNN NPU 初始化失败缓存（会话级）：QNN 不可用/非 QNN 模型变体/库缺失时，首次失败后不再重试 */
     @Volatile
     private var mnnNpuFailed: Boolean = false
@@ -214,14 +221,28 @@ class BackendManager(
         // （该值已经 resolver 认证门禁：未认证组合恒为 1）。
         // Task 6 review I-3：步进认证仅对 CPU_OPTIMIZED 变体生效（见 generate 内按变体守卫），
         // GPU/兼容变体恒 1；GPU 步进认证留未来扩展。
+        // final review C1：v2 capability 门禁见 generate 内 [effectiveDecodeStepTokens]。
         decodeStepTokens: Int = 1,
     ): GenerationResult = generationMutex.withLock {
         val plan = resolvedPlan ?: throw IllegalStateException("Task 7 起 generate 必须提供 resolvedPlan")
         val attempts = plan.attempts
         if (attempts.isEmpty()) throw IllegalStateException("resolvedPlan.attempts 为空")
+        // final review C1：v2 capability 门禁。旧 native（握手缺席或无 summary_v2 能力）会静默
+        // 忽略 nativeGenerateStream 多余的 decodeStepTokens 栈参数（JNI 按符号名解析、不校验实参
+        // 个数），本地构建 APK 将静默跑 v1 语义。门禁把「静默忽略」显式化：强制回落 1（v1 语义
+        // 完全可用，仅 v2 步进增强不可用），并打警告日志便于检出陈旧 native 产物（需重编部署）。
+        val effectiveDecodeStepTokens = if (MnnBridge.hasSummaryV2Capability) {
+            decodeStepTokens
+        } else {
+            if (decodeStepTokens > 1) {
+                Log.w(TAG, "native 未包含 summary_v2（旧构建，需重编部署），v2 步进已禁用")
+            }
+            1
+        }
         // Task 3：健康记录键的模型指纹（config.json 内容 SHA-256 前 16 hex）；模型替换 -> 新指纹 ->
         // 旧健康记录自然失效。仅 GPU 失败/成功路径消费，CPU 恒兜底不记录。
-        val modelFingerprint = modelConfigFingerprint(modelPath)
+        // final review M-6：惰性缓存（按路径键控）——每轮 generate 不再重读 config.json。
+        val modelFingerprint = cachedModelConfigFingerprint(modelPath)
         Log.i(TAG, "执行计划: attempts=${attempts.joinToString { it.variant.name }} req=${plan.requestedMode}")
         var lastError: Exception? = null
         // 各尝试失败原因（变体名 + 诊断信息），全失败时汇总报错。
@@ -291,7 +312,8 @@ class BackendManager(
                     // CPU_OPTIMIZED（基准认证变体）的证据；OPENCL（GPU 无步进认证）与
                     // CPU_COMPATIBILITY（兜底，非基准配置）恒 1，防止认证证据错配
                     // （CPU_OPTIMIZED 的 step 证据作用于 GPU/兼容变体）。GPU 步进认证留未来扩展。
-                    val step = if (attempt.variant == RuntimeVariant.CPU_OPTIMIZED) decodeStepTokens else 1
+                    // final review C1：再叠 v2 capability 门禁（旧 native 强制 1，见 generate 顶部）。
+                    val step = if (attempt.variant == RuntimeVariant.CPU_OPTIMIZED) effectiveDecodeStepTokens else 1
                     val summary = backend.generateStreamMessages(
                         messages, attemptMaxTokens, temperature, topP, repeatPenalty, enableThinking, onToken,
                         effectiveBatchBytes, effectiveBatchMs, attemptDowngradeReasons, executionControl,
@@ -511,6 +533,10 @@ class BackendManager(
             mnnCpuBackend.release()
             mnnGpuBackend.release()
             mnnNpuBackend.release()
+            // final review M-6：释放即卸载——同路径模型被删除/替换后重下时指纹重算，
+            // 避免健康键继续绑定旧模型内容哈希。
+            fingerprintCachePath = null
+            fingerprintCacheValue = ""
         }
     }
 
@@ -581,6 +607,20 @@ class BackendManager(
     private suspend fun recordHealthWrite(tag: String, block: suspend () -> Unit) {
         runCatching { block() }
             .onFailure { Log.w(TAG, "健康记录写入失败（忽略，不影响推理）[$tag]: ${it.message}") }
+    }
+
+    /**
+     * config.json 内容指纹（final review M-6）：按路径惰性缓存，避免每轮 generate 重读整个
+     * config.json。路径不变则指纹不变（模型内容替换属非常规操作，由 [doReleaseAll] 清缓存兜底）；
+     * 读取失败返回空串且不缓存（下次重试）。
+     */
+    private fun cachedModelConfigFingerprint(modelPath: String): String {
+        val cached = fingerprintCacheValue
+        if (fingerprintCachePath == modelPath && cached.isNotEmpty()) return cached
+        return modelConfigFingerprint(modelPath).also {
+            fingerprintCachePath = modelPath
+            fingerprintCacheValue = it
+        }
     }
 
     data class GenerationResult(

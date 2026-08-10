@@ -85,6 +85,18 @@ class MnnRuntimeIntegrationTest {
         assertNotNull("nativeGetRuntimeInfo 应返回 JSON", info)
         assertTrue("应含 abiVersion", info!!.contains("abiVersion"))
         assertTrue("应含 mnnCommit", info.contains("mnnCommit"))
+        // final review C1：capabilities 缺 summary_v2 时必须显式可检出——runtimeDiagnostic
+        // 非空且（ABI/commit 均匹配时）点名 summary_v2，供旧 native 构建排查。
+        val parsed = MnnRuntimeInfo.fromJson(info)
+        if (parsed != null && !parsed.capabilities.contains(MnnBridge.CAPABILITY_SUMMARY_V2)) {
+            assertNotNull("能力集缺 summary_v2 时应暴露诊断", MnnBridge.runtimeDiagnostic)
+            val diag = MnnBridge.runtimeDiagnostic!!
+            if (parsed.abiVersion == MnnBridge.EXPECTED_JNI_ABI &&
+                parsed.mnnCommit == MnnBridge.EXPECTED_MNN_COMMIT
+            ) {
+                assertTrue("诊断应点名 summary_v2（got: $diag）", diag.contains("summary_v2"))
+            }
+        }
     }
 
     @Test

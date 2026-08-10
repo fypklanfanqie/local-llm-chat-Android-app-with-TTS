@@ -133,7 +133,8 @@ data class InferenceTurnRecord(
     val firstBodyDeltaUs: Long? = null,
     /** native 实际生效的 decode 步长（clamp 后 1..4）；摘要缺失为 null。 */
     val decodeStepTokens: Int? = null,
-    // ---- Task 2：思考请求 / 模板能力 / 分类结果（生成信封；分类结果由 provider 在生成结束后补记）----
+    // ---- Task 2：思考请求 / 模板能力 / 分类结果（生成信封；分类结果由 MnnBackend 在生成
+    //      finally 内收口并入本记录——取代原 provider 侧补记路径，见 MnnBackend.generateStreamMessages）----
     /** 本轮是否请求了深度思考（deepThinking 设置值）。 */
     val thinkingRequested: Boolean? = null,
     /** 模板能力枚举名（[com.chatbyyourside.llm.template.ThinkingTemplateCapability]）。 */
@@ -364,8 +365,9 @@ class InferenceTelemetry {
         reasoningEndUs: Long? = null,
         firstBodyDeltaUs: Long? = null,
         decodeStepTokens: Int? = null,
-        // Task 2：思考请求 / 模板能力 / 思考效果 / 空响应分类（生成信封透传；分类结果由 provider
-        // 在 generate 返回后经 BackendManager.attachTurnThinkingClassification 补记）。
+        // Task 2：思考请求 / 模板能力 / 思考效果 / 空响应分类（生成信封透传；分类结果由 MnnBackend
+        // 在 generateStreamMessages 的 finally 内收口并随本 finalize 并入记录——不再有 provider
+        // 侧补记路径，避免加载期/首 attempt 前取消时分类写进上一轮记录）。
         thinkingRequested: Boolean? = null,
         templateCapability: String? = null,
         thinkingEffective: String? = null,

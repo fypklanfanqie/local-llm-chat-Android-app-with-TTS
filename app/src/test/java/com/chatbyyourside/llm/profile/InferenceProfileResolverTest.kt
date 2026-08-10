@@ -277,6 +277,21 @@ class InferenceProfileResolverTest {
     }
 
     @Test
+    fun stepCertificationReachableWithoutLookaheadRequestAndNoNoise() {
+        // final review I1：认证记录含 step=2、无 lookahead 证据（lookahead=false）时，lookahead
+        // 未请求（旧开关关闭）仍应启用步进——provider 侧短路删除后，步进认证在开关关闭时可达；
+        // 且不产生 LOOKAHEAD_UNCERTIFIED 噪音（该原因仅在 lookahead && 未认证时记录）。
+        val p = plan(
+            BackendPreference.MNN_CPU,
+            lookahead = false,
+            certifiedOptions = cert(lookahead = false, step = 2),
+        )
+
+        assertEquals("开关关闭时步进认证仍应生效", 2, p.decodeStepTokens)
+        assertFalse("未请求 lookahead 不应有未认证噪音", p.downgradeReasons.contains(DowngradeReason.LOOKAHEAD_UNCERTIFIED))
+    }
+
+    @Test
     fun decodeStepTokensIgnoredForMismatchedVariant() {
         // 步进认证但变体不匹配（GPU 组合）-> 恒 1。
         val p = plan(

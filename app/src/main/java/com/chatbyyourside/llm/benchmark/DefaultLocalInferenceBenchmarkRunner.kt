@@ -50,6 +50,10 @@ import java.io.File
  * 范围控制（本任务不实现）：UI 接入（Task 7）、自动调参（Task 6 认证门）、各场景专用
  * fixture（如两轮 KV 复用构造、长 prefill prompt）——本实现所有场景共用同一固定探针，
  * 场景主要决定冷启动行为与归档维度。
+ *
+ * final review I3（裁决：文档化延迟）：四象限归档（[run] 各象限 save）与 [runReliability]
+ * 在**生产主源码无触发入口**——仅 Lookahead 认证基准经设置页接线。四象限/可靠性验证由
+ * CI/真机验收执行；UI 入口留后续版本，本版本不新增（避免范围膨胀）。
  */
 open class DefaultLocalInferenceBenchmarkRunner(
     private val context: Context,

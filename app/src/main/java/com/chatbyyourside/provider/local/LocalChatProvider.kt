@@ -134,22 +134,21 @@ class LocalChatProvider(
      * Task 7：查证当前组合的认证记录（device+model+CPU_OPTIMIZED+native 身份）。
      *
      * 键派生与认证落盘侧同源（Task 6 M-3 一致性约束）：
-     * - device 指纹 = [BackendHealthCoordinator.deviceFingerprintOf]（与健康记录同源）；
+     * - device 指纹 = [BackendHealthCoordinator.deviceFingerprintOf]（与认证落盘侧同源）；
      * - model 指纹 = config.json 内容哈希（[modelConfigFingerprint]）；
      * - 变体 = CPU_OPTIMIZED（lookahead/步进认证只对 CPU 基准变体有意义，resolver 门禁
      *   matchesCpuVariant 只认该变体）；
      * - native 身份 = [MnnBridge.runtimeInfo]；握手缺席（null）时返回 null 不查询——
      *   认证键含 native 身份（[InferenceCertificationStore.certKey] 五分量），无身份无法匹配。
      *
-     * Task 7 review M-6：[modelFingerprint] 由调用方计算并传入（与 OpenCL 健康键同源复用，
-     * 每轮只算一次）；[lookaheadRequested] = false 时短路返回 null（认证记录只门禁 lookahead /
-     * 多 token 步进，请求关闭则无门禁意义——Task 7 认证恒 step=1）。
+     * final review I1：**不按 lookahead 开关短路**——DataStore 读为内存级（成本可忽略），
+     * 且认证门禁独立于用户开关：lookahead 未请求时步进认证（step>1）仍须查证可达
+     * （未来步进认证落盘后，开关关闭时不得因短路而永不查证）。lookahead 未请求时 resolver
+     * 不会产生 LOOKAHEAD_UNCERTIFIED 噪音（该原因仅在 lookahead && 未认证时记录）。
      */
     private suspend fun loadCertifiedOptions(
         modelFingerprint: String,
-        lookaheadRequested: Boolean,
     ): CertifiedInferenceOptions? {
-        if (!lookaheadRequested) return null
         val runtime = MnnBridge.runtimeInfo ?: return null
         val key = InferenceCertificationStore.certKey(
             deviceFingerprint = BackendHealthCoordinator.deviceFingerprintOf(),
@@ -377,7 +376,9 @@ class LocalChatProvider(
             // Task 7：认证门禁查证——当前 device+model+CPU 变体+native 组合的基准认证记录。
             // lookahead / 多 token 步进只在存在认证证据时被 resolver 门禁启用（用户 legacy 请求
             // 只是使用既有认证的许可）；无认证回落安全默认（lookahead=false / step=1）。
-            val certifiedOptions = loadCertifiedOptions(modelFingerprint, lookahead)
+            // final review I1：每轮恒查证（不按 lookahead 开关短路）——步进认证在开关关闭时
+            // 同样可达；lookahead 噪音由 resolver 的 lookahead && 未认证条件天然排除。
+            val certifiedOptions = loadCertifiedOptions(modelFingerprint)
             val resolvedPlan = InferenceProfileResolver(context.cacheDir, modelPath).resolve(
                 // Task 8：热降级后的有效模式（MODERATE+ 恒 BALANCED，撤销 sustained）。
                 mode = decision?.effectiveMode ?: performanceMode,

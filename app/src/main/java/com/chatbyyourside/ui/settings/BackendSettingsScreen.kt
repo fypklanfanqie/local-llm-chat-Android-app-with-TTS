@@ -507,6 +507,13 @@ fun BackendSettingsScreen(
                 },
                 showDivider = true,
             )
+            // final review I3（裁决：文档化延迟）：四象限归档与空回答可靠性验证无生产 UI 入口——
+            // 由 CI/真机验收执行（本版本仅提供 Lookahead 认证基准入口）。此处仅说明，不新增入口。
+            GlassListRow(
+                title = "四象限基准 / 可靠性验证",
+                subtitle = "四象限基准与空回答可靠性验证由 CI/真机验收执行（本版本仅提供 Lookahead 认证基准入口）",
+                showDivider = true,
+            )
             GlassListRow(
                 title = "清除后端健康记录",
                 subtitle = "删除全部 OpenCL 探测/冷却/黑名单记录，并重置本次会话的后端失败缓存",

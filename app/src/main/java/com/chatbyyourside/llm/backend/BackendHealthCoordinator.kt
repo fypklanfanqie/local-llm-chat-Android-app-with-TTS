@@ -182,27 +182,46 @@ class BackendHealthCoordinator(
         private const val POLICY_SCHEMA = "1"
 
         /**
-         * 设备/运行时指纹：Build 身份（厂商/型号/系统指纹/SoC/ABI）+ native 栈身份（MNN commit/buildId）
-         * + 策略版本。缺失字段留空不参与哈希（[DeviceRuntimeFingerprint] 会过滤 blank 值）。
-         * 系统 OTA / 驱动 / 应用更新 -> 指纹变化 -> 健康键变化，旧黑名单与基准自然失效。
+         * 健康键设备指纹部件（final review I2）：Build 身份（厂商/型号/系统指纹/SoC/ABI）+ 策略版本，
+         * **不含 native 身份**（mnnCommit/nativeBuildId）。缺失字段留空不参与哈希
+         * （[DeviceRuntimeFingerprint] 会过滤 blank 值）。系统 OTA / 驱动 / 应用更新 -> 指纹变化 ->
+         * 健康键变化，旧黑名单与基准自然失效；native 重建（mnnCommit/nativeBuildId 变化）**不**改变
+         * 健康键——与 [BackendHealthStore] KDoc 的键粒度语义一致（旧构建的失败教训仍适用于新构建）。
+         * internal 供 JVM 单测断言 native 身份不进健康指纹。
+         */
+        internal fun healthFingerprintParts(): Map<String, String> = buildMap {
+            put("manufacturer", Build.MANUFACTURER)
+            put("model", Build.MODEL)
+            put("osFingerprint", Build.FINGERPRINT)
+            put(
+                "soc",
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}"
+                } else {
+                    ""
+                },
+            )
+            put("abi", Build.SUPPORTED_ABIS.firstOrNull() ?: "")
+            put("policySchema", POLICY_SCHEMA)
+        }
+
+        /** 健康键设备指纹（final review I2）：仅 [healthFingerprintParts]，不含 native 身份——
+         * 健康记录跨 native 重建存活。AppContainer 构造 [BackendHealthCoordinator] 时使用。 */
+        fun healthDeviceFingerprintOf(): String =
+            DeviceRuntimeFingerprint.compute(healthFingerprintParts())
+
+        /**
+         * 设备/运行时指纹：Build 身份 + native 栈身份（MNN commit/buildId）+ 策略版本。
+         * **供认证键使用**（[com.chatbyyourside.llm.benchmark.InferenceCertificationStore.certKey]
+         * 的 device 分量，Task 6 M-3 与落盘侧同源）：native 身份另经 certKey 的显式
+         * nativeBuildId/mnnCommit 分量绑定，native 重建即认证失效——与本函数含 native 身份一致。
+         * 健康键请用 [healthDeviceFingerprintOf]（不含 native 身份，语义分歧见 [BackendHealthStore] KDoc）。
          */
         fun deviceFingerprintOf(): String = DeviceRuntimeFingerprint.compute(
             buildMap {
-                put("manufacturer", Build.MANUFACTURER)
-                put("model", Build.MODEL)
-                put("osFingerprint", Build.FINGERPRINT)
-                put(
-                    "soc",
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}"
-                    } else {
-                        ""
-                    },
-                )
-                put("abi", Build.SUPPORTED_ABIS.firstOrNull() ?: "")
+                putAll(healthFingerprintParts())
                 put("mnnCommit", MnnBridge.runtimeInfo?.mnnCommit ?: "")
                 put("nativeBuildId", MnnBridge.runtimeInfo?.nativeBuildId ?: "")
-                put("policySchema", POLICY_SCHEMA)
             },
         )
     }

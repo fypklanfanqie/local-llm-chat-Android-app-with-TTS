@@ -1,10 +1,12 @@
 package com.chatbyyourside.llm.backend
 
+import com.chatbyyourside.llm.profile.DeviceRuntimeFingerprint
 import com.chatbyyourside.llm.profile.OpenClHealthState
 import com.chatbyyourside.llm.profile.RuntimeVariant
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -235,6 +237,32 @@ class BackendHealthCoordinatorTest {
         val newDevice = BackendHealthCoordinator(store, "device-test-b").resolve(modelA)
         assertEquals(OpenClHealthState.UNKNOWN, newDevice.state)
         assertTrue(newDevice.probeRequired)
+    }
+
+    @Test
+    fun nativeRebuildDoesNotChangeHealthFingerprintKey() {
+        // final review I2：健康键语义（BackendHealthStore KDoc）——device+model+backend+variant
+        // **不含 native 身份**。native 重建（mnnCommit/nativeBuildId 变化）不得改变健康指纹：
+        // 旧构建的失败教训（CRASH_BLACKLISTED/COOLDOWN）在新构建上继续适用，键不变则记录命中。
+        val parts = BackendHealthCoordinator.healthFingerprintParts()
+        assertFalse("健康指纹不应含 mnnCommit", parts.containsKey("mnnCommit"))
+        assertFalse("健康指纹不应含 nativeBuildId", parts.containsKey("nativeBuildId"))
+
+        // 模拟 native 重建：mnnCommit/nativeBuildId 变化后，同一健康部件映射的哈希不变。
+        val rebuilt = parts + mapOf("mnnCommit" to "new-commit", "nativeBuildId" to "build-2026-08-10")
+        assertEquals(
+            "native 重建不应改变健康指纹（健康键不变）",
+            DeviceRuntimeFingerprint.canonicalHash(parts),
+            DeviceRuntimeFingerprint.canonicalHash(rebuilt),
+        )
+
+        // 认证键口径（deviceFingerprintOf）仍绑定 native 身份：重建 -> 认证设备指纹变化 -> 认证失效。
+        val certParts = parts + mapOf("mnnCommit" to "old-commit", "nativeBuildId" to "build-2026-08-01")
+        assertNotEquals(
+            "认证设备指纹应随 native 身份变化",
+            DeviceRuntimeFingerprint.canonicalHash(rebuilt),
+            DeviceRuntimeFingerprint.canonicalHash(certParts),
+        )
     }
 
     @Test
