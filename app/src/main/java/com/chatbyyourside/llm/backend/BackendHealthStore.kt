@@ -101,12 +101,21 @@ object BackendHealthPolicy {
 }
 
 /**
+ * 健康记录存储最小操作面（Task 3）：[BackendHealthCoordinator] 依赖此接口而非具体 DataStore 实现，
+ * JVM 单测可注入内存替身（BackendHealthStore 绑定 Android Context，无法纯 JVM 实例化）。
+ */
+interface BackendHealthRecordStore {
+    suspend fun get(key: BackendHealthKey): HealthRecord?
+    suspend fun update(key: BackendHealthKey, transform: (HealthRecord?) -> HealthRecord?)
+}
+
+/**
  * 后端健康记录持久化存储（DataStore `health_store`）。
  *
  * 键 = [BackendHealthKey]；值 = JSON 序列化的 [HealthRecord]。指纹变化（OTA/驱动/模型替换/策略
  * 版本）导致键变化 -> 旧黑名单/基准自然失效。普通失败跳过、黑名单语义与重置策略见 [BackendHealthPolicy]。
  */
-class BackendHealthStore(private val context: Context) {
+class BackendHealthStore(private val context: Context) : BackendHealthRecordStore {
 
     private val json = Json { ignoreUnknownKeys = true }
 

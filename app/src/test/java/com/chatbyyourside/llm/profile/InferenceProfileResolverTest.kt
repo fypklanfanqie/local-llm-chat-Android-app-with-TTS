@@ -62,6 +62,28 @@ class InferenceProfileResolverTest {
     }
 
     @Test
+    fun probeOkOpenclIsEligibleAndPlacesOpenclFirst() {
+        // PROBE_OK 与 MODEL_OK 同为健康证据（Task 3：探测成功即可入链，无需等首次生成）。
+        val p = plan(BackendPreference.AUTO, openclHealth = OpenClHealthState.PROBE_OK)
+
+        assertEquals(
+            listOf(RuntimeVariant.OPENCL, RuntimeVariant.CPU_OPTIMIZED, RuntimeVariant.CPU_COMPATIBILITY),
+            variants(p),
+        )
+        assertEquals(BackendType.MNN_GPU, p.attempts.first().backend)
+    }
+
+    @Test
+    fun explicitGpuWithBlacklistHealthDowngradesToCpu() {
+        // CRASH_BLACKLISTED 与 COOLDOWN 同为不健康：显式 GPU 降级并记 OPENCL_UNHEALTHY。
+        val p = plan(BackendPreference.MNN_GPU, openclHealth = OpenClHealthState.CRASH_BLACKLISTED)
+
+        assertTrue(p.downgradeReasons.contains(DowngradeReason.OPENCL_UNHEALTHY))
+        assertTrue(p.attempts.none { it.backend == BackendType.MNN_GPU })
+        assertEquals(RuntimeVariant.CPU_OPTIMIZED, p.attempts.first().variant)
+    }
+
+    @Test
     fun qnnNeverAppearsInAutoEvenWithNpuPreference() {
         // 显式选 NPU 的标准版：QNN 不可用，解析为 CPU 并记录 UNSUPPORTED_SETTING。
         val p = plan(BackendPreference.MNN_NPU, openclHealth = OpenClHealthState.UNKNOWN)

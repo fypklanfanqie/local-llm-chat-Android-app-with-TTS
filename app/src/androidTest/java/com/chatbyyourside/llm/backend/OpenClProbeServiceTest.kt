@@ -1,6 +1,9 @@
 package com.chatbyyourside.llm.backend
 
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.chatbyyourside.llm.profile.OpenClHealthState
+import com.chatbyyourside.llm.profile.RuntimeVariant
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -75,5 +78,56 @@ class OpenClProbeServiceTest {
         val result = runner.runProbe()
 
         assertEquals(OpenClProbeResult.FAILURE_PROCESS_DEATH, result.failureCode)
+    }
+
+    // ===== Task 3：coordinator + 真实 BackendHealthStore（DataStore）链路 =====
+    // fake probe（不依赖真实 OpenCL 设备），验证「探测结果 -> 持久健康记录 -> 再决策」闭环。
+    // 每次用唯一指纹键，避免跨测试/跨运行残留污染。
+
+    @Test
+    fun probeSuccessPersistsProbeOkThroughRealStore() = runBlocking {
+        val store = BackendHealthStore(ApplicationProvider.getApplicationContext())
+        store.resetAll()
+        val device = "test-dev-${System.nanoTime()}"
+        val model = "test-model-${System.nanoTime()}"
+        val runner = OpenClProbeRunner(
+            launchProbe = {},
+            readResult = { OpenClProbeResult(success = true, vendor = "fake", device = "fake", durationMs = 1) },
+            clock = { 0L },
+        )
+        val coordinator = BackendHealthCoordinator(store, device, model, runner, clock = { 0L })
+
+        val state = coordinator.runProbeIfNeeded(model)
+        assertEquals(OpenClHealthState.PROBE_OK, state)
+
+        val key = BackendHealthStore.keyFor(device, model, BackendType.MNN_GPU, RuntimeVariant.OPENCL)
+        assertEquals("探测成功应持久化 PROBE_OK", HealthState.PROBE_OK, store.get(key)?.state)
+
+        // 再决策：直接 PROBE_OK，无需重复探测（决策不含启动探测进程）。
+        val decision = coordinator.resolve(model)
+        assertEquals(OpenClHealthState.PROBE_OK, decision.state)
+        assertFalse(decision.probeRequired)
+    }
+
+    @Test
+    fun probeFailurePersistsCooldownThroughRealStore() = runBlocking {
+        val store = BackendHealthStore(ApplicationProvider.getApplicationContext())
+        store.resetAll()
+        val device = "test-dev-${System.nanoTime()}"
+        val model = "test-model-${System.nanoTime()}"
+        val runner = OpenClProbeRunner(
+            launchProbe = {},
+            readResult = { OpenClProbeResult(success = false, failureCode = OpenClProbeResult.FAILURE_NO_DEVICE) },
+            clock = { 0L },
+        )
+        val coordinator = BackendHealthCoordinator(store, device, model, runner, clock = { 0L })
+
+        val state = coordinator.runProbeIfNeeded(model)
+        assertEquals(OpenClHealthState.COOLDOWN, state)
+
+        val key = BackendHealthStore.keyFor(device, model, BackendType.MNN_GPU, RuntimeVariant.OPENCL)
+        val record = store.get(key)
+        assertEquals("探测失败应记 PROBE 类别", HealthFailureClass.PROBE, record?.failureClass)
+        assertEquals(HealthState.COOLDOWN, record?.state)
     }
 }
