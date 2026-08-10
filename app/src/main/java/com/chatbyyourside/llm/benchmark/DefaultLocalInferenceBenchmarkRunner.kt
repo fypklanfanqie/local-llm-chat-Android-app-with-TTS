@@ -153,7 +153,7 @@ class DefaultLocalInferenceBenchmarkRunner(
                 if (cls == EmptyResponseClass.NONE.name) nonEmptyCount++
                 if (record?.downgradeReasons?.contains(EMPTY_GPU_OUTPUT_FALLBACK) == true) fallbackCount++
             }
-        } else {
+        } else if (rounds > 0) {
             classes[NO_MODEL_CLASS] = rounds
         }
         return ReliabilityResult(

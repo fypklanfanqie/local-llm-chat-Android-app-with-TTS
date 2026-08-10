@@ -144,7 +144,7 @@ interface LocalInferenceBenchmarkRunner {
 }
 
 /**
- * 基准结果持久化契约（Task 2 Step 4）。实现见 Task 15（DataStore/JSON）。
+ * 基准结果持久化契约（Task 2 Step 4）。实现：[DataStoreBenchmarkResultStore]（Task 5，DataStore/JSON）。
  *
  * 仅存 [BenchmarkScenarioResult.coolRun]=true 的结果；按场景+指纹覆盖式更新。
  */
