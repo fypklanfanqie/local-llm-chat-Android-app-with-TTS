@@ -35,6 +35,10 @@ import org.junit.runner.RunWith
  * 额外守卫 [balancedConfigNeverWorseThanPerTokenCallbacks]：真实 Balanced 默认（256B/16ms）
  * 下回调数绝不超过每 token 一次。
  *
+ * Task 6 追加多 token 步进（decodeStepTokens=2/4）场景：EOS/maxTokens 触顶拦截、取消粒度
+ * （首 delta 后 abort）、UTF-8 与字节完整性、取消后 KV 回滚（下一轮前缀复用）——native 侧
+ * 逐 token 复核语义在步进下保持（Task 1 fix，mnn_jni.cpp 不改动）。
+ *
  * **Fixture 假设守卫**：无已安装 MNN 模型（config.json + llm.mnn）或 native 不可用时，
  * [requireFixture] 抛出 Assume 跳过，CI 无模型机器不失败。
  *
@@ -116,8 +120,13 @@ class MnnStreamingIntegrationTest {
         batchMaxBytes: Int,
         batchMaxMs: Int,
         stopAfterBatches: Int? = null,
+        /** Task 6：native decode 步长（1=逐 token；2/4=多 token 步进）。 */
+        decodeStepTokens: Int = 1,
+        /** Task 6：首个回调批次后置 abort（模拟用户取消；验证步进下取消粒度与字节完整性）。 */
+        cancelAfterFirstDelta: Boolean = false,
     ): NativeGenerationSummary? {
         var batches = 0
+        var cancelled = false
         return backend.generateStreamMessages(
             messages = probeMessages,
             maxTokens = maxTokens,
@@ -131,6 +140,12 @@ class MnnStreamingIntegrationTest {
                     cap.firstElapsedMs = SystemClock.elapsedRealtime() - cap.startedMs
                 }
                 batches++
+                if (cancelAfterFirstDelta && !cancelled) {
+                    cancelled = true
+                    // 与 BackendManager.cancel() 的 Kotlin 侧取消语义一致：置静态 abort，
+                    // native 步进循环逐 token 轮询后提前结束（不调用 nativeStop，保留会话/KV）。
+                    MnnBridge.abort = true
+                }
                 if (stopAfterBatches != null && batches >= stopAfterBatches) false else true
             },
             batchMaxBytes = batchMaxBytes,
@@ -144,6 +159,7 @@ class MnnStreamingIntegrationTest {
             attemptTrace = emptyList(),
             coldLoadMs = null,
             warmLoadMs = null,
+            decodeStepTokens = decodeStepTokens,
         )
     }
 
@@ -269,6 +285,136 @@ class MnnStreamingIntegrationTest {
         assertEquals("stop 后回调数与摘要不一致（未 flush 一次）", s.callbackCount, cap.deltas.size)
         assertByteIntegrity(cap, s)
         assertNoReplacementChars(cap.deltas.joinToString(""))
+    }
+
+    // ------------------------------------------------------------------
+    // Task 6：多 token 步进（decodeStepTokens=2/4）下的 EOS/maxTokens/取消/UTF-8/KV 回滚/字节完整性
+    // ------------------------------------------------------------------
+
+    @Test
+    fun multiTokenStep2StillEnforcesMaxTokens() {
+        val fx = requireFixture()
+        val cap = Capture()
+        // step=2 且 maxTokens=3：内层每步 2 token 也须逐 token 复核上限（Task 1 fix 语义，step 变体）。
+        val summary = runBlocking {
+            generate(fx.backend, cap, maxTokens = 3, batchMaxBytes = 256, batchMaxMs = 16, decodeStepTokens = 2)
+        }
+        assertNotNull(summary)
+        val s = summary!!
+        assertTrue("step=2 时 gen_len（${s.generatedTokens}）不应超过 maxTokens=3", s.generatedTokens <= 3)
+        assertTrue(
+            "原因应为 MAX_TOKENS 或 EOS（模型 3 token 内自然结束），got ${s.completionReason}",
+            s.completionReason == "MAX_TOKENS" || s.completionReason == "EOS",
+        )
+        assertEquals("decodeStepTokens 应回读 2", 2, s.decodeStepTokens)
+    }
+
+    @Test
+    fun multiTokenStep4StillEnforcesMaxTokens() {
+        val fx = requireFixture()
+        val cap = Capture()
+        // step=4 > maxTokens=3：修复前一轮 4 token 直接越过上限 -> gen_len=4；修复后逐 token 复核触顶拦截。
+        val summary = runBlocking {
+            generate(fx.backend, cap, maxTokens = 3, batchMaxBytes = 256, batchMaxMs = 16, decodeStepTokens = 4)
+        }
+        assertNotNull(summary)
+        val s = summary!!
+        assertTrue("step=4 时 gen_len（${s.generatedTokens}）仍不应超过 maxTokens=3", s.generatedTokens <= 3)
+        assertTrue(
+            "原因应为 MAX_TOKENS 或 EOS（模型 3 token 内自然结束），got ${s.completionReason}",
+            s.completionReason == "MAX_TOKENS" || s.completionReason == "EOS",
+        )
+        assertEquals("decodeStepTokens 应回读 4", 4, s.decodeStepTokens)
+    }
+
+    @Test
+    fun multiTokenStep2CompletesNaturallyWithEosAndByteIntegrity() {
+        val fx = requireFixture()
+        val cap = Capture()
+        // step=2 自然完成路径：模型正常 EOS（或超长被 MAX_TOKENS 兜底），字节完整性不受步进影响。
+        val summary = runBlocking {
+            generate(fx.backend, cap, maxTokens = 200, batchMaxBytes = 256, batchMaxMs = 16, decodeStepTokens = 2)
+        }
+        assertNotNull(summary)
+        val s = summary!!
+        assertTrue(
+            "原因应为 EOS/MAX_TOKENS，got ${s.completionReason}",
+            s.completionReason == "EOS" || s.completionReason == "MAX_TOKENS",
+        )
+        if (s.completionReason == "EOS") {
+            assertTrue("EOS 应产出可见文本", cap.deltas.joinToString("").isNotBlank())
+        }
+        assertEquals("decodeStepTokens 应回读 2", 2, s.decodeStepTokens)
+        assertByteIntegrity(cap, s)
+    }
+
+    @Test
+    fun cancelWithStep2StopsWithinOneStepAndPreservesBytes() {
+        assertCancelPreservesBytes(step = 2)
+    }
+
+    @Test
+    fun cancelWithStep4StopsWithinOneStepAndPreservesBytes() {
+        assertCancelPreservesBytes(step = 4)
+    }
+
+    /** 取消粒度：首 delta 后置 abort，native 步进循环逐 token 轮询应提前结束，已收字节完整。 */
+    private fun assertCancelPreservesBytes(step: Int) {
+        val fx = requireFixture()
+        val cap = Capture()
+        val summary = runBlocking {
+            generate(
+                fx.backend, cap, maxTokens = 512, batchMaxBytes = 256, batchMaxMs = 16,
+                decodeStepTokens = step, cancelAfterFirstDelta = true,
+            )
+        }
+        assertNotNull(summary)
+        val s = summary!!
+        assertEquals("取消应记 USER_CANCEL（got ${s.completionReason}）", "USER_CANCEL", s.completionReason)
+        assertTrue("取消前应已产出文本", cap.deltas.joinToString("").isNotBlank())
+        assertEquals("decodeStepTokens 应回读 $step", step, s.decodeStepTokens)
+        assertByteIntegrity(cap, s)
+        assertNoReplacementChars(cap.deltas.joinToString(""))
+    }
+
+    @Test
+    fun utf8AndByteIntegrityHoldWithMultiTokenStep() {
+        val fx = requireFixture()
+        val cap = Capture()
+        // 1 字节 / 1ms 即 flush + step=4：跨批边界与多 token 步进同时压测 UTF-8 完整性。
+        val summary = runBlocking {
+            generate(fx.backend, cap, maxTokens = 200, batchMaxBytes = 1, batchMaxMs = 1, decodeStepTokens = 4)
+        }
+        assertNotNull(summary)
+        val s = summary!!
+        assertTrue("模型未产出任何文本", cap.deltas.joinToString("").isNotBlank())
+        assertNoReplacementChars(cap.deltas.joinToString(""))
+        assertByteIntegrity(cap, s)
+        assertEquals("decodeStepTokens 应回读 4", 4, s.decodeStepTokens)
+    }
+
+    @Test
+    fun cancelledMultiTokenStepRollsBackKvForNextTurnReuse() {
+        val fx = requireFixture()
+        // 第一轮：step=2 首 delta 后取消（native 中断时 eraseHistory 回滚到 prefill 后状态）。
+        val cap1 = Capture()
+        runBlocking {
+            generate(
+                fx.backend, cap1, maxTokens = 512, batchMaxBytes = 256, batchMaxMs = 16,
+                decodeStepTokens = 2, cancelAfterFirstDelta = true,
+            )
+        }
+        assertTrue("取消轮应产出文本", cap1.deltas.joinToString("").isNotBlank())
+        // 第二轮：同一消息历史应复用第一轮 prefill 留下的 KV 前缀——证明多 token 步进下
+        // 取消后的 KV 回滚仍成立（否则下一轮全量重 prefill，reuseKv=0）。
+        val cap2 = Capture()
+        val summary2 = runBlocking {
+            generate(fx.backend, cap2, maxTokens = 200, batchMaxBytes = 256, batchMaxMs = 16, decodeStepTokens = 2)
+        }
+        assertNotNull(summary2)
+        val s2 = summary2!!
+        assertEquals("取消后的下一轮应复用 KV 前缀", 1, s2.reuseKv)
+        assertByteIntegrity(cap2, s2)
     }
 
     // ------------------------------------------------------------------
