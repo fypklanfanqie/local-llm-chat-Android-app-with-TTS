@@ -244,19 +244,23 @@ class BackendHealthCoordinatorTest {
         // final review I2：健康键语义（BackendHealthStore KDoc）——device+model+backend+variant
         // **不含 native 身份**。native 重建（mnnCommit/nativeBuildId 变化）不得改变健康指纹：
         // 旧构建的失败教训（CRASH_BLACKLISTED/COOLDOWN）在新构建上继续适用，键不变则记录命中。
+        // 注意（final re-review）：canonicalHash 哈希**所有非空键**——不能拿
+        // canonicalHash(parts) vs canonicalHash(parts + native 键) 做恒等断言（恒不等）；
+        // 独立性由结构保证：健康指纹仅由 healthFingerprintParts 推导、其中不含 native 身份。
         val parts = BackendHealthCoordinator.healthFingerprintParts()
         assertFalse("健康指纹不应含 mnnCommit", parts.containsKey("mnnCommit"))
         assertFalse("健康指纹不应含 nativeBuildId", parts.containsKey("nativeBuildId"))
 
-        // 模拟 native 重建：mnnCommit/nativeBuildId 变化后，同一健康部件映射的哈希不变。
-        val rebuilt = parts + mapOf("mnnCommit" to "new-commit", "nativeBuildId" to "build-2026-08-10")
+        // 回归守卫：healthDeviceFingerprintOf 恒等于 healthFingerprintParts 的哈希——若未来把
+        // mnnCommit/nativeBuildId 加回健康指纹（部件或推导路径），本断言即失败。
         assertEquals(
-            "native 重建不应改变健康指纹（健康键不变）",
+            "健康指纹应仅由 healthFingerprintParts 推导（不含 native 身份）",
             DeviceRuntimeFingerprint.canonicalHash(parts),
-            DeviceRuntimeFingerprint.canonicalHash(rebuilt),
+            BackendHealthCoordinator.healthDeviceFingerprintOf(),
         )
 
-        // 认证键口径（deviceFingerprintOf）仍绑定 native 身份：重建 -> 认证设备指纹变化 -> 认证失效。
+        // 认证键口径仍绑定 native 身份：不同 native 身份 -> 不同认证指纹 -> 认证失效（预期）。
+        val rebuilt = parts + mapOf("mnnCommit" to "new-commit", "nativeBuildId" to "build-2026-08-10")
         val certParts = parts + mapOf("mnnCommit" to "old-commit", "nativeBuildId" to "build-2026-08-01")
         assertNotEquals(
             "认证设备指纹应随 native 身份变化",
