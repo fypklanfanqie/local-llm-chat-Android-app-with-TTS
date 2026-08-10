@@ -85,6 +85,8 @@ class MnnRuntimeIntegrationTest {
                 onToken = { sb.append(it); true },
                 batchMaxBytes = 256, batchMaxMs = 16, downgradeReasons = emptyList(),
                 executionControl = null, powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
+                requestedMode = null, effectiveMode = null, loadConfigHash = null,
+                attemptTrace = emptyList(), coldLoadMs = null, warmLoadMs = null,
             )
         }
         assertNotNull(summary)
@@ -103,6 +105,8 @@ class MnnRuntimeIntegrationTest {
                 onToken = { sb.append(it); sb.length < 8 },  // 立即截断
                 batchMaxBytes = 256, batchMaxMs = 16, downgradeReasons = emptyList(),
                 executionControl = null, powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
+                requestedMode = null, effectiveMode = null, loadConfigHash = null,
+                attemptTrace = emptyList(), coldLoadMs = null, warmLoadMs = null,
             )
         }
         assertNotNull(summary)
@@ -117,10 +121,10 @@ class MnnRuntimeIntegrationTest {
     fun secondTurnReusesKvCache() {
         val fx = requireHandle()
         // 第一轮生成（预热 + 前缀）。
-        runBlocking { fx.backend.generateStreamMessages(messages(false), 32, 0.8f, 0.9f, 1.2f, false, { true }, 256, 16, emptyList(), null, com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT) }
+        runBlocking { fx.backend.generateStreamMessages(messages(false), 32, 0.8f, 0.9f, 1.2f, false, { true }, 256, 16, emptyList(), null, com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT, null, null, null, emptyList(), null, null) }
         // 第二轮：新增 user，历史前缀应命中 KV。
         val summary = runBlocking {
-            fx.backend.generateStreamMessages(messages(true), 32, 0.8f, 0.9f, 1.2f, false, { true }, 256, 16, emptyList(), null, com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT)
+            fx.backend.generateStreamMessages(messages(true), 32, 0.8f, 0.9f, 1.2f, false, { true }, 256, 16, emptyList(), null, com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT, null, null, null, emptyList(), null, null)
         }
         assertNotNull(summary)
         assertEquals("第二轮应复用 KV 前缀", 1, summary!!.reuseKv)

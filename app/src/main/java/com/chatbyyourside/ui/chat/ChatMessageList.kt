@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import com.chatbyyourside.data.model.DisplayMessage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 

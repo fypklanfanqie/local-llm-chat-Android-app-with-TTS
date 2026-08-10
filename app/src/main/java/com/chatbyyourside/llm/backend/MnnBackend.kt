@@ -183,12 +183,12 @@ class MnnBackend(
         downgradeReasons: List<String>,
         executionControl: GenerationExecutionControl?,
         powerPolicy: PowerPolicy,
-        requestedMode: InferencePerformanceMode? = null,
-        effectiveMode: InferencePerformanceMode? = null,
-        loadConfigHash: String? = null,
-        attemptTrace: List<String> = emptyList(),
-        coldLoadMs: Long? = null,
-        warmLoadMs: Long? = null,
+        requestedMode: InferencePerformanceMode?,
+        effectiveMode: InferencePerformanceMode?,
+        loadConfigHash: String?,
+        attemptTrace: List<String>,
+        coldLoadMs: Long?,
+        warmLoadMs: Long?,
     ): NativeGenerationSummary? = mutex.withLock {
         if (handle == 0L) throw IllegalStateException("MNN 后端未加载模型")
         currentCoroutineContext().ensureActive()
@@ -344,6 +344,12 @@ class MnnBackend(
         downgradeReasons = emptyList(),
         executionControl = null,
         powerPolicy = PowerPolicy.DEFAULT,
+        requestedMode = null,
+        effectiveMode = null,
+        loadConfigHash = null,
+        attemptTrace = emptyList(),
+        coldLoadMs = null,
+        warmLoadMs = null,
     )
 
     override suspend fun stopGeneration() {

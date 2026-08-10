@@ -138,6 +138,12 @@ class MnnStreamingIntegrationTest {
             downgradeReasons = emptyList(),
             executionControl = null,
             powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
+            requestedMode = null,
+            effectiveMode = null,
+            loadConfigHash = null,
+            attemptTrace = emptyList(),
+            coldLoadMs = null,
+            warmLoadMs = null,
         )
     }
 
