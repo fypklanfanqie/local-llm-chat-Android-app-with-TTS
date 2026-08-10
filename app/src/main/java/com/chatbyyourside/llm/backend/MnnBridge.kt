@@ -133,6 +133,19 @@ class MnnBridge {
             return info.abiVersion == EXPECTED_JNI_ABI && info.mnnCommit == EXPECTED_MNN_COMMIT
         }
 
+        /**
+         * 能力集标记：v2 GenerationSummary 契约（Task 1）。native 宣告该能力后 Kotlin 侧
+         * 才应消费 v2 观测字段（thinkingConfigAccepted / reasoningEndUs / firstBodyDeltaUs /
+         * decodeStepTokens / errorCode）。Task 8 发布门禁据此拒绝旧 native；本任务（Task 1）
+         * 不做拒绝——v1 兼容路径（[com.chatbyyourside.llm.metrics.NativeGenerationSummary.parse]
+         * 回填默认值）继续可用。
+         */
+        const val CAPABILITY_SUMMARY_V2 = "summary_v2"
+
+        /** 是否具备 v2 摘要契约能力（native 能力集含 [CAPABILITY_SUMMARY_V2]；无握手信息视为不具备）。 */
+        val hasSummaryV2Capability: Boolean
+            get() = runtimeInfo?.capabilities?.contains(CAPABILITY_SUMMARY_V2) ?: false
+
         /** libMNN.so 是否加载成功 */
         val mnnAvailable: Boolean
             get() = mnnLibLoaded
@@ -213,8 +226,11 @@ class MnnBridge {
      * @param batchMaxBytes 流式批处理缓冲上限（字节）。首个完整可见字符立即回调（首 delta 即时性），
      *        其余按「字节或时间达标即批量 flush」。Task 6 性能模式接入前用 Balanced 默认 256。
      * @param batchMaxMs 流式批处理缓冲时间上限（ms）。Balanced 16；Maximum Speed 24–32。
-     * @return 紧凑版本化 GenerationSummary JSON（[NativeGenerationSummary.parse]），**非** 全量文本。
-     *         全量回复不再整份拷贝回 Kotlin；文本由流式回调拼接（provider 是唯一累加器）。
+     * @param decodeStepTokens Task 1 v2：native decode 步长（native clamp 到 1..4；1=逐 token，
+     *        等价 v1 行为）。即使 step>1，native 每步内仍逐 token 检查 EOS/maxTokens/abort，
+     *        取消粒度恒为 1 token（与 decodeStepTokens 一致）。摘要 `decodeStepTokens` 记实际生效值。
+     * @return 紧凑版本化 GenerationSummary JSON（v2，[NativeGenerationSummary.parse] 兼容 v1/v2），
+     *         **非** 全量文本。全量回复不再整份拷贝回 Kotlin；文本由流式回调拼接（provider 是唯一累加器）。
      */
     external fun nativeGenerateStream(
         handle: Long,
@@ -226,6 +242,7 @@ class MnnBridge {
         enableThinking: Boolean,
         batchMaxBytes: Int,
         batchMaxMs: Int,
+        decodeStepTokens: Int,
     ): String
 
     /** 中断当前生成（下一轮 token 前检测） */

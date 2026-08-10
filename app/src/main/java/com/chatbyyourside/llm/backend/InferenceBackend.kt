@@ -105,6 +105,9 @@ interface InferenceBackend {
         /** 遥测：首次冷加载 / 配置变化重载耗时（ms）；复用加载为 null。 */
         coldLoadMs: Long? = null,
         warmLoadMs: Long? = null,
+        /** Task 1 v2：native decode 步长（1=逐 token，默认；2..4=多 token 步进，native clamp 到 [1,4]）。
+         *  即使 step>1，native 每步内仍逐 token 检查 EOS/maxTokens/abort，取消粒度恒为 1 token。 */
+        decodeStepTokens: Int = 1,
     ): NativeGenerationSummary?
 
     /** 流式批处理 Balanced 默认参数（Task 6 性能模式接入前的稳定取值，与设计文档 §流式行一致）。 */

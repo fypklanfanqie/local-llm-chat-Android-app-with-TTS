@@ -189,6 +189,9 @@ class MnnBackend(
         attemptTrace: List<String>,
         coldLoadMs: Long?,
         warmLoadMs: Long?,
+        /** Task 1 v2：native decode 步长（默认 1，见 [InferenceBackend.generateStreamMessages]；
+         *  摘要 decodeStepTokens 记 native clamp 后的实际生效值）。 */
+        decodeStepTokens: Int,
     ): NativeGenerationSummary? = mutex.withLock {
         if (handle == 0L) throw IllegalStateException("MNN 后端未加载模型")
         currentCoroutineContext().ensureActive()
@@ -260,7 +263,7 @@ class MnnBackend(
                 // native 不再返回完整回复，只回紧凑 GenerationSummary JSON；文本走流式回调。
                 val summaryJson = bridge.nativeGenerateStream(
                     handle, messagesJson, maxTokens, temperature, topP, repeatPenalty, enableThinking,
-                    batchMaxBytes, batchMaxMs,
+                    batchMaxBytes, batchMaxMs, decodeStepTokens,
                 )
                 completedNormally = true
                 parsed = NativeGenerationSummary.parse(summaryJson)
@@ -311,12 +314,18 @@ class MnnBackend(
                 downgradeReasons = downgradeReasons,
                 coldLoadMs = coldLoadMs,
                 warmLoadMs = warmLoadMs,
+                // Task 1 v2：思考配置接受 / 思考边界 / 首正文时刻 / 实际生效步长（摘要缺失时为 null）。
+                thinkingConfigAccepted = parsed?.thinkingConfigAccepted,
+                reasoningEndUs = parsed?.reasoningEndUs,
+                firstBodyDeltaUs = parsed?.firstBodyDeltaUs,
+                decodeStepTokens = parsed?.decodeStepTokens,
             )
             // 汇总日志：tps + 摘要实测复用/前缀/批处理指标，便于核对多轮前缀复用与回调削减是否生效。
             if (parsed != null) {
                 Log.i(TAG, "生成结束 ${mode.displayName}: tps=${"%.1f".format(nativeMetrics?.get(0) ?: 0f)} " +
                     "promptLen=${parsed.promptTokens} genLen=${parsed.generatedTokens} " +
-                    "reuseKv=${parsed.reuseKv} cb=${parsed.callbackCount} reason=$completionReason")
+                    "reuseKv=${parsed.reuseKv} cb=${parsed.callbackCount} " +
+                    "step=${parsed.decodeStepTokens} reason=$completionReason")
             } else if (nativeMetrics != null && nativeMetrics.size >= 6) {
                 Log.i(TAG, "生成结束 ${mode.displayName}: tps=${"%.1f".format(nativeMetrics[0])} " +
                     "promptLen=${nativeMetrics[3].toInt()} genLen=${nativeMetrics[4].toInt()} " +

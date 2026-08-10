@@ -124,6 +124,15 @@ data class InferenceTurnRecord(
     val configHash: String? = null,
     /** 降级原因列表（如 thermal、battery、admission 拒绝）。 */
     val downgradeReasons: List<String> = emptyList(),
+    // ---- Task 1 v2 观测（来自 native v2 摘要；旧 native/摘要缺失为 null）----
+    /** `set_config(enable_thinking)` 是否被 native 接受（true=生效，false=回退模型默认）。 */
+    val thinkingConfigAccepted: Boolean? = null,
+    /** 检测到 `</think>` 的时刻（us，相对生成起点）；无思考段为 null。 */
+    val reasoningEndUs: Long? = null,
+    /** 首个非思考正文回调的时刻（us，相对生成起点）；无正文为 null。 */
+    val firstBodyDeltaUs: Long? = null,
+    /** native 实际生效的 decode 步长（clamp 后 1..4）；摘要缺失为 null。 */
+    val decodeStepTokens: Int? = null,
 )
 
 /**
@@ -318,6 +327,11 @@ class InferenceTelemetry {
         warmLoadMs: Long? = null,
         /** Task 1：native firstDeltaUs 换算的 TTFT（ms）；为空时回退 Kotlin 侧首回调时间。 */
         ttftMsOverride: Long? = null,
+        // Task 1 v2：思考配置接受 / 思考边界 / 首正文时刻 / 生效 decode 步长（native v2 摘要；缺失为 null）。
+        thinkingConfigAccepted: Boolean? = null,
+        reasoningEndUs: Long? = null,
+        firstBodyDeltaUs: Long? = null,
+        decodeStepTokens: Int? = null,
     ): InferenceTurnRecord? {
         val g = active ?: run { snapshotRef.set(null); return null }
         val m = nativeMetrics
@@ -355,6 +369,10 @@ class InferenceTelemetry {
             attemptTrace = attemptTrace,
             configHash = configHash,
             downgradeReasons = downgradeReasons,
+            thinkingConfigAccepted = thinkingConfigAccepted,
+            reasoningEndUs = reasoningEndUs,
+            firstBodyDeltaUs = firstBodyDeltaUs,
+            decodeStepTokens = decodeStepTokens,
         )
         active = null
         snapshotRef.set(null)
