@@ -20,6 +20,8 @@ import com.chatbyyourside.llm.backend.BackendHealthCoordinator
 import com.chatbyyourside.llm.backend.BackendHealthStore
 import com.chatbyyourside.llm.backend.BackendManager
 import com.chatbyyourside.llm.backend.OpenClProbeRunner
+import com.chatbyyourside.llm.benchmark.DefaultLocalInferenceBenchmarkRunner
+import com.chatbyyourside.llm.benchmark.InferenceCertificationStore
 import com.chatbyyourside.manager.AudioManager
 import com.chatbyyourside.manager.ModelManager
 import com.chatbyyourside.manager.TtsManager
@@ -74,12 +76,27 @@ class AppContainer(private val context: Context) {
     // 在 MnnBackend.generateStreamMessages 内包住 nativeGenerateStream 生效。
     val cpuBoostController: CpuBoostController by lazy { CpuBoostController(context) }
 
+    // Task 7：后端健康记录存储（与协调器共享同一实例；设置页「清除后端健康记录」整体重置）。
+    val backendHealthStore: BackendHealthStore by lazy { BackendHealthStore(context) }
+
+    // Task 7：推理选项认证存储（lookahead/步进基准证据）。LocalChatProvider 每轮按
+    // device+model+variant+native 组合查证；设置页「运行基准并认证」落盘 /「清除实验认证」重置。
+    val inferenceCertificationStore: InferenceCertificationStore by lazy {
+        InferenceCertificationStore(context)
+    }
+
+    // Task 7：本地推理基准运行器（认证闭环用）。热检查由自建 ThermalMonitor 采样驱动
+    // （API 29+/PowerManager 缺席时为 no-op，热守卫不拒绝——见 runner KDoc）。
+    val benchmarkRunner: DefaultLocalInferenceBenchmarkRunner by lazy {
+        DefaultLocalInferenceBenchmarkRunner(context, backendManager, settingsRepository)
+    }
+
     // Task 3：后端健康协调器（OpenCL 探测/健康记录单点）。BackendManager 与 LocalChatProvider 共享
     // 同一实例，避免两套状态。deviceFingerprint 含 Build/OS/native 栈身份——指纹变化即健康键变化，
     // 旧黑名单与基准自然失效。modelFingerprint 由调用方按当前模型逐轮传入（模型切换即新键）。
     val backendHealthCoordinator: BackendHealthCoordinator by lazy {
         BackendHealthCoordinator(
-            store = BackendHealthStore(context),
+            store = backendHealthStore,
             deviceFingerprint = BackendHealthCoordinator.deviceFingerprintOf(),
             probeRunner = OpenClProbeRunner.real(context),
         )
@@ -95,7 +112,14 @@ class AppContainer(private val context: Context) {
         CloudChatProvider(directLlmClient, settingsRepository)
     }
     val localChatProvider: LocalChatProvider by lazy {
-        LocalChatProvider(context, backendManager, settingsRepository, cpuBoostController, backendHealthCoordinator)
+        LocalChatProvider(
+            context,
+            backendManager,
+            settingsRepository,
+            cpuBoostController,
+            backendHealthCoordinator,
+            inferenceCertificationStore,
+        )
     }
     val chatProviderManager: ChatProviderManager by lazy {
         ChatProviderManager(cloudChatProvider, localChatProvider, settingsRepository)

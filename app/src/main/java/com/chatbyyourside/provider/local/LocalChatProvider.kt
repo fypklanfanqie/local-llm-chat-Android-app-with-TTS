@@ -28,8 +28,12 @@ import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.backend.EmptyOutputFallbackPolicy
 import com.chatbyyourside.llm.backend.GenerationOutputPolicy
+import com.chatbyyourside.llm.backend.MnnBridge
 import com.chatbyyourside.llm.backend.modelConfigFingerprint
+import com.chatbyyourside.llm.benchmark.CertifiedInferenceOptions
+import com.chatbyyourside.llm.benchmark.InferenceCertificationStore
 import com.chatbyyourside.llm.metrics.CompletionReason
+import com.chatbyyourside.llm.profile.RuntimeVariant
 import com.chatbyyourside.llm.template.ThinkingOutputClassifier
 import com.chatbyyourside.llm.template.ThinkingTemplateCapabilityResolver
 import com.chatbyyourside.perfmon.BackendType as PerfmonBackendType
@@ -66,6 +70,11 @@ class LocalChatProvider(
     private val cpuBoostController: CpuBoostController,
     /** Task 3：OpenCL 健康协调器（与 BackendManager 共享同一实例，探测/记录单点，避免两套状态）。 */
     private val healthCoordinator: BackendHealthCoordinator,
+    /**
+     * Task 7：推理选项认证存储。每轮生成按 device+model+CPU 变体+native 组合查证认证记录
+     * （lookahead / 多 token 步进门禁的启用证据，见 [loadCertifiedOptions]）。
+     */
+    private val certificationStore: InferenceCertificationStore,
 ) : ChatProvider {
 
     // ===== CPU 调度优化 / 温度监控（不改 MNN 加载逻辑，仅优化线程数与提频）=====
@@ -119,6 +128,29 @@ class LocalChatProvider(
                 backendManager.cancel()
             }
         }
+    }
+
+    /**
+     * Task 7：查证当前组合的认证记录（device+model+CPU_OPTIMIZED+native 身份）。
+     *
+     * 键派生与认证落盘侧同源（Task 6 M-3 一致性约束）：
+     * - device 指纹 = [BackendHealthCoordinator.deviceFingerprintOf]（与健康记录同源）；
+     * - model 指纹 = config.json 内容哈希（[modelConfigFingerprint]）；
+     * - 变体 = CPU_OPTIMIZED（lookahead/步进认证只对 CPU 基准变体有意义，resolver 门禁
+     *   matchesCpuVariant 只认该变体）；
+     * - native 身份 = [MnnBridge.runtimeInfo]；握手缺席（null）时返回 null 不查询——
+     *   认证键含 native 身份（[InferenceCertificationStore.certKey] 五分量），无身份无法匹配。
+     */
+    private suspend fun loadCertifiedOptions(modelPath: String): CertifiedInferenceOptions? {
+        val runtime = MnnBridge.runtimeInfo ?: return null
+        val key = InferenceCertificationStore.certKey(
+            deviceFingerprint = BackendHealthCoordinator.deviceFingerprintOf(),
+            modelFingerprint = modelConfigFingerprint(modelPath),
+            variant = RuntimeVariant.CPU_OPTIMIZED.name,
+            nativeBuildId = runtime.nativeBuildId,
+            mnnCommit = runtime.mnnCommit,
+        )
+        return certificationStore.get(key)
     }
 
     override val type: ChatProviderType = ChatProviderType.LOCAL
@@ -331,6 +363,10 @@ class LocalChatProvider(
             } else {
                 OpenClHealthState.UNKNOWN
             }
+            // Task 7：认证门禁查证——当前 device+model+CPU 变体+native 组合的基准认证记录。
+            // lookahead / 多 token 步进只在存在认证证据时被 resolver 门禁启用（用户 legacy 请求
+            // 只是使用既有认证的许可）；无认证回落安全默认（lookahead=false / step=1）。
+            val certifiedOptions = loadCertifiedOptions(modelPath)
             val resolvedPlan = InferenceProfileResolver(context.cacheDir, modelPath).resolve(
                 // Task 8：热降级后的有效模式（MODERATE+ 恒 BALANCED，撤销 sustained）。
                 mode = decision?.effectiveMode ?: performanceMode,
@@ -343,6 +379,7 @@ class LocalChatProvider(
                 topP = AppConfig.LLM.DEFAULT_TOP_P,
                 repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
                 openclHealth = openclHealth,
+                certifiedOptions = certifiedOptions,
             )
             val result = try {
                 coroutineScope {

@@ -24,6 +24,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Context
 import android.os.SystemClock
 import android.widget.Toast
 import com.chatbyyourside.AppContainer
@@ -631,4 +632,87 @@ fun decideLookaheadCertification(
             listOf("native 构建身份缺失（握手缺席），无法认证"),
         )
     }
+}
+
+/**
+ * 运行 lookahead 认证闭环（Task 7 Step 3 编排；UI 入口在 IO 线程调用）。
+ *
+ * 流程：热检查 → 取设置/模型路径/指纹 → 基线（lookahead=false）与候选（lookahead=true）两轮
+ * FIXED_DECODE 对比基准（预热 1 轮 + 记录 3 轮 = 策略 MIN_SAMPLES）→ [decideLookaheadCertification]
+ * 判定 → Promote 时落盘 [InferenceCertificationStore]。Reject / 前置失败仅返回原因（不落盘）。
+ *
+ * 指纹口径与生产查证侧一致（Task 6 M-3）：device = deviceFingerprintOf、model = config.json 哈希、
+ * 变体由 CPU 象限推导（lookahead 只对 CPU 变体有意义；runner 候选旁路同样强制 CPU 象限）。
+ */
+private suspend fun runLookaheadCertification(
+    context: Context,
+    container: AppContainer,
+    runner: LocalInferenceBenchmarkRunner,
+): LookaheadCertificationDecision {
+    if (runner.isThermallyHot()) {
+        return LookaheadCertificationDecision.NotCertified(listOf("设备过热，基准未执行（请降温后重试）"))
+    }
+    val settings = container.settingsRepository
+    val snapshot = settings.getLocalInferenceSettingsNow()
+    val activeModelId = settings.getActiveLocalModelIdNow()
+    val modelPath = if (activeModelId.isNullOrBlank()) null else ModelPathResolver.getLoadPath(context, activeModelId)
+    if (activeModelId.isNullOrBlank() || modelPath == null) {
+        return LookaheadCertificationDecision.NotCertified(listOf("未选择本地模型或模型文件缺失"))
+    }
+    // 指纹与认证记录键同源（Task 6 M-3）：device = deviceFingerprintOf，model = config.json 内容哈希。
+    val deviceFingerprint = BackendHealthCoordinator.deviceFingerprintOf()
+    val modelFingerprint = modelConfigFingerprint(modelPath)
+    val configHash = DeviceRuntimeFingerprint.compute(
+        buildMap {
+            put("threads", snapshot.threads.toString())
+            put("contextLen", snapshot.contextLen.toString())
+            put("maxTokens", snapshot.maxTokens.toString())
+            put("mode", snapshot.performanceMode.storageKey)
+            put("deepThinking", snapshot.deepThinking.toString())
+        },
+    )
+    // lookahead 只对 CPU 变体有意义：强制 CPU 象限（与 runner 候选旁路口径一致，见 runner KDoc）。
+    val quadrant = if (snapshot.deepThinking) {
+        InferenceBackendQuadrant.CPU_THINKING_ON
+    } else {
+        InferenceBackendQuadrant.CPU_THINKING_OFF
+    }
+    // 预热 1 轮 + 记录 3 轮（ExperimentalPromotionPolicy.MIN_SAMPLES=3）；两轮对比同指纹。
+    val baseline = runner.run(
+        scenario = InferenceBenchmarkScenario.FIXED_DECODE,
+        configFingerprint = configHash,
+        deviceFingerprint = deviceFingerprint,
+        warmupRounds = 1,
+        recordedRounds = 3,
+        candidateOverrides = CandidateOverrides(lookahead = false),
+    )
+    val candidate = runner.run(
+        scenario = InferenceBenchmarkScenario.FIXED_DECODE,
+        configFingerprint = configHash,
+        deviceFingerprint = deviceFingerprint,
+        warmupRounds = 1,
+        recordedRounds = 3,
+        candidateOverrides = CandidateOverrides(lookahead = true),
+    )
+    val case = InferenceBenchmarkCase(
+        scenario = InferenceBenchmarkScenario.FIXED_DECODE,
+        quadrant = quadrant,
+        modelFingerprint = modelFingerprint,
+        deviceFingerprint = deviceFingerprint,
+        configHash = configHash,
+    )
+    val runtime = MnnBridge.runtimeInfo
+    val decision = decideLookaheadCertification(
+        baseline = baseline,
+        candidate = candidate,
+        case = case,
+        nativeBuildId = runtime?.nativeBuildId ?: "",
+        mnnCommit = runtime?.mnnCommit ?: "",
+        nowElapsedMs = SystemClock.elapsedRealtime(),
+    )
+    // Promote 才落盘（toCertifiedOptions 已保证 native 身份齐备）；Reject 仅展示原因。
+    (decision as? LookaheadCertificationDecision.Certified)?.let {
+        container.inferenceCertificationStore.save(it.options)
+    }
+    return decision
 }
