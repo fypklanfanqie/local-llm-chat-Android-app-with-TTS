@@ -35,6 +35,8 @@ import kotlinx.coroutines.sync.withLock
 class BackendManager(
     context: Context,
     private val cpuBoostController: CpuBoostController,
+    /** Task 3：后端健康协调器（AppContainer 注入真实实例；测试可传 null 或 fake）。 */
+    private val healthCoordinator: BackendHealthCoordinator? = null,
 ) {
     private val selector = BackendSelector(context)
     /** 整次请求（加载 + fallback + JNI）串行，防新请求改写旧请求共享的 abort/lifecycle 状态。 */
@@ -202,6 +204,9 @@ class BackendManager(
         val plan = resolvedPlan ?: throw IllegalStateException("Task 7 起 generate 必须提供 resolvedPlan")
         val attempts = plan.attempts
         if (attempts.isEmpty()) throw IllegalStateException("resolvedPlan.attempts 为空")
+        // Task 3：健康记录键的模型指纹（config.json 内容 SHA-256 前 16 hex）；模型替换 -> 新指纹 ->
+        // 旧健康记录自然失效。仅 GPU 失败/成功路径消费，CPU 恒兜底不记录。
+        val modelFingerprint = modelConfigFingerprint(modelPath)
         Log.i(TAG, "执行计划: attempts=${attempts.joinToString { it.variant.name }} req=${plan.requestedMode}")
         var lastError: Exception? = null
         // 各尝试失败原因（变体名 + 诊断信息），全失败时汇总报错。
@@ -239,6 +244,11 @@ class BackendManager(
                     // CPU 优化失败推进到 CPU 兼容（下一变体），不黑名单 CPU；GPU/NPU 失败记会话级黑名单。
                     if (attempt.backend == BackendType.MNN_GPU) markSessionFailed(BackendType.MNN_GPU)
                     if (attempt.backend == BackendType.MNN_NPU) markSessionFailed(BackendType.MNN_NPU)
+                    // Task 3：加载失败叠加持久 LOAD 类别健康记录（非 CPU 后端；CPU 恒兜底不记，
+                    // 与 markSessionFailed 的「CPU 不黑名单」语义一致）。
+                    if (attempt.backend != BackendType.MNN_CPU) {
+                        healthCoordinator?.afterLoadFailure(attempt.backend, attempt.variant, modelFingerprint)
+                    }
                     runCatching { releaseBackend(attempt.backend) }
                     continue
                 }
@@ -267,17 +277,31 @@ class BackendManager(
                         templateCapability = templateCapability,
                         thinkingClassifier = thinkingClassifier,
                     )
+                    val completionReason = executionControl?.reason()
+                        ?: (backend as? MnnBackend)?.lastTurnRecord?.completionReason
+                        ?: summary?.completionReason?.let(CompletionReason::valueOf)
+                    // Task 3：非错误生成完成 -> 升 MODEL_OK（持久健康记录）。条件按裁决：
+                    // generateStreamMessages 正常返回（未抛异常）且 completionReason 非 BACKEND_FAILURE。
+                    // 生成异常走下方 catch 记 GENERATION；取消/超时/热停是 requestStop 提前返回路径，
+                    // 不抛异常且 reason 非 BACKEND_FAILURE，故不误记为失败、本 attempt 后端已可用。
+                    if (completionReason != CompletionReason.BACKEND_FAILURE) {
+                        healthCoordinator?.markModelOk(attempt.backend, attempt.variant, modelFingerprint)
+                    }
                     return@withLock GenerationResult(
                         summary = summary,
                         usedBackend = attempt.backend,
                         reloaded = reloadedThisCall,
-                        completionReason = executionControl?.reason()
-                            ?: (backend as? MnnBackend)?.lastTurnRecord?.completionReason
-                            ?: summary?.completionReason?.let(CompletionReason::valueOf),
+                        completionReason = completionReason,
                     )
                 } catch (ce: CancellationException) {
                     throw ce
                 } catch (e: Exception) {
+                    // Task 3：生成异常才记持久 GENERATION 失败（非 CPU 后端；CPU 恒兜底不记）。
+                    // 取消/超时/热停是 requestStop 提前返回的路径，不抛异常，不会进入本分支；
+                    // CancellationException 已在上面单独 rethrow——故此处只可能是真实后端异常。
+                    if (attempt.backend != BackendType.MNN_CPU) {
+                        healthCoordinator?.afterGenerationFailure(attempt.backend, attempt.variant, modelFingerprint)
+                    }
                     if (executionControl != null && executionControl.remainingTokens() < maxTokens) {
                         // 已有可见输出后禁止透明换后端，否则两个模型的 delta 会拼成一条且 KV/语义均失配。
                         executionControl.requestStop(CompletionReason.BACKEND_FAILURE)

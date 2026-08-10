@@ -22,8 +22,11 @@ import com.chatbyyourside.llm.InferenceThreadOptimizer
 import com.chatbyyourside.llm.PromptWindowPlanner
 import com.chatbyyourside.llm.PromptWindowResult
 import com.chatbyyourside.llm.ThermalMonitor
+import com.chatbyyourside.llm.backend.BackendHealthCoordinator
 import com.chatbyyourside.llm.backend.BackendManager
+import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendType
+import com.chatbyyourside.llm.backend.modelConfigFingerprint
 import com.chatbyyourside.llm.metrics.CompletionReason
 import com.chatbyyourside.llm.template.ThinkingOutputClassifier
 import com.chatbyyourside.llm.template.ThinkingTemplateCapabilityResolver
@@ -59,6 +62,8 @@ class LocalChatProvider(
     private val backendManager: BackendManager,
     private val settings: SettingsRepository,
     private val cpuBoostController: CpuBoostController,
+    /** Task 3：OpenCL 健康协调器（与 BackendManager 共享同一实例，探测/记录单点，避免两套状态）。 */
+    private val healthCoordinator: BackendHealthCoordinator,
 ) : ChatProvider {
 
     // ===== CPU 调度优化 / 温度监控（不改 MNN 加载逻辑，仅优化线程数与提频）=====
@@ -285,6 +290,18 @@ class LocalChatProvider(
             )
             activeExecutionControl.set(executionControl)
             // Task 7：由性能模式/后端偏好/设备/热准入线程解析不可变执行计划（含每变体 native 配置）。
+            // Task 3：真实 OpenCL 健康入链依据（取代 mnnGpuSupported 捷径——库可达 ≠ 运行时健康）：
+            // - mnnGpuSupported 仅作前置快速门：库不可加载时连探测都跳过，直接 UNKNOWN 走 CPU 链，
+            //   省一次探测进程启动；不再作为健康证据。
+            // - 显式选 CPU（或标准版 NPU 偏好解析为 CPU）不触发探测：探测结果不影响纯 CPU 计划。
+            // - AUTO / 显式 GPU：按持久健康记录解析，需要时同步跑一次隔离探测（5s 超时）再解析；
+            //   探测失败自然回落 COOLDOWN -> 计划走 CPU 链，不阻塞 CPU 路径。
+            val wantsGpuPath = preference == BackendPreference.AUTO || preference == BackendPreference.MNN_GPU
+            val openclHealth = if (backendManager.mnnGpuSupported && wantsGpuPath) {
+                healthCoordinator.resolveForGpu(modelConfigFingerprint(modelPath)).state
+            } else {
+                OpenClHealthState.UNKNOWN
+            }
             val resolvedPlan = InferenceProfileResolver(context.cacheDir, modelPath).resolve(
                 // Task 8：热降级后的有效模式（MODERATE+ 恒 BALANCED，撤销 sustained）。
                 mode = decision?.effectiveMode ?: performanceMode,
@@ -296,7 +313,7 @@ class LocalChatProvider(
                 temperature = temperature,
                 topP = AppConfig.LLM.DEFAULT_TOP_P,
                 repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
-                openclHealth = if (backendManager.mnnGpuSupported) OpenClHealthState.PROBE_OK else OpenClHealthState.UNKNOWN,
+                openclHealth = openclHealth,
             )
             val result = try {
                 coroutineScope {

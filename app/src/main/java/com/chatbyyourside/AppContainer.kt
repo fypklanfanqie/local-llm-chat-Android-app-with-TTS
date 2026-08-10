@@ -16,7 +16,10 @@ import com.chatbyyourside.data.repository.MusicLibraryRepository
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.download.DownloadManager
 import com.chatbyyourside.llm.CpuBoostController
+import com.chatbyyourside.llm.backend.BackendHealthCoordinator
+import com.chatbyyourside.llm.backend.BackendHealthStore
 import com.chatbyyourside.llm.backend.BackendManager
+import com.chatbyyourside.llm.backend.OpenClProbeRunner
 import com.chatbyyourside.manager.AudioManager
 import com.chatbyyourside.manager.ModelManager
 import com.chatbyyourside.manager.TtsManager
@@ -71,15 +74,28 @@ class AppContainer(private val context: Context) {
     // 在 MnnBackend.generateStreamMessages 内包住 nativeGenerateStream 生效。
     val cpuBoostController: CpuBoostController by lazy { CpuBoostController(context) }
 
+    // Task 3：后端健康协调器（OpenCL 探测/健康记录单点）。BackendManager 与 LocalChatProvider 共享
+    // 同一实例，避免两套状态。deviceFingerprint 含 Build/OS/native 栈身份——指纹变化即健康键变化，
+    // 旧黑名单与基准自然失效。modelFingerprint 由调用方按当前模型逐轮传入（模型切换即新键）。
+    val backendHealthCoordinator: BackendHealthCoordinator by lazy {
+        BackendHealthCoordinator(
+            store = BackendHealthStore(context),
+            deviceFingerprint = BackendHealthCoordinator.deviceFingerprintOf(),
+            probeRunner = OpenClProbeRunner.real(context),
+        )
+    }
+
     // 推理后端管理器：MNN CPU / OpenCL GPU / QNN NPU，按偏好选择并支持回退链
-    val backendManager: BackendManager by lazy { BackendManager(context, cpuBoostController) }
+    val backendManager: BackendManager by lazy {
+        BackendManager(context, cpuBoostController, backendHealthCoordinator)
+    }
 
     // ===== Chat Provider =====
     val cloudChatProvider: CloudChatProvider by lazy {
         CloudChatProvider(directLlmClient, settingsRepository)
     }
     val localChatProvider: LocalChatProvider by lazy {
-        LocalChatProvider(context, backendManager, settingsRepository, cpuBoostController)
+        LocalChatProvider(context, backendManager, settingsRepository, cpuBoostController, backendHealthCoordinator)
     }
     val chatProviderManager: ChatProviderManager by lazy {
         ChatProviderManager(cloudChatProvider, localChatProvider, settingsRepository)
