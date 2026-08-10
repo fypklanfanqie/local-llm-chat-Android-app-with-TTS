@@ -3,6 +3,7 @@ package com.chatbyyourside.llm.backend
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
+import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.PowerPolicy
 
 /**
@@ -94,6 +95,16 @@ interface InferenceBackend {
         downgradeReasons: List<String> = emptyList(),
         executionControl: GenerationExecutionControl? = null,
         powerPolicy: PowerPolicy = PowerPolicy.DEFAULT,
+        /** 遥测（Task 1）：请求/生效性能模式，避免记录为 null。 */
+        requestedMode: InferencePerformanceMode? = null,
+        effectiveMode: InferencePerformanceMode? = null,
+        /** 遥测：本次尝试实际应用的配置指纹（loadConfigHash），而非路径哈希。 */
+        loadConfigHash: String? = null,
+        /** 遥测：后端尝试链（按序变体名，用于分析回退路径）。 */
+        attemptTrace: List<String> = emptyList(),
+        /** 遥测：首次冷加载 / 配置变化重载耗时（ms）；复用加载为 null。 */
+        coldLoadMs: Long? = null,
+        warmLoadMs: Long? = null,
     ): NativeGenerationSummary?
 
     /** 流式批处理 Balanced 默认参数（Task 6 性能模式接入前的稳定取值，与设计文档 §流式行一致）。 */

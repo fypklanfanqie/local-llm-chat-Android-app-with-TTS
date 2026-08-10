@@ -1,6 +1,7 @@
 package com.chatbyyourside.llm.backend
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
@@ -82,6 +83,13 @@ class BackendManager(
      */
     /** 本次 generate 是否触发了模型(重新)加载。 */
     private var reloadedThisCall: Boolean = false
+
+    /** 加载结果类型（Task 1 遥测）：复用 / 首次冷加载 / 配置变化重载。 */
+    private enum class LoadKind { REUSE, COLD, WARM }
+
+    /** 最近一次 ensureAttemptLoaded 的结果（generationMutex 单飞内读取，无需同步）。 */
+    private var lastLoadKind: LoadKind = LoadKind.REUSE
+    private var lastLoadMs: Long = 0L
 
     /** 后端类型 -> 实例 */
     private fun backendFor(type: BackendType): InferenceBackend = when (type) {
@@ -240,6 +248,13 @@ class BackendManager(
                         messages, attemptMaxTokens, temperature, topP, repeatPenalty, enableThinking, onToken,
                         effectiveBatchBytes, effectiveBatchMs, downgradeReasons, executionControl,
                         plan.powerPolicy,
+                        // Task 1 遥测：性能模式 / 实际配置指纹 / 尝试链 / 加载耗时（冷/热区分）。
+                        requestedMode = plan.requestedMode,
+                        effectiveMode = plan.effectiveMode,
+                        loadConfigHash = attempt.loadConfigHash,
+                        attemptTrace = plan.attempts.map { it.variant.name },
+                        coldLoadMs = if (lastLoadKind == LoadKind.COLD) lastLoadMs else null,
+                        warmLoadMs = if (lastLoadKind == LoadKind.WARM) lastLoadMs else null,
                     )
                     return@withLock GenerationResult(
                         summary = summary,
@@ -379,9 +394,21 @@ class BackendManager(
     private suspend fun ensureAttemptLoaded(attempt: BackendAttempt, modelPath: String): Boolean {
         val backend = backendFor(attempt.backend)
         if (backend.isModelLoaded && (backend as? MnnBackend)?.isLoadedWithConfigHash(modelPath, attempt.loadConfigHash) == true) {
+            // 热复用：零加载耗时，不纳入冷/热统计。
+            lastLoadKind = LoadKind.REUSE
+            lastLoadMs = 0L
             return true
         }
+        // 区分首次冷加载（此前未加载）与配置变化重载（此前加载过别的配置）。
+        val wasLoaded = backend.isModelLoaded
+        val t = SystemClock.elapsedRealtime()
         val ok = backend.initialize(modelPath, attempt.nativeConfigJson, attempt.loadConfigHash)
+        lastLoadMs = SystemClock.elapsedRealtime() - t
+        lastLoadKind = when {
+            !ok -> LoadKind.REUSE
+            wasLoaded -> LoadKind.WARM
+            else -> LoadKind.COLD
+        }
         if (ok) reloadedThisCall = true
         return ok
     }

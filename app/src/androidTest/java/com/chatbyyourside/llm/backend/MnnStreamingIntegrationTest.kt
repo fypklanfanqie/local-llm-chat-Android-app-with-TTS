@@ -7,8 +7,11 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
+import com.chatbyyourside.llm.profile.InferenceProfileResolver
+import com.chatbyyourside.llm.profile.RuntimeVariant
 import com.chatbyyourside.provider.local.ModelPathResolver
 import kotlinx.coroutines.runBlocking
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -62,15 +65,23 @@ class MnnStreamingIntegrationTest {
                 for (dir in dirs) {
                     val config = ModelPathResolver.getConfigPath(context, dir.name) ?: continue
                     val backend = MnnBackend(context, MnnBackend.MnnMode.CPU, CpuBoostController(context))
+                    // 通过 resolver 生成规范化 native config + 指纹，匹配当前 initialize(modelPath, nativeConfigJson, loadConfigHash) 契约。
+                    val configJson = InferenceProfileResolver.buildAttemptNativeConfig(
+                        variant = RuntimeVariant.CPU_OPTIMIZED,
+                        backendType = "cpu",
+                        threadNum = 4,
+                        cachePath = File(context.cacheDir, "mnn_cache_integration.bin").absolutePath,
+                        contextTokens = 2048,
+                        lookahead = false,
+                        temperature = 0.8f,
+                        topP = 0.9f,
+                        repeatPenalty = 1.1f,
+                    )
                     val ok = runBlocking {
                         backend.initialize(
                             modelPath = config,
-                            contextLength = 2048,
-                            threads = 4,
-                            lookahead = false,
-                            temperature = 0.8f,
-                            topP = 0.9f,
-                            repeatPenalty = 1.1f,
+                            nativeConfigJson = configJson,
+                            loadConfigHash = InferenceProfileResolver.loadConfigHash(configJson),
                         )
                     }
                     if (ok) {

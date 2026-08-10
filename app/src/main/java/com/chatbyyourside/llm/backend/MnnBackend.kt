@@ -7,6 +7,7 @@ import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.metrics.CompletionReason
+import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.PowerPolicy
 import com.chatbyyourside.llm.metrics.InferenceTelemetry
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
@@ -182,6 +183,12 @@ class MnnBackend(
         downgradeReasons: List<String>,
         executionControl: GenerationExecutionControl?,
         powerPolicy: PowerPolicy,
+        requestedMode: InferencePerformanceMode? = null,
+        effectiveMode: InferencePerformanceMode? = null,
+        loadConfigHash: String? = null,
+        attemptTrace: List<String> = emptyList(),
+        coldLoadMs: Long? = null,
+        warmLoadMs: Long? = null,
     ): NativeGenerationSummary? = mutex.withLock {
         if (handle == 0L) throw IllegalStateException("MNN 后端未加载模型")
         currentCoroutineContext().ensureActive()
@@ -195,8 +202,8 @@ class MnnBackend(
         val generationId = "${mode.name.lowercase()}-${generationCounter.incrementAndGet()}"
         telemetry.beginGeneration(
             generationId = generationId,
-            requestedMode = null,   // Task 6 解析性能模式后回填
-            effectiveMode = null,
+            requestedMode = requestedMode,   // Task 1：由 resolvedPlan 传入，不再为 null
+            effectiveMode = effectiveMode,
             backend = backendType,
             startedElapsedMs = genStartTime,
         )
@@ -296,8 +303,14 @@ class MnnBackend(
                 nowElapsedMs = SystemClock.elapsedRealtime(),
                 completionReason = completionReason,
                 nativeMetrics = nativeMetrics,
-                configHash = loadedConfigPath?.let { it.hashCode().toString(16) },
+                // Task 1：TTFT 优先取 native firstDeltaUs（us->ms，相对 prefill 起点更精确），
+                // 为空时回退 Kotlin 侧首回调时间（finalize 内部逻辑）。
+                ttftMsOverride = parsed?.firstDeltaUs?.let { it / 1000 },
+                configHash = loadConfigHash ?: loadedConfigPath?.let { it.hashCode().toString(16) },
+                attemptTrace = attemptTrace,
                 downgradeReasons = downgradeReasons,
+                coldLoadMs = coldLoadMs,
+                warmLoadMs = warmLoadMs,
             )
             // 汇总日志：tps + 摘要实测复用/前缀/批处理指标，便于核对多轮前缀复用与回调削减是否生效。
             if (parsed != null) {

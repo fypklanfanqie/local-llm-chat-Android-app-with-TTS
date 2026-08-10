@@ -140,6 +140,29 @@ class InferenceTelemetryTest {
     }
 
     @Test
+    fun finalize_ttftOverridePrefersNativeFirstDelta() {
+        // Task 1：native firstDeltaUs（us）换算的 TTFT 优先于 Kotlin 侧首回调时间。
+        val t = InferenceTelemetry()
+        t.beginGeneration("g-ttft", InferencePerformanceMode.BALANCED, null, BackendType.MNN_CPU, 1000L)
+        t.onDecodeToken(1, 1, 3L, 5f, 2000L)   // 回调时间为 1000ms
+        val record = t.finalize(
+            nowElapsedMs = 3000L,
+            completionReason = CompletionReason.EOS,
+            ttftMsOverride = 480L,             // native firstDeltaUs=480000us
+        )!!
+        assertEquals(480L, record.ttftMs)
+    }
+
+    @Test
+    fun finalize_withoutTtftOverride_fallsBackToCallbackTime() {
+        val t = InferenceTelemetry()
+        t.beginGeneration("g-ttft2", null, null, BackendType.MNN_CPU, 1000L)
+        t.onDecodeToken(1, 1, 3L, 5f, 1600L)
+        val record = t.finalize(nowElapsedMs = 3000L, completionReason = CompletionReason.EOS)!!
+        assertEquals(600L, record.ttftMs)
+    }
+
+    @Test
     fun reset_clearsActiveAndSnapshot() {
         val t = InferenceTelemetry()
         t.beginGeneration("g5", null, null, null, 0L)

@@ -316,6 +316,8 @@ class InferenceTelemetry {
         downgradeReasons: List<String> = emptyList(),
         coldLoadMs: Long? = null,
         warmLoadMs: Long? = null,
+        /** Task 1：native firstDeltaUs 换算的 TTFT（ms）；为空时回退 Kotlin 侧首回调时间。 */
+        ttftMsOverride: Long? = null,
     ): InferenceTurnRecord? {
         val g = active ?: run { snapshotRef.set(null); return null }
         val m = nativeMetrics
@@ -337,7 +339,7 @@ class InferenceTelemetry {
             endedElapsedMs = nowElapsedMs,
             coldLoadMs = coldLoadMs,
             warmLoadMs = warmLoadMs,
-            ttftMs = g.firstTokenElapsedMs?.let { it - g.startedElapsedMs },
+            ttftMs = ttftMsOverride ?: g.firstTokenElapsedMs?.let { it - g.startedElapsedMs },
             prefillMs = prefillMs,
             decodeMs = decodeMs,
             promptTokens = promptTokens,
