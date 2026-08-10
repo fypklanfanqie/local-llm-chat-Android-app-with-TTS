@@ -25,6 +25,8 @@ import com.chatbyyourside.llm.ThermalMonitor
 import com.chatbyyourside.llm.backend.BackendManager
 import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.metrics.CompletionReason
+import com.chatbyyourside.llm.template.ThinkingOutputClassifier
+import com.chatbyyourside.llm.template.ThinkingTemplateCapabilityResolver
 import com.chatbyyourside.perfmon.BackendType as PerfmonBackendType
 import com.chatbyyourside.provider.ChatProvider
 import kotlinx.coroutines.CoroutineScope
@@ -82,6 +84,8 @@ class LocalChatProvider(
     /** 当前请求的性能模式（热降级决策的参考模式；由 chatTyped 每轮更新）。 */
     @Volatile
     private var currentRequestedMode: InferencePerformanceMode = InferencePerformanceMode.DEFAULT
+    /** Task 2：模板能力解析器（进程内缓存，按 config 路径 + mtime 判失效，避免每轮重复读盘）。 */
+    private val thinkingTemplateResolver = ThinkingTemplateCapabilityResolver()
 
     /** 启动温度监控（幂等）。热回调按 [ThermalMonitor.decide] 决策：撤销 hint / 请求 THERMAL_STOP /
      *  记录下一轮模式与线程 cap。MNN 已加载线程数不可中途改变，线程下调走下一轮 resolve。 */
@@ -251,6 +255,18 @@ class LocalChatProvider(
             // 无重扫），替代旧实现每块对全文 [indexOf] 的 O(n²)。cutAbsoluteIndex 与全文累加器下标
             // 对齐（同序从空喂入，由解码线程串行调用）。
             val scriptDetector = IncrementalScriptDetector(SCRIPT_NAMES)
+            // Task 2：模板能力解析（诊断用，进程内缓存；不改变展示语义——renderLocalThink/isThinkingModel
+            // 保持现状）。输入模型目录（config.json 所在目录）；MNN 模型包在 config.json 内嵌完整
+            // Jinja chat 模板，据此判定模板是否含 enable_thinking 分支。
+            val templateCapability = thinkingTemplateResolver.resolve(
+                File(modelPath).parentFile ?: File(modelPath),
+            )
+            // Task 2：思考效果/空响应分类器——增量旁路（O(1) 空间），只观察未装饰的原始模型文本，
+            // 不持有全文、不改输出；思考请求与模板能力在生成前已知，随构造传入。
+            val thinkingClassifier = ThinkingOutputClassifier(
+                thinkingRequested = deepThinking,
+                templateCapability = templateCapability,
+            )
             // Task 4 Step 6：`<think>` 装饰与 UI 回调移入独立渲染协程（LocalStreamRenderPump），
             // 解码回调只做增量 append + 剧本检测 + conflated 信号，不再整串 toString + renderLocalThink，
             // 避免同步工作直接推迟下一次 generate(1)。首块立即渲染保证即时性；末帧由 finish 兜底。
@@ -310,7 +326,13 @@ class LocalChatProvider(
                                 resolvedPlan.downgradeReasons.map { it.name }).distinct(),
                             executionControl = executionControl,
                             resolvedPlan = resolvedPlan,
+                            // Task 2：思考请求与模板能力随生成信封透传（分类结果在生成结束后补记，见下）。
+                            thinkingRequested = deepThinking,
+                            templateCapability = templateCapability.name,
                             onToken = { token ->
+                                // Task 2 旁路：分类器观察未装饰的原始流（截断后仍继续观察真实到达的
+                                // token，使 raw/body 字节计数完整），增量 O(1)，不进渲染路径。
+                                thinkingClassifier.append(token)
                                 if (!truncated) {
                                     // 同步回调只做三件事：append、剧本检测截断、并发渲染信号——不做任何字符串
                                     // 整段拷贝/装饰/UI 更新，让 generate(1) 尽快回到 MNN 解码。
@@ -367,6 +389,28 @@ class LocalChatProvider(
             // 原始模型输出（与 native syncPromptCache 逐字节一致）：本地累加器即最终原始文本。
             val modelText = finalRaw
             val record = backendManager.lastTurnRecord()
+            // Task 2：分类器用最终完成原因收口——思考效果与空响应分类需 completionReason/generatedTokens，
+            // 在 generate() 返回前无法判定（telemetry.finalize 已在后端 finally 执行），故在 provider 侧
+            // 完成分类后补记到最近一次遥测记录（记录其余字段不变）。
+            val classification = thinkingClassifier.finish(
+                completionReason = result.completionReason ?: record?.completionReason
+                    ?: CompletionReason.BACKEND_FAILURE,
+                generatedTokens = record?.generatedTokens ?: 0,
+            )
+            if (record != null) {
+                backendManager.attachTurnThinkingClassification(
+                    thinkingEffective = classification.thinkingEffect.name,
+                    emptyResponseClass = classification.emptyResponseClass.name,
+                )
+            }
+            Log.i(
+                TAG,
+                "thinking 分类: requested=$deepThinking capability=$templateCapability " +
+                    "effect=${classification.thinkingEffect} empty=${classification.emptyResponseClass} " +
+                    "open=${thinkingClassifier.sawThinkOpen} close=${thinkingClassifier.sawThinkClose} " +
+                    "rawBytes=${thinkingClassifier.rawBytes} bodyBytes=${thinkingClassifier.bodyBytes} " +
+                    "firstBodyOffset=${thinkingClassifier.firstBodyOffset}",
+            )
             if (modelText.isNotEmpty() && record != null && record.generatedTokens > 0) {
                 measuredAssistantText = modelText
                 measuredAssistantTokens = record.generatedTokens

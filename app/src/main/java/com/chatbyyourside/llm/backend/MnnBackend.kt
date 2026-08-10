@@ -192,6 +192,12 @@ class MnnBackend(
         /** Task 1 v2：native decode 步长（默认 1，见 [InferenceBackend.generateStreamMessages]；
          *  摘要 decodeStepTokens 记 native clamp 后的实际生效值）。 */
         decodeStepTokens: Int,
+        // Task 2：思考请求 / 模板能力 / 思考效果 / 空响应分类（override 不重复接口默认值，见
+        // [InferenceBackend.generateStreamMessages]；分类结果由 provider 生成结束后补记）。
+        thinkingRequested: Boolean?,
+        templateCapability: String?,
+        thinkingEffective: String?,
+        emptyResponseClass: String?,
     ): NativeGenerationSummary? = mutex.withLock {
         if (handle == 0L) throw IllegalStateException("MNN 后端未加载模型")
         currentCoroutineContext().ensureActive()
@@ -319,6 +325,11 @@ class MnnBackend(
                 reasoningEndUs = parsed?.reasoningEndUs,
                 firstBodyDeltaUs = parsed?.firstBodyDeltaUs,
                 decodeStepTokens = parsed?.decodeStepTokens,
+                // Task 2：思考请求 / 模板能力 / 思考效果 / 空响应分类（生成信封透传）。
+                thinkingRequested = thinkingRequested,
+                templateCapability = templateCapability,
+                thinkingEffective = thinkingEffective,
+                emptyResponseClass = emptyResponseClass,
             )
             // 汇总日志：tps + 摘要实测复用/前缀/批处理指标，便于核对多轮前缀复用与回调削减是否生效。
             if (parsed != null) {
@@ -375,6 +386,20 @@ class MnnBackend(
     /** 是否已加载同一路径同一配置指纹（热复用判定，Task 7）。 */
     fun isLoadedWithConfigHash(path: String, hash: String): Boolean =
         handle != 0L && loadedConfigPath == path && loadedConfigHash == hash
+
+    /**
+     * Task 2：补记思考效果 / 空响应分类到最近一次遥测记录。
+     *
+     * 分类需最终 completionReason/generatedTokens，而 [telemetry.finalize] 在 generateStreamMessages
+     * 的 finally 中已执行（早于 provider 拿到结果），故由 [com.chatbyyourside.provider.local.LocalChatProvider]
+     * 在 generate 返回后完成分类，再以 copy 方式写回本字段（记录其余字段不变）。
+     */
+    fun updateLastTurnClassification(thinkingEffective: String?, emptyResponseClass: String?) {
+        lastTurnRecord = lastTurnRecord?.copy(
+            thinkingEffective = thinkingEffective,
+            emptyResponseClass = emptyResponseClass,
+        )
+    }
 
     override fun release() {
         if (handle != 0L) {

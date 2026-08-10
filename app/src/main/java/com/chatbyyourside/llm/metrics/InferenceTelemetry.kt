@@ -133,6 +133,15 @@ data class InferenceTurnRecord(
     val firstBodyDeltaUs: Long? = null,
     /** native 实际生效的 decode 步长（clamp 后 1..4）；摘要缺失为 null。 */
     val decodeStepTokens: Int? = null,
+    // ---- Task 2：思考请求 / 模板能力 / 分类结果（生成信封；分类结果由 provider 在生成结束后补记）----
+    /** 本轮是否请求了深度思考（deepThinking 设置值）。 */
+    val thinkingRequested: Boolean? = null,
+    /** 模板能力枚举名（[com.chatbyyourside.llm.template.ThinkingTemplateCapability]）。 */
+    val templateCapability: String? = null,
+    /** 思考效果枚举名（[com.chatbyyourside.llm.template.ThinkingEffect]）。 */
+    val thinkingEffective: String? = null,
+    /** 空响应分类枚举名（[com.chatbyyourside.llm.template.EmptyResponseClass]）。 */
+    val emptyResponseClass: String? = null,
 )
 
 /**
@@ -332,6 +341,12 @@ class InferenceTelemetry {
         reasoningEndUs: Long? = null,
         firstBodyDeltaUs: Long? = null,
         decodeStepTokens: Int? = null,
+        // Task 2：思考请求 / 模板能力 / 思考效果 / 空响应分类（生成信封透传；分类结果由 provider
+        // 在 generate 返回后经 BackendManager.attachTurnThinkingClassification 补记）。
+        thinkingRequested: Boolean? = null,
+        templateCapability: String? = null,
+        thinkingEffective: String? = null,
+        emptyResponseClass: String? = null,
     ): InferenceTurnRecord? {
         val g = active ?: run { snapshotRef.set(null); return null }
         val m = nativeMetrics
@@ -373,6 +388,10 @@ class InferenceTelemetry {
             reasoningEndUs = reasoningEndUs,
             firstBodyDeltaUs = firstBodyDeltaUs,
             decodeStepTokens = decodeStepTokens,
+            thinkingRequested = thinkingRequested,
+            templateCapability = templateCapability,
+            thinkingEffective = thinkingEffective,
+            emptyResponseClass = emptyResponseClass,
         )
         active = null
         snapshotRef.set(null)
