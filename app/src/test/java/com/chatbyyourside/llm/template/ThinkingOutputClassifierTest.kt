@@ -1,6 +1,7 @@
 package com.chatbyyourside.llm.template
 
 import com.chatbyyourside.llm.metrics.CompletionReason
+import com.chatbyyourside.llm.metrics.InferenceStage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -35,11 +36,11 @@ class ThinkingOutputClassifierTest {
 
         assertTrue(c.sawThinkOpen)
         assertTrue(c.sawThinkClose)
-        // 流：<think>(0-6) 让我思考一下(7-12) \n(13) </think>(14-21) 答案是 42(22-30)
+        // 流：<think>(0-6) 让我思考一下(7-12) \n(13) </think>(14-21) 答案是 42(22-27)
         assertEquals(22, c.firstBodyOffset!!)
-        // raw = 7 + 6*3 + 1 + 8 + (3+3+1+1+1) = 43；body = "答案是 42" UTF-8 = 9
-        assertEquals(43L, c.rawBytes)
-        assertEquals(9L, c.bodyBytes)
+        // raw = 7 + 6*3 + 1 + 8 + (3+3+3+1+1+1) = 46；body = "答案是 42" UTF-8 = 12
+        assertEquals(46L, c.rawBytes)
+        assertEquals(12L, c.bodyBytes)
     }
 
     @Test
@@ -76,7 +77,9 @@ class ThinkingOutputClassifierTest {
         assertTrue(c.sawThinkClose)
         // 流：<think>(0-6) 推理(7-8) </think>(9-16) 答案(17-18)
         assertEquals(17, c.firstBodyOffset!!)
-        assertEquals(31L, c.rawBytes)   // 7 + 6 + 4 + (8 + 6) = 31
+        // raw = 7 + 6 + 4 + 4 + 6 = 27：<think>7 + 推理6 + </th 4 + ink> 4 + 答案6
+        //（闭标签跨批分片为 </th + ink> 各 4 字节，合计 8 字节，非单个 8 字节 </think>）
+        assertEquals(27L, c.rawBytes)
         assertEquals(6L, c.bodyBytes)   // "答案" = 2 * 3
     }
 
@@ -179,6 +182,24 @@ class ThinkingOutputClassifierTest {
         assertEquals(
             EmptyResponseClass.DECODE_FAILURE,
             classifier().finish(CompletionReason.BACKEND_FAILURE, 5).emptyResponseClass,
+        )
+    }
+
+    @Test
+    fun backendFailure_errorStageTakesPrecedenceOverTokenHeuristic() {
+        // M-2：native errorStage（PREFILL/DECODE）优先于 generatedTokens 近似——
+        // 有 token 的 PREFILL 仍归 PREFILL_FAILURE；零 token 的 DECODE 仍归 DECODE_FAILURE。
+        assertEquals(
+            EmptyResponseClass.PREFILL_FAILURE,
+            classifier()
+                .finish(CompletionReason.BACKEND_FAILURE, 5, InferenceStage.PREFILL.name)
+                .emptyResponseClass,
+        )
+        assertEquals(
+            EmptyResponseClass.DECODE_FAILURE,
+            classifier()
+                .finish(CompletionReason.BACKEND_FAILURE, 0, InferenceStage.DECODE.name)
+                .emptyResponseClass,
         )
     }
 
