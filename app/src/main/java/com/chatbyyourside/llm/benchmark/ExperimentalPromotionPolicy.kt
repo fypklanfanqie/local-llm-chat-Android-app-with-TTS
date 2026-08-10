@@ -8,6 +8,11 @@ package com.chatbyyourside.llm.benchmark
  * - 至少 ≥10% median decode 提升（或定义 TTFT 收益）；
  * - TTFT 与峰值 PSS 的劣化有界（≤30%）；
  * - 需冷启样本（拒绝热/噪声/单样本）。
+ *
+ * Task 6 认证衔接：Promote 决策经 [InferenceCertificationStore.toCertifiedOptions] 生成该
+ * device+model+variant+native 组合的认证记录并落盘（基准触发与 UI 入口见 Task 7）；
+ * [com.chatbyyourside.llm.profile.InferenceProfileResolver] 启用 lookahead / 多 token 步进前
+ * 按组合查证该认证——没有基准证据，配置不全局启用。
  */
 data class BenchmarkSample(
     val decodeTpsMedian: Float,

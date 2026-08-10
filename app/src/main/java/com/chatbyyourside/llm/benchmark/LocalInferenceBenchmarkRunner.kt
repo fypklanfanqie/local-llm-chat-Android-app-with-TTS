@@ -105,6 +105,10 @@ data class ReliabilityResult(
  * 3. **预热与样本分离**：先跑若干预热轮（结果丢弃），再跑记录轮；记录轮才纳入 [BenchmarkSummary]。
  * 4. **仅持久化冷态结果**：coolRun=true 的中位数/离散度按「设备指纹+配置指纹」归档；热态/噪声/单样本结果丢弃并记录原因。
  * 5. **不自动调参**：本任务只测量与归档，绝不据此改变运行时配置（自动调参见 Task 17 实验门）。
+ *
+ * Task 6 认证衔接：四象限冷态结果（含 [BenchmarkScenarioResult.nativeBuildId]/[mnnCommit]）经
+ * [ExperimentalPromotionPolicy.evaluate] 判定 Promote 后，由 [InferenceCertificationStore.toCertifiedOptions]
+ * 生成认证记录——认证存储与门禁由 Task 6 落地，基准触发与 UI 入口见 Task 7。
  */
 interface LocalInferenceBenchmarkRunner {
 
