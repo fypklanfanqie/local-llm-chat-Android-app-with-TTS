@@ -4,9 +4,22 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
+import com.chatbyyourside.llm.GenerationExecutionControl
+import com.chatbyyourside.llm.GenerationSafetyPolicy
+import com.chatbyyourside.llm.backend.MnnBackend.MnnMode
+import com.chatbyyourside.llm.metrics.CompletionReason
+import com.chatbyyourside.llm.metrics.NativeGenerationSummary
+import com.chatbyyourside.llm.profile.InferencePerformanceMode
+import com.chatbyyourside.llm.profile.InferenceProfileResolver
+import com.chatbyyourside.llm.profile.OpenClHealthState
+import com.chatbyyourside.llm.profile.PowerPolicy
+import com.chatbyyourside.llm.profile.ResolvedInferencePlan
+import com.chatbyyourside.llm.template.ThinkingOutputClassifier
+import com.chatbyyourside.llm.template.ThinkingTemplateCapability
 import com.chatbyyourside.provider.local.ModelPathResolver
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -255,5 +268,250 @@ class MnnRuntimeIntegrationTest {
             fx.backend.initialize(fx.configPath, nativeConfigOf(), loadConfigHashOf(fx.configPath))
         }
         assertTrue("release 后应能重新加载", ok)
+    }
+
+    // ===== Task 4：首 delta 前 GPU 空输出回退 CPU（真机用例；CI 有模型机器时运行）=====
+
+    /**
+     * 脚本化 GPU 后端：GPU 侧输出形态由场景字段驱动（真实 GPU 空输出不可确定性复现——工作正常的
+     * GPU 几乎必产出文本，坏掉的 GPU 又无法在 CI 上保证存在；stub 只负责「GPU 返回了空/部分输出」
+     * 这一侧的确定性），回退后的 CPU 侧走**真实 MNN 运行时**：真实模型加载、真实 CPU 生成、真实
+     * [releaseOthers] 释放语义，四类场景（空输出回退成功 / 部分输出不回退 / 取消不回退 / 无双驻留）
+     * 均可确定性断言。
+     */
+    private class ScriptedGpuBackend(
+        /** 首个 delta 前即输出的一段可见文本（模拟部分输出；null = 零输出）。 */
+        var partialToken: String? = null,
+        /** 请求级终止原因（模拟取消/超时等 requestStop 路径；null = 正常完成）。 */
+        var stopReason: CompletionReason? = null,
+        /** 空摘要的 token/字节数（部分输出场景须与 partialToken 一致非零）。 */
+        var summaryTokens: Int = 0,
+        var summaryBytes: Long = 0L,
+    ) : InferenceBackend {
+        var generateCalls = 0
+        var released = false
+
+        override val backendType: BackendType get() = BackendType.MNN_GPU
+        override val backendName: String get() = backendType.displayName
+        override val isSupported: Boolean get() = true
+        override val isModelLoaded: Boolean get() = !released
+        override val currentModelPath: String? get() = null
+        override val lastErrorMessage: String? get() = null
+
+        override suspend fun initialize(
+            modelPath: String,
+            nativeConfigJson: String,
+            loadConfigHash: String,
+        ): Boolean = true
+
+        override suspend fun generateStreamMessages(
+            messages: List<ChatMessage>,
+            maxTokens: Int,
+            temperature: Float,
+            topP: Float,
+            repeatPenalty: Float,
+            enableThinking: Boolean,
+            onToken: (String) -> Boolean,
+            batchMaxBytes: Int,
+            batchMaxMs: Int,
+            downgradeReasons: List<String>,
+            executionControl: GenerationExecutionControl?,
+            powerPolicy: PowerPolicy,
+            requestedMode: InferencePerformanceMode?,
+            effectiveMode: InferencePerformanceMode?,
+            loadConfigHash: String?,
+            attemptTrace: List<String>,
+            coldLoadMs: Long?,
+            warmLoadMs: Long?,
+            decodeStepTokens: Int,
+            thinkingRequested: Boolean?,
+            templateCapability: String?,
+            thinkingClassifier: ThinkingOutputClassifier?,
+        ): NativeGenerationSummary? {
+            generateCalls++
+            stopReason?.let { executionControl?.requestStop(it) }
+            partialToken?.let { onToken(it) }
+            // 模拟 MnnBackend finally 契约：分类器收口一次（回退判定消费 lastEmptyResponseClass）。
+            thinkingClassifier?.finish(
+                completionReason = stopReason ?: CompletionReason.EOS,
+                generatedTokens = summaryTokens,
+            )
+            // 空输出摘要：EOS + 0 token + 0 bytes（部分输出场景下 callbackBytes>0 先被零输出硬条件拦截）。
+            return NativeGenerationSummary(
+                version = NativeGenerationSummary.VERSION,
+                completionReason = "EOS",
+                promptTokens = 10,
+                generatedTokens = summaryTokens,
+                prefillUs = 1L,
+                decodeUs = 1L,
+                reuseKv = 0,
+                callbackCount = if (summaryTokens > 0) 1 else 0,
+                callbackBytes = summaryBytes,
+            )
+        }
+
+        override suspend fun stopGeneration() = Unit
+
+        override fun release() {
+            released = true
+        }
+
+        override fun getBackendMetrics(): BackendMetrics =
+            BackendMetrics(tokensPerSecond = 0f, gpuUtilization = null, memoryUsedMB = 0L, backendName = backendName)
+    }
+
+    /** 真实 BackendManager：GPU 用脚本化 stub，CPU 用真实 MnnBackend（回退链路 + 真实运行时）。 */
+    private fun realManager(
+        configPath: String,
+        gpuStub: ScriptedGpuBackend,
+        onCpuCreated: (MnnBackend) -> Unit,
+    ): BackendManager {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        return BackendManager(
+            context = context,
+            cpuBoostController = CpuBoostController(context),
+            healthCoordinator = null,
+            backendFactory = { mode ->
+                when (mode) {
+                    MnnMode.CPU -> MnnBackend(context, MnnMode.CPU, CpuBoostController(context)).also { onCpuCreated(it) }
+                    // AUTO 计划不含 NPU attempt；返回同一 stub 仅为满足构造（永不被调度）。
+                    MnnMode.GPU_OPENCL, MnnMode.NPU_QNN -> gpuStub
+                }
+            },
+        )
+    }
+
+    /** AUTO + MODEL_OK -> [OPENCL, CPU_OPTIMIZED, CPU_COMPATIBILITY]（与生产解析同构）。 */
+    private fun realPlan(configPath: String): ResolvedInferencePlan {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        return InferenceProfileResolver(context.cacheDir, configPath).resolve(
+            mode = InferencePerformanceMode.BALANCED,
+            backendPreference = BackendPreference.AUTO,
+            contextTokens = 4096,
+            maxOutputTokens = 256,
+            thermalAdmittedThreads = 4,
+            lookahead = false,
+            temperature = 0.8f,
+            topP = 0.9f,
+            repeatPenalty = 1.2f,
+            openclHealth = OpenClHealthState.MODEL_OK,
+        )
+    }
+
+    private fun realControl(maxTokens: Int): GenerationExecutionControl = GenerationExecutionControl(
+        policy = GenerationSafetyPolicy(
+            maxTokens = maxTokens,
+            stallTimeoutMs = GenerationSafetyPolicy.DEFAULT_STALL_TIMEOUT_MS,
+            wallClockTimeoutMs = GenerationSafetyPolicy.BALANCED_WALL_CLOCK_TIMEOUT_MS,
+        ),
+        startedElapsedMs = android.os.SystemClock.elapsedRealtime(),
+    )
+
+    private val fallbackPolicy = GenerationOutputPolicy(EmptyOutputFallbackPolicy.CPU_BEFORE_FIRST_DELTA)
+
+    /** 统一 generate 入口：GPU stub + 回退策略 + 分类器（与生产调用同构）。 */
+    private fun runGenerateWithFallback(
+        manager: BackendManager,
+        configPath: String,
+        plan: ResolvedInferencePlan,
+        control: GenerationExecutionControl,
+        onToken: (String) -> Boolean,
+    ): BackendManager.GenerationResult = runBlocking {
+        manager.generate(
+            modelPath = configPath,
+            messages = messages(),
+            maxTokens = plan.maxOutputTokens,
+            temperature = 0.8f,
+            topP = 0.9f,
+            repeatPenalty = 1.2f,
+            enableThinking = false,
+            onToken = onToken,
+            executionControl = control,
+            resolvedPlan = plan,
+            thinkingRequested = false,
+            templateCapability = ThinkingTemplateCapability.SUPPORTED.name,
+            thinkingClassifier = ThinkingOutputClassifier(false, ThinkingTemplateCapability.SUPPORTED),
+            outputPolicy = fallbackPolicy,
+        )
+    }
+
+    /** 真机用例 1：GPU 空输出（EOS, 0 token, 0 byte）-> 回退 CPU 并成功产出文本。 */
+    @Test
+    fun gpuEmptyOutputFallsBackToCpu() {
+        val fx = requireHandle()
+        val stub = ScriptedGpuBackend()
+        lateinit var cpuBackend: MnnBackend
+        val manager = realManager(fx.configPath, stub) { cpuBackend = it }
+        val plan = realPlan(fx.configPath)
+        val sb = StringBuilder()
+        val result = runGenerateWithFallback(manager, fx.configPath, plan, realControl(plan.maxOutputTokens)) {
+            sb.append(it); true
+        }
+
+        assertEquals("GPU 空输出应回退到 CPU", BackendType.MNN_CPU, result.usedBackend)
+        assertEquals(CompletionReason.EOS, result.completionReason)
+        assertTrue("CPU 应产出可见文本", sb.isNotBlank())
+        assertTrue("回退推进 CPU 前 GPU 应已释放", stub.released)
+        assertTrue("CPU 应已加载", cpuBackend.isModelLoaded)
+        assertEquals("GPU 应只尝试一次", 1, stub.generateCalls)
+    }
+
+    /** 真机用例 2：GPU 部分输出（已有 delta）-> 不回退，原样返回 GPU 结果。 */
+    @Test
+    fun gpuPartialOutputDoesNotFallBack() {
+        val fx = requireHandle()
+        val stub = ScriptedGpuBackend(partialToken = "你", summaryTokens = 1, summaryBytes = 3L)
+        lateinit var cpuBackend: MnnBackend
+        val manager = realManager(fx.configPath, stub) { cpuBackend = it }
+        val plan = realPlan(fx.configPath)
+        val sb = StringBuilder()
+        val result = runGenerateWithFallback(manager, fx.configPath, plan, realControl(plan.maxOutputTokens)) {
+            sb.append(it); true
+        }
+
+        assertEquals("部分输出应留在 GPU，不回退", BackendType.MNN_GPU, result.usedBackend)
+        assertEquals(CompletionReason.EOS, result.completionReason)
+        assertEquals("已输出的 delta 原样保留", "你", sb.toString())
+        assertFalse("未回退，GPU 不应被释放", stub.released)
+        assertFalse("CPU 不应被加载（未触发回退）", cpuBackend.isModelLoaded)
+    }
+
+    /** 真机用例 3：取消（executionControl reason）-> 不回退，原样返回取消原因。 */
+    @Test
+    fun cancelDoesNotFallBack() {
+        val fx = requireHandle()
+        val stub = ScriptedGpuBackend(stopReason = CompletionReason.USER_CANCEL)
+        lateinit var cpuBackend: MnnBackend
+        val manager = realManager(fx.configPath, stub) { cpuBackend = it }
+        val plan = realPlan(fx.configPath)
+        val result = runGenerateWithFallback(manager, fx.configPath, plan, realControl(plan.maxOutputTokens)) {
+            true
+        }
+
+        assertEquals("取消应原样返回，不回退", CompletionReason.USER_CANCEL, result.completionReason)
+        assertEquals(BackendType.MNN_GPU, result.usedBackend)
+        assertFalse("未回退，GPU 不应被释放", stub.released)
+        assertFalse("CPU 不应被加载（取消路径）", cpuBackend.isModelLoaded)
+    }
+
+    /** 真机用例 4：空输出回退全程无双驻留——GPU 句柄释放后 CPU 才加载驻留。 */
+    @Test
+    fun emptyGpuFallbackKeepsSingleModelResidency() {
+        val fx = requireHandle()
+        val stub = ScriptedGpuBackend()
+        lateinit var cpuBackend: MnnBackend
+        val manager = realManager(fx.configPath, stub) { cpuBackend = it }
+        val plan = realPlan(fx.configPath)
+        val sb = StringBuilder()
+        val result = runGenerateWithFallback(manager, fx.configPath, plan, realControl(plan.maxOutputTokens)) {
+            sb.append(it); true
+        }
+
+        assertEquals(BackendType.MNN_CPU, result.usedBackend)
+        // 无双驻留：回退推进 CPU attempt 前（releaseOthers(keep=CPU)）GPU stub 已被 release；
+        // 断言「GPU 已释放」与「CPU 已加载」同真——二者不可能同时驻留。
+        assertTrue("GPU stub 应已被 release（回退前释放）", stub.released)
+        assertTrue("CPU 应已加载（回退后唯一驻留）", cpuBackend.isModelLoaded)
+        assertTrue("CPU 应产出可见文本", sb.isNotBlank())
     }
 }
