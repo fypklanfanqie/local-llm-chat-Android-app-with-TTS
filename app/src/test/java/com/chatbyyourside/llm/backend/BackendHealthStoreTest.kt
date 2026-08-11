@@ -1,5 +1,7 @@
 package com.chatbyyourside.llm.backend
 
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -9,6 +11,33 @@ import org.junit.Test
 class BackendHealthStoreTest {
 
     private val hourMs = 60L * 60 * 1000
+
+    @Test
+    fun structuredMapKeysRoundTrip() {
+        // 回归守卫：BackendHealthKey 是 data class（CLASS 类型），Map 键 JSON 编解码必须
+        // 走 allowStructuredMapKeys（[key1, value1, ...] 数组形式）；缺该开关会在首次读写
+        // store 时抛 "can't be used in JSON as a key"。测试复用 store 的同款配置。
+        val json = BackendHealthStore.STORE_JSON
+        val key = BackendHealthKey(
+            deviceFingerprint = "dev-fp",
+            modelFingerprint = "model-fp",
+            backend = "MNN_GPU",
+            variant = "OPENCL",
+        )
+        val record = HealthRecord(
+            state = HealthState.COOLDOWN,
+            failureClass = HealthFailureClass.PROBE,
+            failureCount = 2,
+            lastFailureElapsedMs = 1_000,
+            cooldownUntilElapsedMs = 123_456,
+        )
+        val encoded = json.encodeToString(mapOf(key to record))
+        // 结构化键编码为数组：[{"deviceFingerprint":...}, {...record...}]
+        assertTrue(encoded.startsWith("["))
+        val decoded = json.decodeFromString<Map<BackendHealthKey, HealthRecord>>(encoded)
+        assertEquals(mapOf(key to record), decoded)
+    }
+
 
     @Test
     fun unknownRecordAllowsAttempt() {

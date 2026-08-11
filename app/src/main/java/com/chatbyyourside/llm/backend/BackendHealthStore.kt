@@ -123,7 +123,8 @@ interface BackendHealthRecordStore {
  */
 class BackendHealthStore(private val context: Context) : BackendHealthRecordStore {
 
-    private val json = Json { ignoreUnknownKeys = true }
+    /** 与 [STORE_JSON] 同配置；实例别名便于既有代码引用。 */
+    private val json = STORE_JSON
 
     private val healthKey = stringPreferencesKey("records")
 
@@ -162,6 +163,18 @@ class BackendHealthStore(private val context: Context) : BackendHealthRecordStor
     }
 
     companion object {
+        /**
+         * 本 store 的 Json 编解码配置：`ignoreUnknownKeys` 容忍旧字段残留；
+         * `allowStructuredMapKeys` 允许 `Map<BackendHealthKey, HealthRecord>` 以
+         * `[key1, value1, key2, value2, ...]` 数组形式编解码（kotlinx.serialization 默认禁止
+         * CLASS 类型作 map 键，BackendHealthKey 是 data class——缺此开关会在首次读写时抛
+         * "can't be used in JSON as a key"）。internal 供 JVM 单测复用同一配置做 round-trip。
+         */
+        internal val STORE_JSON = Json {
+            ignoreUnknownKeys = true
+            allowStructuredMapKeys = true
+        }
+
         fun keyFor(
             deviceFingerprint: String,
             modelFingerprint: String,
