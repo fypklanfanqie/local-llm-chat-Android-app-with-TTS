@@ -41,7 +41,9 @@ class OpenClProbeRunner(
         const val PREFS_NAME = "opencl_probe"
         const val KEY_PENDING = "pending"
         const val KEY_RESULT = "result"
-        const val PROBE_TIMEOUT_MS = 5000L
+        // 15s：覆盖 :mnn_probe 隔离进程冷启动 + 驱动初始化（首次 dlopen libOpenCL.so 可能较慢）。
+        // 原 5s 在部分设备冷启动时超时 -> probe 失败 -> 24h COOLDOWN -> OpenCL 不入链 -> GPU 不可用。
+        const val PROBE_TIMEOUT_MS = 15000L
         private const val POLL_MS = 100L
 
         /** 真实实现：写 journal -> startService(:mnn_probe)。 */
