@@ -138,11 +138,11 @@ class BackendHealthStore(private val context: Context) : BackendHealthRecordStor
         }
 
     /** 读单条记录（缺失返回 null = 未知健康）。 */
-    suspend fun get(key: BackendHealthKey): HealthRecord? =
+    override suspend fun get(key: BackendHealthKey): HealthRecord? =
         records.map { it[key] }.first()
 
     /** 原子更新一条记录。 */
-    suspend fun update(key: BackendHealthKey, transform: (HealthRecord?) -> HealthRecord?) {
+    override suspend fun update(key: BackendHealthKey, transform: (HealthRecord?) -> HealthRecord?) {
         context.healthDataStore.edit { prefs ->
             val raw = prefs[healthKey] ?: ""
             val current: MutableMap<BackendHealthKey, HealthRecord> = if (raw.isBlank())

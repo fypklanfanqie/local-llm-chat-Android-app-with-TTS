@@ -86,7 +86,7 @@ open class DefaultLocalInferenceBenchmarkRunner(
         deviceFingerprint: String,
         warmupRounds: Int,
         recordedRounds: Int,
-        candidateOverrides: CandidateOverrides? = null,
+        candidateOverrides: CandidateOverrides?,
     ): BenchmarkScenarioResult {
         if (isThermallyHot()) {
             return rejectedResult(

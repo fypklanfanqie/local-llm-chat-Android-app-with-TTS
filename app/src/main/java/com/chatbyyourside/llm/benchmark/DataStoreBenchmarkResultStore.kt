@@ -51,7 +51,7 @@ class DataStoreBenchmarkResultStore(
         scenario: InferenceBenchmarkScenario,
         deviceFingerprint: String,
         configFingerprint: String,
-        quadrant: InferenceBackendQuadrant? = null,
+        quadrant: InferenceBackendQuadrant?,
     ): BenchmarkScenarioResult? {
         val prefs = context.benchmarkResultStore.data.first()
         // M-1：非 null 时直取该象限键，不受「枚举序首命中」遮蔽（GPU/CPU 同存时按象限精确读回）。
