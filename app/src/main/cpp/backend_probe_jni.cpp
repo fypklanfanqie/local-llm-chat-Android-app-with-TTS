@@ -156,6 +156,13 @@ static const char *KERNEL_SRC =
     "__kernel void add1(__global const float *a, __global float *b) {"
     "  int i = get_global_id(0); b[i] = a[i] + 1.0f; }";
 
+// JNI 导出必须 extern "C"：否则 C++ 编译器按 name-mangling 生成符号
+// （如 _Z66Java_..._nativeProbeP7_JNIEnvP8_jobject），JVM 按未 mangled 的
+// `Java_..._nativeProbe` 查找不到 -> 调用抛 UnsatisfiedLinkError
+// （"No implementation found"）-> probe 失败 -> OpenCL 不入链 -> GPU 不可用。
+// 对比 mnn_jni.cpp 的 extern "C" 块。本函数是文件内唯一 JNI 导出。
+extern "C" {
+
 JNIEXPORT jstring JNICALL
 Java_com_chatbyyourside_llm_backend_OpenClProbeService_nativeProbe(JNIEnv *env, jobject) {
     auto t0 = std::chrono::steady_clock::now();
@@ -270,3 +277,5 @@ Java_com_chatbyyourside_llm_backend_OpenClProbeService_nativeProbe(JNIEnv *env, 
     LOGI("probe OK vendor=%s device=%s driver=%s %lldms", device_vendor.c_str(), device_name.c_str(), driver.c_str(), dur);
     return env->NewStringUTF(result_json(true, platform_name, device_vendor, device_name, driver, dur, "").c_str());
 }
+
+}  // extern "C"
