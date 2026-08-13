@@ -286,20 +286,24 @@ class SeedanceClient(
         header("Retry-After")?.trim()?.toLongOrNull()?.takeIf { it > 0 }?.let { it * 1_000L }
 
     private fun buildCreateRequest(config: SeedanceConfig, request: CreateSeedanceTask): CreateSeedanceTaskRequest {
+        val role = request.variant.referenceImageRole
         val content = mutableListOf<SeedanceContentPart>(
             SeedanceContentPart(type = "text", text = request.finalPrompt),
             SeedanceContentPart(
                 type = "image_url",
-                role = "reference_image",
+                role = role,
                 imageUrl = SeedanceImageUrl(url = request.character.toDataUrl()),
             ),
         )
-        request.background?.let {
-            content += SeedanceContentPart(
-                type = "image_url",
-                role = "reference_image",
-                imageUrl = SeedanceImageUrl(url = it.toDataUrl()),
-            )
+        // 1.5 Pro 仅支持首帧单图（first_frame），背景参考图不发送；2.0 系列支持背景参考图。
+        if (request.variant.supportsBackgroundReference) {
+            request.background?.let {
+                content += SeedanceContentPart(
+                    type = "image_url",
+                    role = role,
+                    imageUrl = SeedanceImageUrl(url = it.toDataUrl()),
+                )
+            }
         }
         return CreateSeedanceTaskRequest(
             model = request.variant.modelId,

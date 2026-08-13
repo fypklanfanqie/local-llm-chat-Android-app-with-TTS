@@ -886,9 +886,6 @@ private fun ProviderDropdown(
     }
 }
 
-/** Fast 模型支持的分辨率档位（标准模型支持全部）。 */
-private val FAST_RESOLUTIONS = setOf(SeedanceResolution.P480, SeedanceResolution.P720)
-
 private fun resolutionLabel(resolution: SeedanceResolution): String = when (resolution) {
     SeedanceResolution.P480 -> "480p"
     SeedanceResolution.P720 -> "720p"
@@ -897,8 +894,9 @@ private fun resolutionLabel(resolution: SeedanceResolution): String = when (reso
 }
 
 private fun variantLabel(variant: SeedanceModelVariant): String = when (variant) {
-    SeedanceModelVariant.STANDARD -> "标准"
-    SeedanceModelVariant.FAST -> "Fast"
+    SeedanceModelVariant.STANDARD -> "标准（2.0）"
+    SeedanceModelVariant.FAST -> "Fast（2.0）"
+    SeedanceModelVariant.SEEDANCE_1_5_PRO -> "1.5 Pro"
 }
 
 /** “测试连接”探测的超时上限（ms）：远超底层 OkHttp 连接超时，但保证 UI 按钮不会久转。 */
@@ -906,9 +904,10 @@ private const val PROBE_TIMEOUT_MS = 10_000L
 
 /**
  * “Seedance 对话视频”设置分区（自包含；文件较大故独立成函数）。
- * API Key 密码输入、服务地址、标准/Fast、动态分辨率（Fast 隐藏 1080p/4K）、4–15 秒时长、
- * 画幅比例、水印、可选背景图（经 [SeedanceSceneStore] 校验并复制到内部存储）、可选场景描述、
- * 固定开启语音的只读说明。无 fps 选项。含「测试连接」按钮校验服务地址。
+ * API Key 密码输入、服务地址、模型（2.0 标准/Fast、1.5 Pro）、按模型能力动态的分辨率与时长
+ * （Fast 仅 480p/720p；1.5 Pro 时长 4–12 秒）、画幅比例、水印、可选背景图
+ * （经 [SeedanceSceneStore] 校验并复制到内部存储）、可选场景描述、固定开启语音的只读说明。
+ * 无 fps 选项。含「测试连接」按钮校验服务地址。
  */
 @Composable
 private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineScope) {
@@ -1009,24 +1008,29 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
                 selected = variant,
                 onSelect = { v ->
                     variant = v
-                    if (v == SeedanceModelVariant.FAST && resolution !in FAST_RESOLUTIONS) {
-                        resolution = SeedanceResolution.P720
+                    // 切模型后按新模型能力纠正非法分辨率/时长，避免保存时被 clamp 但 UI 显示过期值。
+                    if (resolution !in v.supportedResolutions) {
+                        resolution = v.supportedResolutions.first()
+                    }
+                    if (duration !in v.minDurationSeconds..v.maxDurationSeconds) {
+                        duration = duration.coerceIn(v.minDurationSeconds, v.maxDurationSeconds)
                     }
                 },
             )
             FieldLabel("分辨率")
             SeedanceDropdown(
-                items = (if (variant == SeedanceModelVariant.FAST) FAST_RESOLUTIONS else SeedanceResolution.entries.toSet())
-                    .map { it to resolutionLabel(it) },
+                items = variant.supportedResolutions.map { it to resolutionLabel(it) },
                 selected = resolution,
                 onSelect = { resolution = it },
             )
             Text("视频时长：$duration 秒", color = scheme.onSurface, fontSize = 12.sp)
             Slider(
-                value = duration.toFloat(),
-                onValueChange = { duration = it.toInt().coerceIn(SEEDANCE_MIN_DURATION_SECONDS, SEEDANCE_MAX_DURATION_SECONDS) },
-                valueRange = SEEDANCE_MIN_DURATION_SECONDS.toFloat()..SEEDANCE_MAX_DURATION_SECONDS.toFloat(),
-                steps = SEEDANCE_MAX_DURATION_SECONDS - SEEDANCE_MIN_DURATION_SECONDS - 1,
+                value = duration.toFloat().coerceIn(variant.minDurationSeconds.toFloat(), variant.maxDurationSeconds.toFloat()),
+                onValueChange = {
+                    duration = it.toInt().coerceIn(variant.minDurationSeconds, variant.maxDurationSeconds)
+                },
+                valueRange = variant.minDurationSeconds.toFloat()..variant.maxDurationSeconds.toFloat(),
+                steps = variant.maxDurationSeconds - variant.minDurationSeconds - 1,
             )
             FieldLabel("画幅比例")
             SeedanceDropdown(
@@ -1097,8 +1101,8 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
         saved = saved,
         onClick = {
             scope.launch {
-                val safeResolution = if (variant == SeedanceModelVariant.FAST && resolution !in FAST_RESOLUTIONS) {
-                    SeedanceResolution.P720
+                val safeResolution = if (resolution !in variant.supportedResolutions) {
+                    variant.supportedResolutions.first()
                 } else {
                     resolution
                 }
@@ -1130,7 +1134,7 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
                         variant = variant,
                         resolution = safeResolution,
                         ratio = ratio,
-                        durationSeconds = duration.coerceIn(SEEDANCE_MIN_DURATION_SECONDS, SEEDANCE_MAX_DURATION_SECONDS),
+                        durationSeconds = duration.coerceIn(variant.minDurationSeconds, variant.maxDurationSeconds),
                         watermark = watermark,
                         backgroundImagePath = finalBackgroundPath,
                         sceneDescription = sceneDescription,

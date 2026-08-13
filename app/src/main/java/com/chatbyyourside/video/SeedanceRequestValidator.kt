@@ -16,20 +16,17 @@ sealed interface SeedanceValidationResult {
     data class Invalid(val message: String) : SeedanceValidationResult
 }
 
-/** Seedance 支持的最短视频时长（秒）。 */
+/** Seedance 2.0 系列支持的最短视频时长（秒）。 */
 const val SEEDANCE_MIN_DURATION_SECONDS = 4
 
-/** Seedance 支持的最长视频时长（秒）。 */
+/** Seedance 2.0 系列支持的最长视频时长（秒）；1.5 Pro 以 [SeedanceModelVariant.maxDurationSeconds] 为准。 */
 const val SEEDANCE_MAX_DURATION_SECONDS = 15
-
-/** Fast 模型支持的分辨率档位（标准模型支持全部）。 */
-private val FAST_SUPPORTED_RESOLUTIONS = setOf(SeedanceResolution.P480, SeedanceResolution.P720)
 
 /**
  * 校验一次 Seedance 视频生成请求：
  *  - [SeedanceConfig.baseUrl]/[SeedanceConfig.apiKey] 非空；
- *  - 时长 4–15 秒固定整数（[SEEDANCE_MIN_DURATION_SECONDS]..[SEEDANCE_MAX_DURATION_SECONDS]）；
- *  - Fast 模型仅支持 480p/720p；
+ *  - 时长在所选模型的 [SeedanceModelVariant.minDurationSeconds]..[maxDurationSeconds] 之间；
+ *  - 分辨率在所选模型的 [SeedanceModelVariant.supportedResolutions] 内（Fast 仅 480p/720p）；
  *  - 角色立绘路径非空。
  * 背景图与场景描述可选，不参与校验。
  */
@@ -43,12 +40,15 @@ fun validateSeedanceRequest(
     if (config.apiKey.isBlank()) {
         return SeedanceValidationResult.Invalid("必须配置 Seedance API Key")
     }
-    if (config.durationSeconds !in SEEDANCE_MIN_DURATION_SECONDS..SEEDANCE_MAX_DURATION_SECONDS) {
-        return SeedanceValidationResult.Invalid("视频时长必须在 4-15 秒之间")
+    val min = config.variant.minDurationSeconds
+    val max = config.variant.maxDurationSeconds
+    if (config.durationSeconds !in min..max) {
+        return SeedanceValidationResult.Invalid("视频时长必须在 $min-$max 秒之间")
     }
-    if (config.variant == SeedanceModelVariant.FAST &&
-        config.resolution !in FAST_SUPPORTED_RESOLUTIONS) {
-        return SeedanceValidationResult.Invalid("Fast 模型仅支持 480p 和 720p 分辨率")
+    if (config.resolution !in config.variant.supportedResolutions) {
+        return SeedanceValidationResult.Invalid(
+            "该模型仅支持 ${config.variant.supportedResolutions.map { it.name }.joinToString("、")} 分辨率"
+        )
     }
     if (characterImagePath.isBlank()) {
         return SeedanceValidationResult.Invalid("必须提供角色立绘图片")
