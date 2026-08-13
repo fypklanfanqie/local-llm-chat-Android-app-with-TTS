@@ -1,0 +1,676 @@
+package com.chatbyyourside.video
+
+import com.chatbyyourside.data.model.ApiConfig
+import com.chatbyyourside.data.model.Character
+import com.chatbyyourside.data.model.SeedanceConfig
+import com.chatbyyourside.data.model.SeedanceVideo
+import com.chatbyyourside.data.model.SeedanceVideoState
+import com.chatbyyourside.data.remote.CreateSeedanceTask
+import com.chatbyyourside.data.remote.SeedanceApiException
+import com.chatbyyourside.data.remote.SeedanceError
+import com.chatbyyourside.data.remote.SeedanceImageContent
+import com.chatbyyourside.data.remote.SeedanceRemoteStatus
+import com.chatbyyourside.data.remote.SeedanceTaskResponse
+import com.chatbyyourside.data.repository.SeedanceVideoRepository
+import kotlinx.coroutines.flow.first
+import kotlinx.serialization.json.Json
+import java.io.InputStream
+import java.security.MessageDigest
+
+/**
+ * 单次流水线推进结果。
+ *
+ * - [Complete]：本阶段终结（READY/CANCELLED），无需再调度；
+ * - [Reschedule]：需要 [delayMillis] 后再调度一次（轮询/有界重试）；
+ * - [WaitingForUser]：进入 FAILED_*、EXPIRED 等需用户确认的终态。
+ */
+sealed interface PipelineOutcome {
+    data object Complete : PipelineOutcome
+    data class Reschedule(val delayMillis: Long) : PipelineOutcome
+    data object WaitingForUser : PipelineOutcome
+}
+
+/**
+ * 流水线持久化窄接口（JVM 单测无 Room/Android）。
+ *
+ * [claim] 是唯一原子原语（UPDATE ... WHERE state=:from）；[transition] 在认领成功后
+ * 以 [mutate] 改写整行并写回新状态。
+ */
+interface SeedancePipelineStore {
+    suspend fun getById(id: Long): SeedanceVideo?
+    suspend fun claim(id: Long, from: SeedanceVideoState, to: SeedanceVideoState): Boolean
+    suspend fun update(video: SeedanceVideo)
+    suspend fun transition(
+        id: Long,
+        from: SeedanceVideoState,
+        to: SeedanceVideoState,
+        mutate: (SeedanceVideo) -> SeedanceVideo,
+    ): Boolean
+
+    suspend fun listRecoverable(now: Long): List<SeedanceVideo>
+    suspend fun listByStates(states: Set<SeedanceVideoState>): List<SeedanceVideo>
+}
+
+/**
+ * 生产装配：把既有 [SeedanceVideoRepository] 适配为 [SeedancePipelineStore]。
+ *
+ * [transition] 复用仓库的 `claim`（原子 CAS）+ `getById` + `update`：认领成功后本 Worker
+ * 独占该阶段，其它 Worker 的 claim 返回 false 即放弃。
+ */
+class SeedanceRepositoryPipelineStore(
+    private val repository: SeedanceVideoRepository,
+) : SeedancePipelineStore {
+    override suspend fun getById(id: Long): SeedanceVideo? = repository.getById(id)
+    override suspend fun claim(id: Long, from: SeedanceVideoState, to: SeedanceVideoState): Boolean =
+        repository.claim(id, from, to)
+    override suspend fun update(video: SeedanceVideo) = repository.update(video)
+    override suspend fun transition(
+        id: Long,
+        from: SeedanceVideoState,
+        to: SeedanceVideoState,
+        mutate: (SeedanceVideo) -> SeedanceVideo,
+    ): Boolean {
+        if (!repository.claim(id, from, to)) return false
+        val current = repository.getById(id) ?: return false
+        repository.update(mutate(current.copy(state = to)))
+        return true
+    }
+
+    override suspend fun listRecoverable(now: Long): List<SeedanceVideo> =
+        repository.listRecoverable(now)
+
+    override suspend fun listByStates(states: Set<SeedanceVideoState>): List<SeedanceVideo> =
+        repository.observeAll().first().filter { it.state in states }
+}
+
+/** 远端任务提交（包装 [com.chatbyyourside.data.remote.SeedanceClient]）。 */
+interface SeedanceSubmitter {
+    suspend fun create(config: SeedanceConfig, request: CreateSeedanceTask): SeedanceTaskResponse
+    suspend fun get(config: SeedanceConfig, taskId: String): SeedanceTaskResponse
+    suspend fun cancel(config: SeedanceConfig, taskId: String): SeedanceTaskResponse
+}
+
+/** 远端视频流（下载后由 [SeedanceVideoFileStore] 消费并关闭）。 */
+class SeedanceVideoDownload(
+    val mime: String?,
+    val contentLength: Long?,
+    val stream: InputStream,
+    private val onClose: () -> Unit = {},
+) : AutoCloseable {
+    override fun close() = onClose()
+}
+
+/** 视频下载器（打开远端 URL 流；失败返回 null）。 */
+fun interface SeedanceVideoDownloader {
+    suspend fun download(url: String): SeedanceVideoDownload?
+}
+
+/** 参考图快照函数（= [SeedanceReferenceStore.snapshot] 的窄化签名）。 */
+fun interface SeedanceReferenceSnapshooter {
+    suspend fun snapshot(
+        taskUuid: String,
+        character: Character,
+        builtInAssetPath: String?,
+        backgroundImagePath: String?,
+    ): Result<SeedanceReferenceSnapshot>
+}
+
+/** 快照来源解析结果（把 outbox 来源快照解析为参考图仓库所需入参）。 */
+data class SeedanceSnapshotSources(
+    val character: Character,
+    val builtInAssetPath: String?,
+    val backgroundImagePath: String?,
+)
+
+/** 快照来源解析：outbox 的 `characterImageSourceSnapshot`/`backgroundImageSourceSnapshot` -> 入参。 */
+fun interface SeedanceSnapshotSourceResolver {
+    suspend fun resolve(task: SeedanceVideo): SeedanceSnapshotSources?
+}
+
+/** 参考图编码：内部文件路径 + MIME -> base64 图片内容。 */
+fun interface SeedanceImageEncoder {
+    suspend fun encode(path: String, mime: String): SeedanceImageContent
+}
+
+/** 提示词生成（= [SeedancePromptGenerator.generate] 的窄化签名）。 */
+fun interface SeedancePromptProvider {
+    suspend fun generate(apiConfig: ApiConfig, input: SeedancePromptInput): SeedancePromptDocument
+}
+
+/** 提交歧义错误码（POST 可能已到服务端但未持久化任务 ID，绝不自动重发）。 */
+const val ERROR_CODE_AMBIGUOUS_POST = "AMBIGUOUS_POST"
+
+/** 视频签名 URL 预估有效期（Seedance 返回的签名地址通常约 1 小时）。 */
+private const val URL_TTL_MILLIS = 60 * 60_000L
+
+private const val STAGE_SNAPSHOT = "SNAPSHOT"
+private const val STAGE_PROMPT = "PROMPT"
+private const val STAGE_SUBMIT = "SUBMIT"
+private const val STAGE_REMOTE = "REMOTE"
+private const val STAGE_QUERY = "QUERY"
+private const val STAGE_DOWNLOAD = "DOWNLOAD"
+
+/**
+ * Seedance 视频流水线协调器（Task 6 状态机核心，纯 JVM 可测）。
+ *
+ * 单次 [advance] 根据当前状态推进一个阶段；阶段所有权靠 [SeedancePipelineStore.claim] 的
+ * CAS 保证（同一阶段仅一个 Worker 认领成功）。不依赖 Room/Android，全部副作用经注入接口。
+ *
+ * 关键不变量：
+ * - 提示词生成前先过「配置变更门禁」：当前 ApiConfig 与任务快照不一致时拒绝静默换模型；
+ * - POST 前持久化 SUBMITTING/submissionAttemptId/submissionStartedAt/requestFingerprint，
+ *   提交歧义（AMBIGUOUS_TRANSPORT）置 FAILED_SUBMISSION/AMBIGUOUS_POST + requiresCostConfirmation，
+ *   **绝不自动重发**；
+ * - GET/下载的瞬时失败按 [SeedanceRetryPolicy] 有界退避；远端模型失败/过期只等用户确认；
+ * - READY 仅在成品经原子改名 + 哈希校验后置位，重复 Worker 识别既有成品即幂等 READY。
+ */
+class SeedancePipelineCoordinator(
+    private val store: SeedancePipelineStore,
+    private val submitter: SeedanceSubmitter,
+    private val promptProvider: SeedancePromptProvider,
+    private val snapshooter: SeedanceReferenceSnapshooter,
+    private val resolveSnapshotSources: SeedanceSnapshotSourceResolver,
+    private val downloadVideo: SeedanceVideoDownloader,
+    private val fileStore: SeedanceVideoFileStore,
+    private val encoder: SeedanceImageEncoder,
+    private val apiConfigProvider: suspend () -> ApiConfig,
+    private val seedanceConfigProvider: suspend () -> SeedanceConfig,
+    private val clock: () -> Long = { System.currentTimeMillis() },
+    private val idGenerator: () -> String = { newAttemptId(clock()) },
+    private val retryPolicy: SeedanceRetryPolicy = SeedanceRetryPolicy(),
+) {
+
+    private val promptJson = Json { encodeDefaults = true }
+
+    /** 推进任务一个阶段。 */
+    suspend fun advance(taskId: Long): PipelineOutcome {
+        val task = store.getById(taskId) ?: return PipelineOutcome.Complete
+        return when (task.state) {
+            SeedanceVideoState.SNAPSHOT_PENDING -> advanceSnapshot(task)
+            SeedanceVideoState.PROMPT_PENDING -> advancePrompt(task)
+            SeedanceVideoState.SUBMISSION_PENDING -> advanceSubmission(task)
+            SeedanceVideoState.QUEUED, SeedanceVideoState.RUNNING, SeedanceVideoState.CANCEL_REQUESTED -> advancePoll(task)
+            SeedanceVideoState.DOWNLOAD_PENDING -> advanceDownload(task)
+            // 进行中状态由「拥有者 Worker」独占推进；被并发/重复 Worker 碰到时不做任何事
+            // （复位只在启动恢复 [normalizeStaleInProgress] 中做，避免误复位在途工作）。
+            SeedanceVideoState.PROMPTING,
+            SeedanceVideoState.SUBMITTING,
+            SeedanceVideoState.DOWNLOADING,
+            -> PipelineOutcome.Complete
+            SeedanceVideoState.READY, SeedanceVideoState.CANCELLED -> PipelineOutcome.Complete
+            else -> PipelineOutcome.WaitingForUser
+        }
+    }
+
+    /** 进程中断恢复：把残留的进行中状态复位，使其可被自动认领。 */
+    suspend fun normalizeStaleInProgress() {
+        store.listByStates(setOf(SeedanceVideoState.PROMPTING)).forEach { stale ->
+            store.claim(stale.id, SeedanceVideoState.PROMPTING, SeedanceVideoState.PROMPT_PENDING)
+        }
+        store.listByStates(setOf(SeedanceVideoState.DOWNLOADING)).forEach { stale ->
+            store.claim(stale.id, SeedanceVideoState.DOWNLOADING, SeedanceVideoState.DOWNLOAD_PENDING)
+        }
+        store.listByStates(setOf(SeedanceVideoState.SUBMITTING)).forEach { stale ->
+            store.transition(stale.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
+                it.copy(errorStage = STAGE_SUBMIT, errorCode = ERROR_CODE_AMBIGUOUS_POST,
+                    errorMessage = "提交中断，无法确认任务是否已创建，请确认后重试",
+                    requiresCostConfirmation = true, retryDisposition = "ambiguous_post")
+            }
+        }
+    }
+
+    // ===== 快照 =====
+
+    private suspend fun advanceSnapshot(task: SeedanceVideo): PipelineOutcome {
+        val sources = resolveSnapshotSources.resolve(task)
+            ?: return fail(task, SeedanceVideoState.SNAPSHOT_PENDING, SeedanceVideoState.FAILED_SNAPSHOT,
+                STAGE_SNAPSHOT, "CHARACTER_MISSING", "缺少角色立绘图片（角色可能已被删除），无法生成视频")
+
+        val snapshot = snapshooter.snapshot(
+            task.taskUuid, sources.character, sources.builtInAssetPath, sources.backgroundImagePath,
+        ).getOrElse { e ->
+            return fail(task, SeedanceVideoState.SNAPSHOT_PENDING, SeedanceVideoState.FAILED_SNAPSHOT,
+                STAGE_SNAPSHOT, "SNAPSHOT_FAILED", e.message ?: "参考图快照复制失败")
+        }
+
+        // 先写回参考图字段（幂等），再 CAS 推进状态；崩溃后仍在 SNAPSHOT_PENDING 可重跑。
+        val fresh = store.getById(task.id) ?: return PipelineOutcome.Complete
+        if (fresh.state != SeedanceVideoState.SNAPSHOT_PENDING) return PipelineOutcome.Reschedule(0)
+        store.update(fresh.copy(
+            characterImagePath = snapshot.characterPath,
+            characterImageMime = snapshot.characterMime,
+            characterImageSha256 = snapshot.characterSha256,
+            backgroundImagePath = snapshot.backgroundPath,
+            backgroundImageMime = snapshot.backgroundMime,
+            backgroundImageSha256 = snapshot.backgroundSha256,
+            errorStage = null, errorCode = null, errorMessage = null, nextRetryAt = null,
+        ))
+        store.claim(task.id, SeedanceVideoState.SNAPSHOT_PENDING, SeedanceVideoState.PROMPT_PENDING)
+        return PipelineOutcome.Reschedule(0)
+    }
+
+    // ===== 提示词 =====
+
+    private suspend fun advancePrompt(task: SeedanceVideo): PipelineOutcome {
+        if (!store.claim(task.id, SeedanceVideoState.PROMPT_PENDING, SeedanceVideoState.PROMPTING)) {
+            return PipelineOutcome.Reschedule(0)
+        }
+        val apiConfig = apiConfigProvider()
+
+        // 配置变更门禁：当前基地址/模型与任务快照不一致时拒绝静默换模型。
+        if (apiConfig.baseUrl != task.promptBaseUrlSnapshot || apiConfig.model != task.promptModelSnapshot) {
+            store.transition(task.id, SeedanceVideoState.PROMPTING, SeedanceVideoState.FAILED_PROMPT_CONFIG_CHANGED) {
+                it.copy(errorStage = STAGE_PROMPT, errorCode = "CONFIG_CHANGED",
+                    errorMessage = "模型/服务地址已变更，请确认后重试", retryDisposition = "manual")
+            }
+            return PipelineOutcome.WaitingForUser
+        }
+        if (apiConfig.apiKey.isBlank()) {
+            store.transition(task.id, SeedanceVideoState.PROMPTING, SeedanceVideoState.FAILED_PROMPT) {
+                it.copy(errorStage = STAGE_PROMPT, errorCode = "MISSING_API_KEY",
+                    errorMessage = "未配置模型 API Key，无法生成提示词", retryDisposition = "manual")
+            }
+            return PipelineOutcome.WaitingForUser
+        }
+
+        val doc = try {
+            promptProvider.generate(apiConfig, buildPromptInput(task))
+        } catch (e: SeedancePromptParseException) {
+            store.transition(task.id, SeedanceVideoState.PROMPTING, SeedanceVideoState.FAILED_PROMPT) {
+                it.copy(errorStage = STAGE_PROMPT, errorCode = "PROMPT_PARSE",
+                    errorMessage = e.message ?: "提示词生成失败", retryDisposition = "manual")
+            }
+            return PipelineOutcome.WaitingForUser
+        } catch (e: Exception) {
+            return retryTransient(task, SeedanceVideoState.PROMPTING, SeedanceVideoState.PROMPT_PENDING,
+                SeedanceVideoState.FAILED_PROMPT, STAGE_PROMPT, "PROMPT_TRANSIENT", e.message)
+        }
+
+        val docJson = promptJson.encodeToString(SeedancePromptDocument.serializer(), doc)
+        store.transition(task.id, SeedanceVideoState.PROMPTING, SeedanceVideoState.SUBMISSION_PENDING) {
+            it.copy(promptJson = docJson, finalPrompt = doc.finalPrompt,
+                errorStage = null, errorCode = null, errorMessage = null, nextRetryAt = null)
+        }
+        return PipelineOutcome.Reschedule(0)
+    }
+
+    private fun buildPromptInput(task: SeedanceVideo): SeedancePromptInput = SeedancePromptInput(
+        characterName = task.characterNameSnapshot,
+        characterRole = task.characterRoleSnapshot,
+        characterSystemPrompt = task.characterSystemPromptSnapshot,
+        userText = task.userTextSnapshot,
+        assistantText = task.assistantTextSnapshot,
+        sceneDescription = task.sceneDescriptionSnapshot,
+        variant = task.modelVariant,
+        resolution = task.resolution,
+        ratio = task.ratio,
+        durationSeconds = task.durationSeconds,
+    )
+
+    // ===== 提交 =====
+
+    private suspend fun advanceSubmission(task: SeedanceVideo): PipelineOutcome {
+        if (!store.claim(task.id, SeedanceVideoState.SUBMISSION_PENDING, SeedanceVideoState.SUBMITTING)) {
+            return PipelineOutcome.Reschedule(0)
+        }
+        val config = seedanceConfigProvider()
+
+        val validation = validateSeedanceRequest(config, task.characterImagePath.orEmpty())
+        if (validation is SeedanceValidationResult.Invalid) {
+            store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
+                it.copy(errorStage = STAGE_SUBMIT, errorCode = "INVALID_REQUEST",
+                    errorMessage = validation.message, retryDisposition = "manual")
+            }
+            return PipelineOutcome.WaitingForUser
+        }
+        val charPath = task.characterImagePath
+        val charMime = task.characterImageMime
+        val charSha = task.characterImageSha256
+        if (charPath.isNullOrBlank() || charMime.isNullOrBlank() || charSha.isNullOrBlank()) {
+            store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
+                it.copy(errorStage = STAGE_SUBMIT, errorCode = "MISSING_REFERENCE",
+                    errorMessage = "参考图快照缺失，无法提交", retryDisposition = "manual")
+            }
+            return PipelineOutcome.WaitingForUser
+        }
+        val finalPrompt = task.finalPrompt
+        if (finalPrompt.isNullOrBlank()) {
+            store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
+                it.copy(errorStage = STAGE_SUBMIT, errorCode = "MISSING_PROMPT",
+                    errorMessage = "最终提示词缺失，无法提交", retryDisposition = "manual")
+            }
+            return PipelineOutcome.WaitingForUser
+        }
+
+        val attemptId = idGenerator()
+        val startedAt = clock()
+        val fingerprint = requestFingerprint(task, finalPrompt)
+
+        // 先持久化 SUBMITTING 元数据，再真正提交（进程若在此后死亡，恢复流程按歧义处理）。
+        store.getById(task.id)?.let { fresh ->
+            store.update(fresh.copy(
+                submissionAttemptId = attemptId, submissionStartedAt = startedAt, requestFingerprint = fingerprint,
+            ))
+        }
+
+        val request = CreateSeedanceTask(
+            finalPrompt = finalPrompt,
+            character = encoder.encode(charPath, charMime),
+            background = task.backgroundImagePath?.takeIf { it.isNotBlank() }?.let { path ->
+                encoder.encode(path, task.backgroundImageMime ?: charMime)
+            },
+            variant = task.modelVariant,
+            resolution = task.resolution,
+            ratio = task.ratio,
+            durationSeconds = task.durationSeconds,
+            watermark = task.watermark,
+        )
+
+        val response = try {
+            submitter.create(config, request)
+        } catch (e: SeedanceApiException) {
+            return handleSubmitFailure(task, e, attemptId, startedAt, fingerprint)
+        } catch (e: Exception) {
+            return handleSubmitFailure(
+                task, SeedanceApiException(SeedanceError.AMBIGUOUS_TRANSPORT, "网络错误，无法确认任务状态"),
+                attemptId, startedAt, fingerprint,
+            )
+        }
+
+        // 成功但未返回任务 ID：无法管理，按歧义处理（可能已产生费用）。
+        if (response.id.isNullOrBlank()) {
+            store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
+                it.copy(errorStage = STAGE_SUBMIT, errorCode = ERROR_CODE_AMBIGUOUS_POST,
+                    errorMessage = "服务端未返回任务 ID，请确认是否已产生费用",
+                    requiresCostConfirmation = true, retryDisposition = "ambiguous_post",
+                    submissionAttemptId = attemptId, submissionStartedAt = startedAt, requestFingerprint = fingerprint)
+            }
+            return PipelineOutcome.WaitingForUser
+        }
+
+        // 提交阶段已 CAS 认领 SUBMISSION_PENDING->SUBMITTING，此处以 SUBMITTING 作为后续状态
+        // 转换的起点（applyRemoteStatus 用 task.state 作 `from`，不能用陈旧的读值）。
+        return applyRemoteStatus(task.copy(state = SeedanceVideoState.SUBMITTING), response)
+    }
+
+    private suspend fun handleSubmitFailure(
+        task: SeedanceVideo,
+        e: SeedanceApiException,
+        attemptId: String,
+        startedAt: Long,
+        fingerprint: String,
+    ): PipelineOutcome {
+        val code = if (e.classification == SeedanceError.AMBIGUOUS_TRANSPORT) ERROR_CODE_AMBIGUOUS_POST else e.classification.name
+        return when (e.classification) {
+            SeedanceError.AMBIGUOUS_TRANSPORT -> {
+                // 歧义：POST 可能已到服务端，绝不自动重发。
+                store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
+                    it.copy(errorStage = STAGE_SUBMIT, errorCode = ERROR_CODE_AMBIGUOUS_POST,
+                        errorMessage = e.message, requiresCostConfirmation = true,
+                        retryDisposition = "ambiguous_post",
+                        submissionAttemptId = attemptId, submissionStartedAt = startedAt, requestFingerprint = fingerprint)
+                }
+                PipelineOutcome.WaitingForUser
+            }
+            SeedanceError.TRANSIENT_429_5XX -> {
+                // 明确 429/5xx 未受理：有界自动重试。
+                val delay = retryPolicy.retryDelayMillis(task.automaticRetryCount)
+                if (delay == null) {
+                    store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
+                        it.copy(errorStage = STAGE_SUBMIT, errorCode = code,
+                            errorMessage = e.message, retryDisposition = "manual")
+                    }
+                    PipelineOutcome.WaitingForUser
+                } else {
+                    store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.SUBMISSION_PENDING) {
+                        it.copy(nextRetryAt = clock() + delay, automaticRetryCount = it.automaticRetryCount + 1,
+                            errorStage = STAGE_SUBMIT, errorCode = code,
+                            errorMessage = e.message, retryDisposition = "bounded_retry")
+                    }
+                    PipelineOutcome.Reschedule(delay)
+                }
+            }
+            else -> {
+                // 明确 4xx / 敏感 / 配额等：非歧义失败，不自动重发。
+                store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
+                    it.copy(errorStage = STAGE_SUBMIT, errorCode = code,
+                        errorMessage = e.message, retryDisposition = "manual",
+                        submissionAttemptId = attemptId, submissionStartedAt = startedAt, requestFingerprint = fingerprint)
+                }
+                PipelineOutcome.WaitingForUser
+            }
+        }
+    }
+
+    // ===== 轮询 / 取消 =====
+
+    private suspend fun advancePoll(task: SeedanceVideo): PipelineOutcome {
+        val config = seedanceConfigProvider()
+        val remoteId = task.remoteTaskId
+        if (remoteId.isNullOrBlank()) {
+            return fail(task, task.state, SeedanceVideoState.FAILED_SUBMISSION,
+                STAGE_SUBMIT, ERROR_CODE_AMBIGUOUS_POST, "缺少远端任务 ID", costConfirmation = true)
+        }
+        // 取消请求：再次确认取消（仅 queued 可取消），随后一律以服务端状态为准。
+        if (task.state == SeedanceVideoState.CANCEL_REQUESTED) {
+            try { submitter.cancel(config, remoteId) } catch (_: Exception) { /* GET 兜底 */ }
+        }
+        val response = try {
+            submitter.get(config, remoteId)
+        } catch (e: SeedanceApiException) {
+            return handlePollFailure(task, e)
+        } catch (e: Exception) {
+            return handlePollFailure(task, SeedanceApiException(SeedanceError.AMBIGUOUS_TRANSPORT, "网络错误"))
+        }
+        return applyRemoteStatus(task, response)
+    }
+
+    private suspend fun handlePollFailure(task: SeedanceVideo, e: SeedanceApiException): PipelineOutcome {
+        val delay = retryPolicy.retryDelayMillis(task.automaticRetryCount)
+        if (delay == null) {
+            store.transition(task.id, task.state, SeedanceVideoState.FAILED_QUERY) {
+                it.copy(errorStage = STAGE_QUERY, errorCode = e.classification.name,
+                    errorMessage = e.message, retryDisposition = "manual")
+            }
+            return PipelineOutcome.WaitingForUser
+        }
+        updateFields(task.id) {
+            it.copy(nextRetryAt = clock() + delay, automaticRetryCount = it.automaticRetryCount + 1,
+                errorStage = STAGE_QUERY, errorCode = e.classification.name,
+                errorMessage = e.message, retryDisposition = "bounded_retry")
+        }
+        return PipelineOutcome.Reschedule(delay)
+    }
+
+    /** 依据远端状态推进（提交成功后 / 轮询后共用）；取消竞态以服务端状态为准。 */
+    private suspend fun applyRemoteStatus(task: SeedanceVideo, response: SeedanceTaskResponse): PipelineOutcome {
+        val remoteId = response.id ?: task.remoteTaskId
+        val status = response.remoteStatus ?: SeedanceRemoteStatus.FAILED
+        fun SeedanceVideo.withRemote() = copy(
+            remoteTaskId = remoteId,
+            remoteStatus = status.storageKey,
+            remoteRequestId = response.requestId ?: remoteRequestId,
+            nextRetryAt = null, errorStage = null, errorCode = null, errorMessage = null,
+        )
+
+        return when (status) {
+            SeedanceRemoteStatus.QUEUED -> {
+                when (task.state) {
+                    SeedanceVideoState.CANCEL_REQUESTED -> updateFields(task.id) { it.withRemote() }
+                    SeedanceVideoState.QUEUED -> updateFields(task.id) { it.withRemote() }
+                    else -> store.transition(task.id, task.state, SeedanceVideoState.QUEUED) { it.withRemote() }
+                }
+                PipelineOutcome.Reschedule(SeedanceRetryPolicy.POLL_INTERVAL_MILLIS)
+            }
+            SeedanceRemoteStatus.RUNNING -> {
+                if (task.state == SeedanceVideoState.RUNNING) updateFields(task.id) { it.withRemote() }
+                else store.transition(task.id, task.state, SeedanceVideoState.RUNNING) { it.withRemote() }
+                PipelineOutcome.Reschedule(SeedanceRetryPolicy.POLL_INTERVAL_MILLIS)
+            }
+            SeedanceRemoteStatus.SUCCEEDED -> {
+                val url = response.output?.videoUrl
+                if (url.isNullOrBlank()) {
+                    if (task.state == SeedanceVideoState.CANCEL_REQUESTED) updateFields(task.id) { it.withRemote() }
+                    else store.transition(task.id, task.state, SeedanceVideoState.QUEUED) { it.withRemote() }
+                    PipelineOutcome.Reschedule(SeedanceRetryPolicy.POLL_INTERVAL_MILLIS)
+                } else {
+                    store.transition(task.id, task.state, SeedanceVideoState.DOWNLOAD_PENDING) {
+                        it.withRemote().copy(
+                            remoteVideoUrl = url,
+                            remoteVideoUrlObservedAt = clock(),
+                            remoteVideoUrlExpiresAt = clock() + URL_TTL_MILLIS,
+                        )
+                    }
+                    PipelineOutcome.Reschedule(0)
+                }
+            }
+            SeedanceRemoteStatus.CANCELLED -> {
+                store.transition(task.id, task.state, SeedanceVideoState.CANCELLED) { it.withRemote() }
+                PipelineOutcome.Complete
+            }
+            SeedanceRemoteStatus.FAILED -> {
+                store.transition(task.id, task.state, SeedanceVideoState.FAILED_REMOTE) {
+                    it.withRemote().copy(errorStage = STAGE_REMOTE, errorCode = "REMOTE_FAILED",
+                        errorMessage = "远端视频生成失败", retryDisposition = "manual")
+                }
+                PipelineOutcome.WaitingForUser
+            }
+            SeedanceRemoteStatus.EXPIRED -> {
+                store.transition(task.id, task.state, SeedanceVideoState.EXPIRED) {
+                    it.withRemote().copy(errorStage = STAGE_REMOTE, errorCode = "EXPIRED",
+                        errorMessage = "远端视频任务已过期", retryDisposition = "manual")
+                }
+                PipelineOutcome.WaitingForUser
+            }
+        }
+    }
+
+    // ===== 下载 =====
+
+    private suspend fun advanceDownload(task: SeedanceVideo): PipelineOutcome {
+        val url = task.remoteVideoUrl
+        if (url.isNullOrBlank()) {
+            store.transition(task.id, SeedanceVideoState.DOWNLOAD_PENDING, SeedanceVideoState.QUEUED) {
+                it.copy(errorStage = null, errorCode = null, errorMessage = null)
+            }
+            return PipelineOutcome.Reschedule(SeedanceRetryPolicy.POLL_INTERVAL_MILLIS)
+        }
+        // URL 过期：需用户确认后重新提交。
+        val expiresAt = task.remoteVideoUrlExpiresAt
+        if (expiresAt != null && clock() >= expiresAt) {
+            store.transition(task.id, SeedanceVideoState.DOWNLOAD_PENDING, SeedanceVideoState.EXPIRED) {
+                it.copy(errorStage = STAGE_REMOTE, errorCode = "URL_EXPIRED",
+                    errorMessage = "视频下载地址已过期，请重新生成", retryDisposition = "manual")
+            }
+            return PipelineOutcome.WaitingForUser
+        }
+        // 已有校验通过的成品 -> 幂等 READY。
+        val expectedSha = task.videoSha256
+        if (expectedSha != null) {
+            val existing = fileStore.verifyExisting(task.taskUuid, expectedSha)
+            if (existing != null) {
+                store.transition(task.id, SeedanceVideoState.DOWNLOAD_PENDING, SeedanceVideoState.READY) {
+                    it.copy(localVideoPath = existing.path, videoMime = existing.mime,
+                        videoByteSize = existing.byteSize, videoSha256 = existing.sha256,
+                        downloadedAt = clock(), errorStage = null, errorCode = null,
+                        errorMessage = null, nextRetryAt = null)
+                }
+                return PipelineOutcome.Complete
+            }
+        }
+
+        if (!store.claim(task.id, SeedanceVideoState.DOWNLOAD_PENDING, SeedanceVideoState.DOWNLOADING)) {
+            return PipelineOutcome.Reschedule(0)
+        }
+        val download = try { downloadVideo.download(url) } catch (e: Exception) { null }
+        if (download == null) {
+            return retryTransient(task, SeedanceVideoState.DOWNLOADING, SeedanceVideoState.DOWNLOAD_PENDING,
+                SeedanceVideoState.FAILED_DOWNLOAD, STAGE_DOWNLOAD, "DOWNLOAD_TRANSIENT", "视频下载失败")
+        }
+        return download.use {
+            val saved = fileStore.save(task.taskUuid, download.mime, download.contentLength, download.stream)
+                .getOrElse { e ->
+                    store.transition(task.id, SeedanceVideoState.DOWNLOADING, SeedanceVideoState.FAILED_DOWNLOAD) {
+                        it.copy(errorStage = STAGE_DOWNLOAD, errorCode = "DOWNLOAD_FAILED",
+                            errorMessage = e.message ?: "视频下载失败", retryDisposition = "manual")
+                    }
+                    return PipelineOutcome.WaitingForUser
+                }
+            store.transition(task.id, SeedanceVideoState.DOWNLOADING, SeedanceVideoState.READY) {
+                it.copy(localVideoPath = saved.path, videoMime = saved.mime,
+                    videoByteSize = saved.byteSize, videoSha256 = saved.sha256,
+                    downloadedAt = clock(), errorStage = null, errorCode = null,
+                    errorMessage = null, nextRetryAt = null)
+            }
+            PipelineOutcome.Complete
+        }
+    }
+
+    // ===== 通用 =====
+
+    private suspend fun fail(
+        task: SeedanceVideo,
+        from: SeedanceVideoState,
+        to: SeedanceVideoState,
+        stage: String,
+        code: String,
+        message: String,
+        costConfirmation: Boolean = false,
+    ): PipelineOutcome {
+        store.transition(task.id, from, to) {
+            it.copy(errorStage = stage, errorCode = code, errorMessage = message,
+                retryDisposition = "manual",
+                requiresCostConfirmation = it.requiresCostConfirmation || costConfirmation,
+                nextRetryAt = null)
+        }
+        return PipelineOutcome.WaitingForUser
+    }
+
+    private suspend fun retryTransient(
+        task: SeedanceVideo,
+        from: SeedanceVideoState,
+        backTo: SeedanceVideoState,
+        exhaustedState: SeedanceVideoState,
+        stage: String,
+        code: String,
+        message: String?,
+    ): PipelineOutcome {
+        val delay = retryPolicy.retryDelayMillis(task.automaticRetryCount)
+        if (delay == null) {
+            store.transition(task.id, from, exhaustedState) {
+                it.copy(errorStage = stage, errorCode = code,
+                    errorMessage = message ?: "操作失败", retryDisposition = "manual")
+            }
+            return PipelineOutcome.WaitingForUser
+        }
+        store.transition(task.id, from, backTo) {
+            it.copy(nextRetryAt = clock() + delay, automaticRetryCount = it.automaticRetryCount + 1,
+                errorStage = stage, errorCode = code,
+                errorMessage = message, retryDisposition = "bounded_retry")
+        }
+        return PipelineOutcome.Reschedule(delay)
+    }
+
+    private suspend fun updateFields(taskId: Long, mutate: (SeedanceVideo) -> SeedanceVideo) {
+        store.getById(taskId)?.let { store.update(mutate(it)) }
+    }
+
+    private fun requestFingerprint(task: SeedanceVideo, finalPrompt: String): String {
+        val material = listOf(
+            finalPrompt, task.modelVariant.storageKey, task.resolution.storageKey, task.ratio.storageKey,
+            task.durationSeconds.toString(), task.watermark.toString(),
+            task.characterImageSha256.orEmpty(), task.backgroundImageSha256.orEmpty(),
+        ).joinToString("|")
+        return sha256Hex(material.toByteArray(Charsets.UTF_8))
+    }
+}
+
+/** 提交尝试 ID：单调时间戳 + 随机十六进制后缀（不依赖 java.util.UUID）。 */
+internal fun newAttemptId(now: Long): String =
+    "$now-" + (1..16).joinToString("") { "0123456789abcdef"[kotlin.random.Random.nextInt(16)].toString() }
+
+/** SHA-256 -> 小写十六进制。 */
+private fun sha256Hex(bytes: ByteArray): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+    return digest.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+}

@@ -1,0 +1,524 @@
+package com.chatbyyourside.video
+
+import com.chatbyyourside.data.model.ApiConfig
+import com.chatbyyourside.data.model.Character
+import com.chatbyyourside.data.model.SeedanceConfig
+import com.chatbyyourside.data.model.SeedanceModelVariant
+import com.chatbyyourside.data.model.SeedanceRatio
+import com.chatbyyourside.data.model.SeedanceResolution
+import com.chatbyyourside.data.model.SeedanceVideo
+import com.chatbyyourside.data.model.SeedanceVideoState
+import com.chatbyyourside.data.remote.CreateSeedanceTask
+import com.chatbyyourside.data.remote.SeedanceApiException
+import com.chatbyyourside.data.remote.SeedanceError
+import com.chatbyyourside.data.remote.SeedanceImageContent
+import com.chatbyyourside.data.remote.SeedanceTaskOutput
+import com.chatbyyourside.data.remote.SeedanceTaskResponse
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.IOException
+
+/**
+ * [SeedancePipelineCoordinator] 状态机契约测试（Task 6，纯 JVM，假 store/submitter/llm/clock）。
+ *
+ * 覆盖：CAS 单胜者、提示词重试、配置变更门禁、POST 歧义（不自动重发 + requiresCostConfirmation）、
+ * 排队->运行->下载轮询、取消竞态、下载->READY 仅限有效最终文件、进程死亡（SUBMITTING/DOWNLOADING 复位）、
+ * 残留 .part、URL 过期、磁盘满、既有有效成品幂等 READY。
+ */
+class SeedancePipelineCoordinatorTest {
+
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    // ===== 测试装配 =====
+
+    private class FakeStore(initial: SeedanceVideo) : SeedancePipelineStore {
+        private val lock = Any()
+        private val rows = mutableMapOf(initial.id to initial)
+        fun current(id: Long): SeedanceVideo = rows.getValue(id)
+
+        override suspend fun getById(id: Long): SeedanceVideo? = synchronized(lock) { rows[id] }
+        override suspend fun claim(id: Long, from: SeedanceVideoState, to: SeedanceVideoState): Boolean =
+            synchronized(lock) {
+                val row = rows[id] ?: return false
+                if (row.state != from) return false
+                rows[id] = row.copy(state = to)
+                true
+            }
+        override suspend fun update(video: SeedanceVideo) {
+            synchronized(lock) { rows[video.id] = video }
+        }
+        override suspend fun transition(
+            id: Long,
+            from: SeedanceVideoState,
+            to: SeedanceVideoState,
+            mutate: (SeedanceVideo) -> SeedanceVideo,
+        ): Boolean = synchronized(lock) {
+            val row = rows[id] ?: return false
+            if (row.state != from) return false
+            rows[id] = mutate(row.copy(state = to))
+            true
+        }
+        override suspend fun listRecoverable(now: Long): List<SeedanceVideo> = synchronized(lock) {
+            rows.values.filter { it.state in RECOVERABLE && (it.nextRetryAt == null || it.nextRetryAt <= now) }
+        }
+        override suspend fun listByStates(states: Set<SeedanceVideoState>): List<SeedanceVideo> =
+            synchronized(lock) { rows.values.filter { it.state in states } }
+
+        companion object {
+            val RECOVERABLE = setOf(
+                SeedanceVideoState.SNAPSHOT_PENDING, SeedanceVideoState.PROMPT_PENDING,
+                SeedanceVideoState.SUBMISSION_PENDING, SeedanceVideoState.QUEUED,
+                SeedanceVideoState.RUNNING, SeedanceVideoState.CANCEL_REQUESTED,
+                SeedanceVideoState.DOWNLOAD_PENDING,
+            )
+        }
+    }
+
+    private class FakePromptProvider {
+        var invokeCount = 0
+        var failTransient: Throwable? = null
+        var failParse = false
+        var delayMillis = 0L
+        suspend fun generate(apiConfig: ApiConfig, input: SeedancePromptInput): SeedancePromptDocument {
+            invokeCount++
+            failTransient?.let { throw it }
+            if (failParse) throw SeedancePromptParseException("bad json")
+            if (delayMillis > 0) delay(delayMillis)
+            return SeedancePromptDocument(subject = "主体", action = "动作", environment = "环境", finalPrompt = "最终提示词")
+        }
+    }
+
+    private class FakeSnapshooter {
+        var fail = false
+        suspend fun snapshot(
+            taskUuid: String,
+            character: Character,
+            builtInAssetPath: String?,
+            backgroundImagePath: String?,
+        ): Result<SeedanceReferenceSnapshot> {
+            if (fail) return Result.failure(IllegalStateException("复制失败"))
+            return Result.success(SeedanceReferenceSnapshot(
+                characterPath = "/t/$taskUuid/references/character.png",
+                characterMime = "image/png",
+                characterSha256 = "character-sha",
+                backgroundPath = backgroundImagePath?.let { "/t/$taskUuid/references/background.png" },
+                backgroundMime = backgroundImagePath?.let { "image/png" },
+                backgroundSha256 = backgroundImagePath?.let { "background-sha" },
+            ))
+        }
+    }
+
+    private class FakeSubmitter : SeedanceSubmitter {
+        var createCount = 0
+        var createResult: (() -> SeedanceTaskResponse)? = null
+        var createError: (() -> Throwable)? = null
+        var getResult: (() -> SeedanceTaskResponse)? = null
+        var getError: (() -> Throwable)? = null
+        var cancelCount = 0
+
+        override suspend fun create(config: SeedanceConfig, request: CreateSeedanceTask): SeedanceTaskResponse {
+            createCount++
+            createError?.let { throw it() }
+            return createResult?.invoke() ?: SeedanceTaskResponse(id = "remote-1", status = "queued")
+        }
+        override suspend fun get(config: SeedanceConfig, taskId: String): SeedanceTaskResponse {
+            getError?.let { throw it() }
+            return getResult?.invoke() ?: SeedanceTaskResponse(id = taskId, status = "queued")
+        }
+        override suspend fun cancel(config: SeedanceConfig, taskId: String): SeedanceTaskResponse {
+            cancelCount++
+            return SeedanceTaskResponse(id = taskId, status = "cancelled")
+        }
+    }
+
+    private class FakeDownloader {
+        var bytes: ByteArray? = mp4TestBytes()
+        var mime: String? = "video/mp4"
+        var contentLength: Long? = null
+        suspend fun download(url: String): SeedanceVideoDownload? = bytes?.let {
+            SeedanceVideoDownload(mime, contentLength, ByteArrayInputStream(it))
+        }
+    }
+
+    private class FakeEncoder : SeedanceImageEncoder {
+        override suspend fun encode(path: String, mime: String): SeedanceImageContent =
+            SeedanceImageContent(mime, "base64-of-$path")
+    }
+
+    private class Env(initial: SeedanceVideo, root: File) {
+        var clockNow = 1_000_000L
+        val store = FakeStore(initial)
+        val submitter = FakeSubmitter()
+        val promptProvider = FakePromptProvider()
+        val snapshooter = FakeSnapshooter()
+        val downloader = FakeDownloader()
+        val encoder = FakeEncoder()
+        var apiConfig = ApiConfig(baseUrl = "https://api.deepseek.com/v1", apiKey = "sk-test", model = "deepseek-chat")
+        var seedanceConfig = SeedanceConfig(baseUrl = "https://ark.cn-beijing.volces.com/api/v3", apiKey = "sk-seedance")
+        val fileStore = SeedanceVideoFileStore(root) { clockNow }
+        val retryPolicy = SeedanceRetryPolicy(baseBackoffMillis = 1_000L, maxBackoffMillis = 4_000L)
+
+        val coordinator = SeedancePipelineCoordinator(
+            store = store,
+            submitter = submitter,
+            promptProvider = promptProvider::generate,
+            snapshooter = snapshooter::snapshot,
+            resolveSnapshotSources = SeedanceSnapshotSourceResolver { t ->
+                SeedanceSnapshotSources(
+                    character = Character(
+                        id = t.characterIdSnapshot, name = t.characterNameSnapshot, code = "c",
+                        role = t.characterRoleSnapshot, race = "r", systemPrompt = t.characterSystemPromptSnapshot,
+                    ),
+                    builtInAssetPath = "characters/neighbor.webp",
+                    backgroundImagePath = t.backgroundImageSourceSnapshot,
+                )
+            },
+            downloadVideo = downloader::download,
+            fileStore = fileStore,
+            encoder = encoder,
+            apiConfigProvider = { apiConfig },
+            seedanceConfigProvider = { seedanceConfig },
+            clock = { clockNow },
+            idGenerator = { "attempt-$clockNow" },
+            retryPolicy = retryPolicy,
+        )
+    }
+
+    // ===== 任务工厂 =====
+
+    private fun task(
+        id: Long = 1,
+        state: SeedanceVideoState = SeedanceVideoState.SNAPSHOT_PENDING,
+        promptBaseUrl: String = "https://api.deepseek.com/v1",
+        promptModel: String = "deepseek-chat",
+        characterImagePath: String? = null,
+        characterImageMime: String? = "image/png",
+        characterImageSha256: String? = "character-sha",
+        backgroundImagePath: String? = null,
+        finalPrompt: String? = null,
+        remoteTaskId: String? = null,
+        remoteVideoUrl: String? = null,
+        remoteVideoUrlExpiresAt: Long? = null,
+        videoSha256: String? = null,
+        automaticRetryCount: Int = 0,
+        nextRetryAt: Long? = null,
+    ): SeedanceVideo = SeedanceVideo(
+        id = id, taskUuid = "uuid-$id", triggerType = "auto",
+        sourceConversationId = 1, sourceUserMessageId = 1, sourceAssistantMessageId = id,
+        characterIdSnapshot = "neighbor", characterNameSnapshot = "邻居", characterRoleSnapshot = "角色",
+        characterSystemPromptSnapshot = "设定", userTextSnapshot = "你好", assistantTextSnapshot = "你好呀",
+        sceneDescriptionSnapshot = "", promptBaseUrlSnapshot = promptBaseUrl, promptModelSnapshot = promptModel,
+        promptJson = null, finalPrompt = finalPrompt,
+        characterImageSourceSnapshot = "characters/neighbor.webp",
+        backgroundImageSourceSnapshot = backgroundImagePath,
+        characterImagePath = characterImagePath, characterImageMime = characterImageMime, characterImageSha256 = characterImageSha256,
+        backgroundImagePath = backgroundImagePath, backgroundImageMime = backgroundImagePath?.let { "image/png" },
+        backgroundImageSha256 = backgroundImagePath?.let { "background-sha" },
+        modelVariant = SeedanceModelVariant.STANDARD, resolution = SeedanceResolution.P720, ratio = SeedanceRatio.PORTRAIT,
+        durationSeconds = 5, generateAudio = true, watermark = false,
+        state = state, remoteStatus = null, generationAttempt = 0,
+        submissionAttemptId = null, submissionStartedAt = null, requestFingerprint = null,
+        remoteTaskId = remoteTaskId, remoteVideoUrl = remoteVideoUrl,
+        remoteVideoUrlObservedAt = null, remoteVideoUrlExpiresAt = remoteVideoUrlExpiresAt,
+        remoteRequestId = null, previousRemoteTasksJson = "",
+        localVideoPath = null, videoMime = null, videoByteSize = null, videoSha256 = videoSha256, downloadedAt = null,
+        automaticRetryCount = automaticRetryCount, nextRetryAt = nextRetryAt,
+        errorStage = null, errorCode = null, errorMessage = null, retryDisposition = null,
+        requiresCostConfirmation = false, createdAt = 0, updatedAt = 0,
+    )
+
+    private fun env(state: SeedanceVideoState, config: SeedanceVideo.() -> SeedanceVideo = { this }): Env =
+        Env(task(state = state).config(), tmp.newFolder())
+
+    private val submitTask: SeedanceVideo.() -> SeedanceVideo = {
+        copy(
+            characterImagePath = "/t/refs/character.png", characterImageMime = "image/png",
+            characterImageSha256 = "character-sha", finalPrompt = "最终提示词",
+        )
+    }
+
+    // ===== 测试 =====
+
+    @Test
+    fun snapshotThenPrompt() = runBlocking {
+        val e = env(SeedanceVideoState.SNAPSHOT_PENDING)
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.PROMPT_PENDING, t.state)
+        assertEquals("character-sha", t.characterImageSha256)
+        assertNotNull(t.characterImagePath)
+    }
+
+    @Test
+    fun snapshotFailureTransitionsToFailedSnapshot() = runBlocking {
+        val e = env(SeedanceVideoState.SNAPSHOT_PENDING)
+        e.snapshooter.fail = true
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_SNAPSHOT, t.state)
+        assertEquals("SNAPSHOT", t.errorStage)
+    }
+
+    @Test
+    fun promptClaimSingleWinner() = runBlocking {
+        val e = env(SeedanceVideoState.PROMPT_PENDING)
+        e.promptProvider.delayMillis = 10L
+        val jobs = listOf(
+            launch { e.coordinator.advance(1) },
+            launch { e.coordinator.advance(1) },
+        )
+        jobs.forEach { it.join() }
+        assertEquals(1, e.promptProvider.invokeCount)
+        assertEquals(SeedanceVideoState.SUBMISSION_PENDING, e.store.current(1).state)
+        assertNotNull(e.store.current(1).finalPrompt)
+    }
+
+    @Test
+    fun transientPromptFailureSchedulesRetry() = runBlocking {
+        val e = env(SeedanceVideoState.PROMPT_PENDING)
+        e.promptProvider.failTransient = IOException("网络错误")
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.PROMPT_PENDING, t.state)
+        assertEquals(1, t.automaticRetryCount)
+        assertEquals(e.clockNow + 1_000L, t.nextRetryAt)
+        assertEquals("PROMPT", t.errorStage)
+    }
+
+    @Test
+    fun configChangedGateBlocksPrompt() = runBlocking {
+        val e = env(SeedanceVideoState.PROMPT_PENDING) { copy(promptBaseUrlSnapshot = "https://old", promptModelSnapshot = "old-model") }
+        e.apiConfig = ApiConfig(baseUrl = "https://new", apiKey = "sk", model = "new-model")
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_PROMPT_CONFIG_CHANGED, t.state)
+        assertEquals("PROMPT", t.errorStage)
+        assertEquals(0, e.promptProvider.invokeCount)
+    }
+
+    @Test
+    fun ambiguousPostNeverAutoResubmits() = runBlocking {
+        val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
+        e.submitter.createError = { SeedanceApiException(SeedanceError.AMBIGUOUS_TRANSPORT, "网络错误") }
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
+        assertEquals(ERROR_CODE_AMBIGUOUS_POST, t.errorCode)
+        assertTrue(t.requiresCostConfirmation)
+        assertEquals(1, e.submitter.createCount)
+        assertNotNull(t.submissionAttemptId)
+        assertNotNull(t.requestFingerprint)
+    }
+
+    @Test
+    fun clear4xxFailsSubmissionNotAmbiguous() = runBlocking {
+        val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
+        e.submitter.createError = { SeedanceApiException(SeedanceError.INVALID_PARAMETER, "参数不合法") }
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
+        assertEquals("INVALID_PARAMETER", t.errorCode)
+        assertFalse(t.requiresCostConfirmation)
+    }
+
+    @Test
+    fun transient429AutoRetriesSubmit() = runBlocking {
+        val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
+        e.submitter.createError = { SeedanceApiException(SeedanceError.TRANSIENT_429_5XX, "繁忙") }
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.SUBMISSION_PENDING, t.state)
+        assertEquals(1, t.automaticRetryCount)
+        assertFalse(t.requiresCostConfirmation)
+        // 重试成功
+        e.submitter.createError = null
+        e.submitter.createResult = { SeedanceTaskResponse(id = "remote-10", status = "queued") }
+        e.coordinator.advance(1)
+        assertEquals(SeedanceVideoState.QUEUED, e.store.current(1).state)
+    }
+
+    @Test
+    fun submitSuccessCreatesRemoteTask() = runBlocking {
+        val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
+        e.submitter.createResult = { SeedanceTaskResponse(id = "remote-9", status = "queued") }
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.QUEUED, t.state)
+        assertEquals("remote-9", t.remoteTaskId)
+        assertNotNull(t.submissionAttemptId)
+    }
+
+    @Test
+    fun pollQueuedToRunningToDownload() = runBlocking {
+        val e = env(SeedanceVideoState.QUEUED) { copy(remoteTaskId = "remote-1") }
+        e.submitter.getResult = { SeedanceTaskResponse(id = "remote-1", status = "queued") }
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        assertEquals(SeedanceVideoState.QUEUED, e.store.current(1).state)
+
+        e.submitter.getResult = { SeedanceTaskResponse(id = "remote-1", status = "running") }
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        assertEquals(SeedanceVideoState.RUNNING, e.store.current(1).state)
+
+        e.submitter.getResult = {
+            SeedanceTaskResponse(id = "remote-1", status = "succeeded", output = SeedanceTaskOutput(videoUrl = "https://v/1.mp4"))
+        }
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.DOWNLOAD_PENDING, t.state)
+        assertEquals("https://v/1.mp4", t.remoteVideoUrl)
+        assertNotNull(t.remoteVideoUrlExpiresAt)
+    }
+
+    @Test
+    fun cancelRaceServerStatusWins() = runBlocking {
+        val e = env(SeedanceVideoState.CANCEL_REQUESTED) { copy(remoteTaskId = "remote-1") }
+        e.submitter.getResult = { SeedanceTaskResponse(id = "remote-1", status = "running") }
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        assertEquals(SeedanceVideoState.RUNNING, e.store.current(1).state)
+    }
+
+    @Test
+    fun downloadLeadsToReady() = runBlocking {
+        val e = env(SeedanceVideoState.DOWNLOAD_PENDING) {
+            copy(remoteTaskId = "remote-1", remoteVideoUrl = "https://v/1.mp4", remoteVideoUrlExpiresAt = Long.MAX_VALUE)
+        }
+        assertEquals(PipelineOutcome.Complete, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.READY, t.state)
+        assertNotNull(t.localVideoPath)
+        assertNotNull(t.videoSha256)
+        assertTrue(File(t.localVideoPath!!).isFile)
+    }
+
+    @Test
+    fun normalizeStaleSubmittingBecomesAmbiguous() = runBlocking {
+        val e = env(SeedanceVideoState.SUBMITTING)
+        e.coordinator.normalizeStaleInProgress()
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
+        assertEquals(ERROR_CODE_AMBIGUOUS_POST, t.errorCode)
+        assertTrue(t.requiresCostConfirmation)
+    }
+
+    @Test
+    fun normalizeStaleDownloadingResetsToPending() = runBlocking {
+        val e = env(SeedanceVideoState.DOWNLOADING)
+        e.coordinator.normalizeStaleInProgress()
+        assertEquals(SeedanceVideoState.DOWNLOAD_PENDING, e.store.current(1).state)
+    }
+
+    @Test
+    fun expiredUrlTransitionsToExpired() = runBlocking {
+        val e = env(SeedanceVideoState.DOWNLOAD_PENDING) {
+            copy(remoteVideoUrl = "https://v/1.mp4", remoteVideoUrlExpiresAt = 999_999L) // < clockNow
+        }
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.EXPIRED, t.state)
+        assertEquals("URL_EXPIRED", t.errorCode)
+    }
+
+    @Test
+    fun diskFullFailsDownload() = runBlocking {
+        val e = env(SeedanceVideoState.DOWNLOAD_PENDING) {
+            copy(remoteVideoUrl = "https://v/1.mp4", remoteVideoUrlExpiresAt = Long.MAX_VALUE)
+        }
+        // 预创建同名目录占据 .part 路径 -> 写入失败（模拟磁盘满/占用）
+        File(e.fileStore.taskDir("uuid-1"), "video.part").mkdirs()
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_DOWNLOAD, t.state)
+        assertEquals("DOWNLOAD", t.errorStage)
+    }
+
+    @Test
+    fun existingValidFileSkipsRedownload() = runBlocking {
+        val e = env(SeedanceVideoState.DOWNLOAD_PENDING) {
+            copy(remoteVideoUrl = "https://v/1.mp4", remoteVideoUrlExpiresAt = Long.MAX_VALUE)
+        }
+        val data = mp4TestBytes()
+        val saved = e.fileStore.save("uuid-1", "video/mp4", data.size.toLong(), ByteArrayInputStream(data)).getOrThrow()
+        e.store.update(e.store.current(1).copy(videoSha256 = saved.sha256))
+        e.downloader.bytes = null // 若误触下载会拿到 null -> 失败
+        assertEquals(PipelineOutcome.Complete, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.READY, t.state)
+        assertEquals(saved.sha256, t.videoSha256)
+    }
+
+    @Test
+    fun partialPartNotTreatedAsReady() = runBlocking {
+        val e = env(SeedanceVideoState.DOWNLOAD_PENDING) {
+            copy(remoteVideoUrl = "https://v/1.mp4", remoteVideoUrlExpiresAt = Long.MAX_VALUE)
+        }
+        // 残留 .part（无最终成品）
+        val dir = e.fileStore.taskDir("uuid-1")
+        dir.mkdirs()
+        File(dir, "video.part").writeBytes(mp4TestBytes())
+        // 真实下载到新文件 -> 仍应完成 READY（.part 不被误判为成品，且会被覆盖）
+        assertEquals(PipelineOutcome.Complete, e.coordinator.advance(1))
+        assertEquals(SeedanceVideoState.READY, e.store.current(1).state)
+    }
+
+    @Test
+    fun pollTransientFailureKeepsRecoverableState() = runBlocking {
+        val e = env(SeedanceVideoState.QUEUED) { copy(remoteTaskId = "remote-1") }
+        e.submitter.getError = { SeedanceApiException(SeedanceError.AMBIGUOUS_TRANSPORT, "网络错误") }
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.QUEUED, t.state)
+        assertEquals(1, t.automaticRetryCount)
+        assertNotNull(t.nextRetryAt)
+    }
+
+    @Test
+    fun normalizeStalePromptingResetsToPending() = runBlocking {
+        val e = env(SeedanceVideoState.PROMPTING)
+        e.coordinator.normalizeStaleInProgress()
+        assertEquals(SeedanceVideoState.PROMPT_PENDING, e.store.current(1).state)
+    }
+
+    @Test
+    fun advanceOnInFlightStateIsNoop() = runBlocking {
+        val e1 = env(SeedanceVideoState.PROMPTING)
+        assertEquals(PipelineOutcome.Complete, e1.coordinator.advance(1))
+        assertEquals(SeedanceVideoState.PROMPTING, e1.store.current(1).state)
+
+        val e2 = env(SeedanceVideoState.SUBMITTING)
+        assertEquals(PipelineOutcome.Complete, e2.coordinator.advance(1))
+        assertEquals(SeedanceVideoState.SUBMITTING, e2.store.current(1).state)
+
+        val e3 = env(SeedanceVideoState.DOWNLOADING)
+        assertEquals(PipelineOutcome.Complete, e3.coordinator.advance(1))
+        assertEquals(SeedanceVideoState.DOWNLOADING, e3.store.current(1).state)
+    }
+
+    @Test
+    fun missingTaskIsComplete() = runBlocking {
+        val e = env(SeedanceVideoState.PROMPT_PENDING)
+        assertEquals(PipelineOutcome.Complete, e.coordinator.advance(999L))
+    }
+
+    @Test
+    fun readyIsTerminal() = runBlocking {
+        val e = env(SeedanceVideoState.READY)
+        assertEquals(PipelineOutcome.Complete, e.coordinator.advance(1))
+    }
+
+    companion object {
+        fun mp4TestBytes(payload: ByteArray = byteArrayOf(9, 9, 9, 9, 9, 9, 9, 9)): ByteArray =
+            byteArrayOf(0, 0, 0, 0x18, 'f'.code.toByte(), 't'.code.toByte(), 'y'.code.toByte(), 'p'.code.toByte()) + payload
+    }
+}

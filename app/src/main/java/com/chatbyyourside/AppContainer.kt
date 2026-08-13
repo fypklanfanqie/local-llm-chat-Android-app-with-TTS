@@ -1,11 +1,18 @@
 package com.chatbyyourside
 
 import android.content.Context
+import android.util.Base64
 import com.chatbyyourside.config.AppConfig
+import com.chatbyyourside.config.AssetPaths
 import com.chatbyyourside.data.local.AppDatabase
 import com.chatbyyourside.data.local.SettingsStore
+import com.chatbyyourside.data.model.SeedanceConfig
+import com.chatbyyourside.data.model.SeedanceVideo
+import com.chatbyyourside.data.remote.CreateSeedanceTask
 import com.chatbyyourside.data.remote.DirectLlmClient
 import com.chatbyyourside.data.remote.RetrofitClient
+import com.chatbyyourside.data.remote.SeedanceClient
+import com.chatbyyourside.data.remote.SeedanceImageContent
 import com.chatbyyourside.data.repository.AssetRepository
 import com.chatbyyourside.data.repository.CharacterRepository
 import com.chatbyyourside.data.repository.ChatBackgroundRepository
@@ -13,13 +20,30 @@ import com.chatbyyourside.data.repository.ChatRepository
 import com.chatbyyourside.data.repository.ConversationRepository
 import com.chatbyyourside.data.repository.DocumentRepository
 import com.chatbyyourside.data.repository.MusicLibraryRepository
+import com.chatbyyourside.data.repository.SeedanceVideoRepository
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.download.DownloadManager
+import com.chatbyyourside.video.DirectLlmSeedancePromptLlm
+import com.chatbyyourside.video.SeedanceImageEncoder
+import com.chatbyyourside.video.SeedancePipelineCoordinator
+import com.chatbyyourside.video.SeedancePromptGenerator
+import com.chatbyyourside.video.SeedanceReferenceStore
+import com.chatbyyourside.video.SeedanceRepositoryPipelineStore
+import com.chatbyyourside.video.SeedanceSnapshotSourceResolver
+import com.chatbyyourside.video.SeedanceSnapshotSources
+import com.chatbyyourside.video.SeedanceSubmitter
+import com.chatbyyourside.video.SeedanceVideoDownload
+import com.chatbyyourside.video.SeedanceVideoDownloader
+import com.chatbyyourside.video.SeedanceVideoFileStore
+import com.chatbyyourside.work.SeedanceVideoScheduler
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.backend.BackendHealthCoordinator
 import com.chatbyyourside.llm.backend.BackendHealthStore
 import com.chatbyyourside.llm.backend.BackendManager
+import com.chatbyyourside.llm.backend.GpuPreheatCoordinator
+import com.chatbyyourside.llm.backend.IdleOpenClProbeCoordinator
 import com.chatbyyourside.llm.backend.OpenClProbeRunner
+import com.chatbyyourside.notification.AppLifecycleObserver
 import com.chatbyyourside.llm.benchmark.DefaultLocalInferenceBenchmarkRunner
 import com.chatbyyourside.llm.benchmark.InferenceCertificationStore
 import com.chatbyyourside.manager.AudioManager
@@ -30,6 +54,12 @@ import com.chatbyyourside.provider.ChatProviderManager
 import com.chatbyyourside.provider.cloud.CloudChatProvider
 import com.chatbyyourside.provider.local.LocalChatProvider
 import com.chatbyyourside.tts.VolcTtsClient
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.io.File
+import java.util.concurrent.TimeUnit
 
 /**
  * 手动 DI 容器
@@ -62,6 +92,128 @@ class AppContainer(private val context: Context) {
     // ===== 网络 API =====
     /** 直连对话商 OpenAI 兼容 API 客户端（云端对话/翻译/文档提取，不经代理） */
     val directLlmClient: DirectLlmClient by lazy { DirectLlmClient(RetrofitClient.streamingClient) }
+
+    // ===== Seedance 视频流水线（Task 6：持久 Worker 状态机 + 内部归档）=====
+    // 专用有限超时 OkHttp 客户端（不复用 RetrofitClient.streamingClient——后者无超时）。
+    // connect 15s / read 60s / write 60s / call 120s；下载客户端放宽 read 以容纳大文件。
+    private val seedanceHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(120, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private val seedanceDownloadHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(300, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(600, TimeUnit.SECONDS)
+            .build()
+    }
+
+    val seedanceVideoRepository: SeedanceVideoRepository by lazy {
+        SeedanceVideoRepository(database.seedanceVideoDao())
+    }
+
+    val seedanceClient: SeedanceClient by lazy { SeedanceClient(seedanceHttpClient) }
+
+    val seedanceReferenceStore: SeedanceReferenceStore by lazy {
+        SeedanceReferenceStore.production(context)
+    }
+
+    val seedanceVideoFileStore: SeedanceVideoFileStore by lazy {
+        SeedanceVideoFileStore(File(context.filesDir, "seedance/tasks"))
+    }
+
+    val seedancePromptGenerator: SeedancePromptGenerator by lazy {
+        SeedancePromptGenerator(DirectLlmSeedancePromptLlm(directLlmClient))
+    }
+
+    private val seedancePipelineStore: SeedanceRepositoryPipelineStore by lazy {
+        SeedanceRepositoryPipelineStore(seedanceVideoRepository)
+    }
+
+    val seedancePipelineCoordinator: SeedancePipelineCoordinator by lazy {
+        SeedancePipelineCoordinator(
+            store = seedancePipelineStore,
+            submitter = object : SeedanceSubmitter {
+                override suspend fun create(config: SeedanceConfig, request: CreateSeedanceTask) =
+                    seedanceClient.createTask(config, request)
+
+                override suspend fun get(config: SeedanceConfig, taskId: String) =
+                    seedanceClient.getTask(config, taskId)
+
+                override suspend fun cancel(config: SeedanceConfig, taskId: String) =
+                    seedanceClient.cancelQueuedTask(config, taskId)
+            },
+            promptProvider = seedancePromptGenerator::generate,
+            snapshooter = seedanceReferenceStore::snapshot,
+            resolveSnapshotSources = SeedanceSnapshotSourceResolver { task ->
+                resolveSeedanceSnapshotSources(task)
+            },
+            downloadVideo = SeedanceVideoDownloader { url ->
+                downloadSeedanceVideo(url)
+            },
+            fileStore = seedanceVideoFileStore,
+            encoder = SeedanceImageEncoder { path, mime ->
+                encodeSeedanceImage(path, mime)
+            },
+            apiConfigProvider = { settingsRepository.getApiConfigNow() },
+            seedanceConfigProvider = { settingsRepository.getSeedanceConfigNow() },
+        )
+    }
+
+    val seedanceVideoScheduler: SeedanceVideoScheduler by lazy {
+        SeedanceVideoScheduler(context, seedancePipelineCoordinator, seedancePipelineStore)
+    }
+
+    /** outbox 来源快照 -> 参考图仓库入参：内置角色用 assets 相对路径，自定义角色用 char.image。 */
+    private suspend fun resolveSeedanceSnapshotSources(task: SeedanceVideo): SeedanceSnapshotSources? {
+        val character = characterRepository.getNow(task.characterIdSnapshot) ?: return null
+        val builtInAssetPath = if (character.isCustom) null else AssetPaths.PICTURES[task.characterIdSnapshot]
+        return SeedanceSnapshotSources(
+            character = character,
+            builtInAssetPath = builtInAssetPath,
+            backgroundImagePath = task.backgroundImageSourceSnapshot,
+        )
+    }
+
+    /** 参考图内部文件 -> base64 图片内容（读取在 Worker 的 IO 线程，不整读入 UI 线程）。 */
+    private suspend fun encodeSeedanceImage(path: String, mime: String): SeedanceImageContent =
+        withContext(Dispatchers.IO) {
+            val bytes = File(path).readBytes()
+            SeedanceImageContent(mime, Base64.encodeToString(bytes, Base64.NO_WRAP))
+        }
+
+    /** GET 远端签名 URL，返回未消费的流（失败/非 2xx 返回 null）。 */
+    private suspend fun downloadSeedanceVideo(url: String): SeedanceVideoDownload? =
+        withContext(Dispatchers.IO) {
+            try {
+                val response = seedanceDownloadHttpClient.newCall(
+                    Request.Builder().url(url).get().build(),
+                ).execute()
+                if (!response.isSuccessful) {
+                    response.close()
+                    return@withContext null
+                }
+                val body = response.body
+                if (body == null) {
+                    response.close()
+                    return@withContext null
+                }
+                SeedanceVideoDownload(
+                    mime = body.contentType()?.toString(),
+                    contentLength = body.contentLength().takeIf { it >= 0 },
+                    stream = body.byteStream(),
+                    onClose = { response.close() },
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }
 
     // ===== TTS =====
     val ttsClient: VolcTtsClient by lazy { VolcTtsClient(AppConfig.TTS_PROXY_URL, RetrofitClient.okHttpClient) }
@@ -109,6 +261,37 @@ class AppContainer(private val context: Context) {
         BackendManager(context, cpuBoostController, backendHealthCoordinator)
     }
 
+    // Task 15/16：GPU 完整预热（设置页手动按钮触发；加载当前 >7B 模型 + 极短生成预热 OpenCL）。
+    val gpuPreheatCoordinator: GpuPreheatCoordinator by lazy {
+        GpuPreheatCoordinator(context, backendManager, backendHealthCoordinator, settingsRepository)
+    }
+
+    // Task 15/16：前台空闲时的轻量 OpenCL 探测（只探测，绝不自动加载模型）。
+    private var idleOpenClProbeCoordinator: IdleOpenClProbeCoordinator? = null
+
+    /**
+     * 启动前台空闲轻量 OpenCL 探测（幂等）：应用进入前台并空闲一段后，仅当「显式 GPU 或
+     * AUTO+>7B 模型」且健康记录确需探测时，在隔离进程执行一次轻量探测。绝不加载模型。
+     */
+    fun startIdleOpenClProbe(appScope: kotlinx.coroutines.CoroutineScope) {
+        if (idleOpenClProbeCoordinator != null) return
+        val coordinator = IdleOpenClProbeCoordinator(
+            scope = appScope,
+            context = context,
+            healthCoordinator = backendHealthCoordinator,
+            settings = settingsRepository,
+            isForeground = { AppLifecycleObserver.isForeground },
+        )
+        idleOpenClProbeCoordinator = coordinator
+        AppLifecycleObserver.addForegroundListener { foreground ->
+            coordinator.onAppForegroundChanged(foreground)
+        }
+        // 应用已在前台时补一次初始调度。
+        if (AppLifecycleObserver.isForeground) {
+            coordinator.onAppForegroundChanged(true)
+        }
+    }
+
     // ===== Chat Provider =====
     val cloudChatProvider: CloudChatProvider by lazy {
         CloudChatProvider(directLlmClient, settingsRepository)
@@ -124,7 +307,12 @@ class AppContainer(private val context: Context) {
         )
     }
     val chatProviderManager: ChatProviderManager by lazy {
-        ChatProviderManager(cloudChatProvider, localChatProvider, settingsRepository)
+        ChatProviderManager(
+            cloudChatProvider,
+            localChatProvider,
+            settingsRepository,
+            onSwitchAwayFromLocal = { backendManager.release() },
+        )
     }
 
     // ===== 性能监控浮窗（仅本地聊天界面显示；应用内液态玻璃，见 PerformanceGlassOverlay）=====
