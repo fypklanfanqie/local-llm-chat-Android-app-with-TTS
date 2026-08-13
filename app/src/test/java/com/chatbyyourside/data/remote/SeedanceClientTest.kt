@@ -658,6 +658,18 @@ class SeedanceClientTest {
         assertEquals(SeedanceError.NOT_FOUND, ex.classification)
     }
 
+    @Test
+    fun error_404_modelNotOpen_isClassifiedModelNotOpen() = runBlocking {
+        // 方舟对「已存在但未开通」的模型返回 ModelNotOpen，与「模型不存在」语义不同。
+        server.enqueue(
+            MockResponse().setResponseCode(404)
+                .setBody("""{"error":{"code":"ModelNotOpen","message":"Your account has not activated the model. Please activate the model service in the Ark Console."}}""")
+        )
+        val ex = expectApiException()
+        assertEquals(SeedanceError.MODEL_NOT_OPEN, ex.classification)
+        assertTrue("文案应指向控制台开通", ex.message.orEmpty().contains("开通"))
+    }
+
     // ---- “测试连接”探测 ----
 
     @Test

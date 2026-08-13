@@ -43,6 +43,7 @@ enum class SeedanceRemoteStatus(val storageKey: String) {
  * - [INVALID_PARAMETER]：请求参数不合法（HTTP 400/422 或参数错误码）；
  * - [BAD_ENDPOINT]：服务地址/路径不正确（HTTP 404/405 且响应体为空/HTML，即网关或路由层 404）；
  * - [NOT_FOUND]：模型或任务不存在（HTTP 404/405 且响应体为结构化错误，API 层已理解请求）；
+ * - [MODEL_NOT_OPEN]：模型未在方舟控制台开通（HTTP 404，`ModelNotOpen` 类错误）；
  * - [TRANSIENT_429_5XX]：瞬时 429/5xx，可稍后重试；
  * - [AMBIGUOUS_TRANSPORT]：网络/传输层失败，无法确定任务是否已被服务端受理，绝不自动重发；
  * - [OTHER]：其余未识别错误。
@@ -54,6 +55,7 @@ enum class SeedanceError {
     INVALID_PARAMETER,
     BAD_ENDPOINT,
     NOT_FOUND,
+    MODEL_NOT_OPEN,
     TRANSIENT_429_5XX,
     AMBIGUOUS_TRANSPORT,
     OTHER,
@@ -92,6 +94,8 @@ internal fun classifySeedanceError(
     // 404/405：带结构化错误体（有 code/message）说明 API 层已理解请求、只是资源不存在（模型/任务）；
     // 空体/HTML 说明是网关或路由层 404，即服务地址/路径错误。二者语义不同，先于正文启发式区分。
     if (httpStatus == 404 || httpStatus == 405) {
+        val notFoundText = "${remoteCode.orEmpty()} ${remoteMessage.orEmpty()}".lowercase()
+        if (containsAny(notFoundText, MODEL_NOT_OPEN_MARKERS)) return SeedanceError.MODEL_NOT_OPEN
         return if (remoteCode != null || remoteMessage != null) SeedanceError.NOT_FOUND
         else SeedanceError.BAD_ENDPOINT
     }
@@ -189,6 +193,11 @@ private val AUTH_MARKERS = listOf(
 /** 参数错误标记。 */
 private val PARAM_MARKERS = listOf(
     "invalid", "parameter", "param", "参数", "不合法", "bad request", "bad_request", "validation",
+)
+
+/** 模型未开通标记（HTTP 404，方舟 `ModelNotOpen` 类错误）。 */
+private val MODEL_NOT_OPEN_MARKERS = listOf(
+    "modelnotopen", "not activated", "activate the model",
 )
 
 private fun containsAny(lowercased: String, markers: List<String>): Boolean =
