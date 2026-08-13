@@ -489,6 +489,121 @@ class SeedanceClientTest {
         assertFalse("请求体不得含 API Key", body.contains(TEST_API_KEY))
     }
 
+    // ---- 服务地址归一化（自定义/中转站地址）----
+
+    @Test
+    fun resolveCollectionEndpoint_officialBase_appendsSuffix() {
+        assertEquals(
+            "https://ark.cn-beijing.volces.com/api/v3$SEEDANCE_TASKS_SUFFIX",
+            resolveSeedanceTaskCollectionEndpoint("https://ark.cn-beijing.volces.com/api/v3"),
+        )
+    }
+
+    @Test
+    fun resolveCollectionEndpoint_fullEndpoint_usedVerbatim_noDoubleAppend() {
+        val full = "https://relay.example.com/custom/prefix$SEEDANCE_TASKS_SUFFIX"
+        assertEquals(full, resolveSeedanceTaskCollectionEndpoint(full))
+    }
+
+    @Test
+    fun resolveCollectionEndpoint_fullEndpointWithTrailingSlash_trimsAndKeepsVerbatim() {
+        val full = "https://relay.example.com$SEEDANCE_TASKS_SUFFIX/"
+        assertEquals("https://relay.example.com$SEEDANCE_TASKS_SUFFIX", resolveSeedanceTaskCollectionEndpoint(full))
+    }
+
+    @Test
+    fun resolveCollectionEndpoint_bareHost_appendsSuffix() {
+        assertEquals("https://relay.example.com$SEEDANCE_TASKS_SUFFIX", resolveSeedanceTaskCollectionEndpoint("https://relay.example.com"))
+    }
+
+    @Test
+    fun resolveCollectionEndpoint_whitespacePadding_isTrimmed() {
+        assertEquals(
+            "https://relay.example.com$SEEDANCE_TASKS_SUFFIX",
+            resolveSeedanceTaskCollectionEndpoint("  https://relay.example.com  "),
+        )
+    }
+
+    @Test
+    fun resolveTaskEndpoint_appendsTaskIdAfterResolvedCollection() {
+        assertEquals(
+            "https://relay.example.com$SEEDANCE_TASKS_SUFFIX/cgt-123",
+            resolveSeedanceTaskEndpoint("https://relay.example.com", "cgt-123"),
+        )
+    }
+
+    @Test
+    fun createTask_fullEndpointBase_hitsVerbatimPath() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"id":"cgt-abc"}"""))
+        val full = server.url("/api/v3$SEEDANCE_TASKS_SUFFIX").toString().trimEnd('/')
+        client.createTask(SeedanceConfig(baseUrl = full), request())
+        assertEquals("/api/v3$SEEDANCE_TASKS_SUFFIX", server.takeRequest().path)
+    }
+
+    // ---- 404/405 → BAD_ENDPOINT ----
+
+    @Test
+    fun error_404_isClassifiedBadEndpoint_withActionableMessage() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("<html><body>Not Found</body></html>"))
+        val ex = expectApiException()
+        assertEquals(SeedanceError.BAD_ENDPOINT, ex.classification)
+        assertEquals(404, ex.httpStatus)
+        assertNotNull("错误文案应提示核对地址", ex.message)
+        assertTrue("错误文案应包含接口后缀提示", ex.message.orEmpty().contains(SEEDANCE_TASKS_SUFFIX))
+    }
+
+    @Test
+    fun error_405_isClassifiedBadEndpoint() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(405).setBody("""{"error":{"code":"MethodNotAllowed","message":"no"}}"""))
+        val ex = expectApiException()
+        assertEquals(SeedanceError.BAD_ENDPOINT, ex.classification)
+    }
+
+    // ---- “测试连接”探测 ----
+
+    @Test
+    fun probe_2xx_returnsOk() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"id":"probe"}"""))
+        val result = client.probeEndpoint(config())
+        assertTrue("期望 Ok，实际 $result", result is SeedanceProbeResult.Ok)
+    }
+
+    @Test
+    fun probe_401_reportsKeyInvalid() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":{"code":"AuthError"}}"""))
+        val result = client.probeEndpoint(config())
+        assertTrue("期望 Failed，实际 $result", result is SeedanceProbeResult.Failed)
+        assertTrue((result as SeedanceProbeResult.Failed).message.contains("API Key"))
+    }
+
+    @Test
+    fun probe_404_withJsonBody_returnsOk_pathIsCorrect() = runBlocking {
+        // 路径正确时，对不存在的探测任务返回 JSON 错误体 → 判定接口可达、路径正确。
+        server.enqueue(
+            MockResponse().setResponseCode(404).setBody("""{"error":{"code":"TaskNotFound","message":"任务不存在"}}""")
+        )
+        val result = client.probeEndpoint(config())
+        assertTrue("期望 Ok（JSON 404 = 预期返回），实际 $result", result is SeedanceProbeResult.Ok)
+    }
+
+    @Test
+    fun probe_404_withHtmlBody_returnsFailed_pathMayBeWrong() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("<html>Not Found</html>"))
+        val result = client.probeEndpoint(config())
+        assertTrue("期望 Failed（HTML 404 = 路径不对），实际 $result", result is SeedanceProbeResult.Failed)
+        assertTrue((result as SeedanceProbeResult.Failed).message.contains("路径可能不正确"))
+    }
+
+    @Test
+    fun probe_connectionRefused_returnsFailed() = runBlocking {
+        val deadServer = MockWebServer()
+        deadServer.start()
+        val deadBase = deadServer.url("/").toString().trimEnd('/')
+        deadServer.shutdown()
+        val result = client.probeEndpoint(SeedanceConfig(baseUrl = deadBase))
+        assertTrue("期望 Failed（连接失败），实际 $result", result is SeedanceProbeResult.Failed)
+    }
+
     companion object {
         private const val TEST_API_KEY = "test-seedance-key-123"
         private const val characterBase64 = "aGVsbG8="

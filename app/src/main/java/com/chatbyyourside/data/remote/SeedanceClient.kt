@@ -33,6 +33,35 @@ import kotlin.coroutines.coroutineContext
  */
 const val CANCEL_ENDPOINT_VERIFIED = true
 
+/** Seedance 任务集合接口路径后缀（POST 创建任务的相对路径）。 */
+internal const val SEEDANCE_TASKS_SUFFIX = "/contents/generations/tasks"
+
+/**
+ * 归一化用户填写的“服务地址”为任务集合接口地址。
+ *
+ * 兼容两种填写方式（中转站/自建网关常见）：
+ *  - 官方 base（如 `https://ark.cn-beijing.volces.com/api/v3`）：自动拼接 `[SEEDANCE_TASKS_SUFFIX]`；
+ *  - 完整接口地址（已以 `/contents/generations/tasks` 结尾）：原样使用，避免“双拼”导致 404。
+ */
+internal fun resolveSeedanceTaskCollectionEndpoint(baseUrl: String): String {
+    val trimmed = baseUrl.trim().trimEnd('/')
+    return if (trimmed.endsWith(SEEDANCE_TASKS_SUFFIX)) trimmed else trimmed + SEEDANCE_TASKS_SUFFIX
+}
+
+/** 单个任务接口地址：集合接口 + `/{taskId}`（GET 查询 / DELETE 取消共用）。 */
+internal fun resolveSeedanceTaskEndpoint(baseUrl: String, taskId: String): String =
+    resolveSeedanceTaskCollectionEndpoint(baseUrl) + "/" + taskId
+
+/**
+ * “测试连接”结果（设置页用）：区分接口正常 / 地址或路径问题，用户可直接看到中文结论。
+ */
+sealed interface SeedanceProbeResult {
+    /** 接口可达且路径正确（探测不发任务、不产生费用）。 */
+    data class Ok(val message: String) : SeedanceProbeResult
+    /** 不可达或配置有问题，需用户调整。 */
+    data class Failed(val message: String) : SeedanceProbeResult
+}
+
 /**
  * 预编码的参考图内容：调用方已读图并编码，客户端只负责拼接 data URL。
  *
@@ -88,7 +117,7 @@ class SeedanceClient(
     suspend fun createTask(config: SeedanceConfig, request: CreateSeedanceTask): SeedanceTaskResponse {
         val body = json.encodeToString(CreateSeedanceTaskRequest.serializer(), buildCreateRequest(config, request))
         val httpRequest = Request.Builder()
-            .url(taskCollectionEndpoint(config.baseUrl))
+            .url(resolveSeedanceTaskCollectionEndpoint(config.baseUrl))
             .header("Authorization", "Bearer ${config.apiKey}")
             .header("Content-Type", "application/json")
             .post(body.toRequestBody(jsonMediaType))
@@ -99,7 +128,7 @@ class SeedanceClient(
     /** 查询任务状态/结果。 */
     suspend fun getTask(config: SeedanceConfig, taskId: String): SeedanceTaskResponse {
         val httpRequest = Request.Builder()
-            .url(taskEndpoint(config.baseUrl, taskId))
+            .url(resolveSeedanceTaskEndpoint(config.baseUrl, taskId))
             .header("Authorization", "Bearer ${config.apiKey}")
             .get()
             .build()
@@ -113,7 +142,7 @@ class SeedanceClient(
      */
     suspend fun cancelQueuedTask(config: SeedanceConfig, taskId: String): SeedanceTaskResponse {
         val httpRequest = Request.Builder()
-            .url(taskEndpoint(config.baseUrl, taskId))
+            .url(resolveSeedanceTaskEndpoint(config.baseUrl, taskId))
             .header("Authorization", "Bearer ${config.apiKey}")
             .delete()
             .build()
@@ -123,6 +152,63 @@ class SeedanceClient(
             parsed.copy(id = taskId, status = SeedanceRemoteStatus.CANCELLED.storageKey)
         } else {
             parsed
+        }
+    }
+
+    /**
+     * 探测“服务地址”是否可达且路径正确（设置页「测试连接」用）。
+     *
+     * 不创建任务、不产生费用：仅 GET 一个不存在的探测任务 id。
+     * 判定规则：
+     *  - 2xx → 接口正常；
+     *  - 401/403 → 地址可达，API Key 无效；
+     *  - 429/5xx → 地址可达，服务繁忙；
+     *  - 404/405 且响应体为 JSON → 路径正确（对不存在任务的预期返回）；
+     *  - 404/405 且响应体非 JSON（网关 HTML 页）→ 路径可能不正确；
+     *  - 连接/IO 错误 → 地址不可达。
+     */
+    suspend fun probeEndpoint(config: SeedanceConfig): SeedanceProbeResult = withContext(Dispatchers.IO) {
+        val probeId = "__seedance_probe_check__"
+        val httpRequest = Request.Builder()
+            .url(resolveSeedanceTaskEndpoint(config.baseUrl, probeId))
+            .header("Authorization", "Bearer ${config.apiKey}")
+            .get()
+            .build()
+        val call = client.newCall(httpRequest)
+        val handle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+        try {
+            call.execute().use { response ->
+                val status = response.code
+                val raw = response.body?.string().orEmpty()
+                when {
+                    status in 200..299 -> SeedanceProbeResult.Ok("接口正常，服务地址可用")
+                    status == 401 || status == 403 ->
+                        SeedanceProbeResult.Failed("接口可达，但 API Key 无效或未授权（HTTP $status）")
+                    status == 429 || status >= 500 ->
+                        SeedanceProbeResult.Failed("接口可达，但服务暂时繁忙（HTTP $status），请稍后重试")
+                    status == 404 || status == 405 -> {
+                        // 路径正确时，对不存在的探测任务服务端返回 JSON 错误体（如「任务不存在」）；
+                        // 路径错误（被网关拦下）则通常是 HTML/空体。
+                        val jsonBody = raw.isNotBlank() &&
+                            (raw.trimStart().startsWith("{") || raw.trimStart().startsWith("["))
+                        if (jsonBody) {
+                            SeedanceProbeResult.Ok("接口可达，路径正确（HTTP $status 为探测任务的预期返回）")
+                        } else {
+                            SeedanceProbeResult.Failed(
+                                "接口可达，但路径可能不正确（HTTP $status）：请确认地址以 $SEEDANCE_TASKS_SUFFIX 结尾；官方 base 含 /api/v3，中转站请粘贴完整接口地址"
+                            )
+                        }
+                    }
+                    else -> SeedanceProbeResult.Failed("接口可达，但返回 HTTP $status，请检查服务地址")
+                }
+            }
+        } catch (e: IOException) {
+            coroutineContext.ensureActive() // 被取消（超时/页面离开）时抛 CancellationException
+            Log.w(TAG, "seedance probe network error")
+            SeedanceProbeResult.Failed("无法连接该地址：${e.message ?: "网络错误"}")
+        } finally {
+            handle?.dispose()
+            call.cancel()
         }
     }
 
@@ -243,12 +329,6 @@ class SeedanceClient(
     private fun extractRequestId(response: Response): String? =
         REQUEST_ID_HEADERS.firstNotNullOfOrNull { response.header(it) }
 
-    private fun taskCollectionEndpoint(baseUrl: String): String =
-        baseUrl.trimEnd('/') + "/contents/generations/tasks"
-
-    private fun taskEndpoint(baseUrl: String, taskId: String): String =
-        baseUrl.trimEnd('/') + "/contents/generations/tasks/" + taskId
-
     private fun SeedanceImageContent.toDataUrl(): String = "data:$mimeType;base64,$base64NoPrefix"
 
     private fun SeedanceResolution.apiValue(): String = when (this) {
@@ -265,6 +345,8 @@ class SeedanceClient(
             SeedanceError.QUOTA_EXCEEDED -> "额度不足或已达上限，请稍后重试"
             SeedanceError.AUTH -> "Seedance API Key 无效或未授权"
             SeedanceError.INVALID_PARAMETER -> "请求参数不合法，请调整生成设置"
+            SeedanceError.BAD_ENDPOINT ->
+                "服务地址或路径可能不正确（HTTP $httpStatus）：请确认以 $SEEDANCE_TASKS_SUFFIX 结尾；官方地址含 /api/v3，中转站请粘贴完整接口地址"
             SeedanceError.TRANSIENT_429_5XX -> "视频服务暂时繁忙（HTTP $httpStatus），请稍后重试"
             SeedanceError.AMBIGUOUS_TRANSPORT -> "网络错误，无法确认任务状态"
             SeedanceError.OTHER -> "视频生成失败（HTTP $httpStatus）"

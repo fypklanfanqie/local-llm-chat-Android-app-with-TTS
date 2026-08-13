@@ -41,6 +41,7 @@ enum class SeedanceRemoteStatus(val storageKey: String) {
  * - [QUOTA_EXCEEDED]：额度/并发/限流超限；
  * - [AUTH]：API Key 无效或未授权（HTTP 401/403 或鉴权错误码）；
  * - [INVALID_PARAMETER]：请求参数不合法（HTTP 400/422 或参数错误码）；
+ * - [BAD_ENDPOINT]：服务地址/路径不正确或任务已失效（HTTP 404/405），需用户核对地址；
  * - [TRANSIENT_429_5XX]：瞬时 429/5xx，可稍后重试；
  * - [AMBIGUOUS_TRANSPORT]：网络/传输层失败，无法确定任务是否已被服务端受理，绝不自动重发；
  * - [OTHER]：其余未识别错误。
@@ -50,6 +51,7 @@ enum class SeedanceError {
     QUOTA_EXCEEDED,
     AUTH,
     INVALID_PARAMETER,
+    BAD_ENDPOINT,
     TRANSIENT_429_5XX,
     AMBIGUOUS_TRANSPORT,
     OTHER,
@@ -85,6 +87,9 @@ internal fun classifySeedanceError(
 ): SeedanceError {
     if (httpStatus == 401 || httpStatus == 403) return SeedanceError.AUTH
     if (httpStatus == 429 || (httpStatus != null && httpStatus >= 500)) return SeedanceError.TRANSIENT_429_5XX
+    // 404/405：多为服务地址/路径配置错误（或任务已失效）。优先于正文启发式，
+    // 避免被网关 404 页里的任意字样误分类为配额/参数等。
+    if (httpStatus == 404 || httpStatus == 405) return SeedanceError.BAD_ENDPOINT
 
     val text = "${remoteCode.orEmpty()} ${remoteMessage.orEmpty()}".lowercase()
     if (containsAny(text, SENSITIVE_MARKERS)) return SeedanceError.SENSITIVE_CONTENT

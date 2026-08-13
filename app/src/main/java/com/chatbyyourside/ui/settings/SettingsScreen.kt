@@ -60,6 +60,8 @@ import com.chatbyyourside.work.GreetingScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import com.chatbyyourside.data.remote.SeedanceProbeResult
 import java.io.File
 
 @Composable
@@ -899,11 +901,14 @@ private fun variantLabel(variant: SeedanceModelVariant): String = when (variant)
     SeedanceModelVariant.FAST -> "Fast"
 }
 
+/** “测试连接”探测的超时上限（ms）：远超底层 OkHttp 连接超时，但保证 UI 按钮不会久转。 */
+private const val PROBE_TIMEOUT_MS = 10_000L
+
 /**
  * “Seedance 对话视频”设置分区（自包含；文件较大故独立成函数）。
  * API Key 密码输入、服务地址、标准/Fast、动态分辨率（Fast 隐藏 1080p/4K）、4–15 秒时长、
  * 画幅比例、水印、可选背景图（经 [SeedanceSceneStore] 校验并复制到内部存储）、可选场景描述、
- * 固定开启语音的只读说明。无 fps 选项。
+ * 固定开启语音的只读说明。无 fps 选项。含「测试连接」按钮校验服务地址。
  */
 @Composable
 private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineScope) {
@@ -931,6 +936,9 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
     var backgroundCleared by remember { mutableStateOf(false) }
     var backgroundError by remember { mutableStateOf<String?>(null) }
     var saved by remember { mutableStateOf(false) }
+    // “测试连接”按钮状态：结果与进行中标记。
+    var probeResult by remember { mutableStateOf<SeedanceProbeResult?>(null) }
+    var probeRunning by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         val c = settings.getSeedanceConfigNow()
         apiKey = c.apiKey
@@ -964,6 +972,37 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
             PasswordField("API Key", apiKey, showApiKey, { apiKey = it }, { showApiKey = !showApiKey })
             FieldLabel("服务地址")
             GlassInputField(value = baseUrl, onValueChange = { baseUrl = it }, placeholder = SeedanceConfig().baseUrl)
+            Text(
+                "可填官方 base（含 /api/v3）或中转站完整接口地址（以 /contents/generations/tasks 结尾）。",
+                color = scheme.onSurfaceVariant, fontSize = 10.sp,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            probeRunning = true
+                            probeResult = null
+                            val result = withTimeoutOrNull(PROBE_TIMEOUT_MS) {
+                                container.seedanceClient.probeEndpoint(
+                                    SeedanceConfig(baseUrl = baseUrl, apiKey = apiKey)
+                                )
+                            } ?: SeedanceProbeResult.Failed("连接超时，请检查地址与网络")
+                            probeResult = result
+                            probeRunning = false
+                        }
+                    },
+                    enabled = !probeRunning,
+                ) {
+                    Text(if (probeRunning) "测试中…" else "测试连接", fontSize = 12.sp)
+                }
+                when (val r = probeResult) {
+                    is SeedanceProbeResult.Ok ->
+                        Text(r.message, color = scheme.tertiary, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                    is SeedanceProbeResult.Failed ->
+                        Text(r.message, color = scheme.error, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                    null -> {}
+                }
+            }
             FieldLabel("模型")
             SeedanceDropdown(
                 items = SeedanceModelVariant.entries.map { it to variantLabel(it) },
