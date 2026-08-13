@@ -910,21 +910,35 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
     val scheme = MaterialTheme.colorScheme
     val context = LocalContext.current
     val settings = container.settingsRepository
-    val config by settings.seedanceConfig.collectAsState(initial = SeedanceConfig())
     val sceneStore = remember { SeedanceSceneStore(context) }
 
-    var apiKey by remember(config) { mutableStateOf(config.apiKey) }
+    // 可编辑字段只在进入组合后播种一次（读持久化配置），之后不再随 config 流回填。
+    // 背景图选择/清除只改本地 backgroundPath + SeedanceSceneStore 文件，不再触发 config 重发，
+    // 避免冲掉用户尚未保存的文本编辑（如正在输入的 API Key）；仅“保存”按钮 setSeedanceConfig 持久化。
+    var apiKey by remember { mutableStateOf("") }
     var showApiKey by remember { mutableStateOf(false) }
-    var baseUrl by remember(config) { mutableStateOf(config.baseUrl) }
-    var variant by remember(config) { mutableStateOf(config.variant) }
-    var resolution by remember(config) { mutableStateOf(config.resolution) }
-    var duration by remember(config) { mutableStateOf(config.durationSeconds) }
-    var ratio by remember(config) { mutableStateOf(config.ratio) }
-    var watermark by remember(config) { mutableStateOf(config.watermark) }
-    var sceneDescription by remember(config) { mutableStateOf(config.sceneDescription) }
-    var backgroundPath by remember(config) { mutableStateOf(config.backgroundImagePath) }
+    var baseUrl by remember { mutableStateOf(SeedanceConfig().baseUrl) }
+    var variant by remember { mutableStateOf(SeedanceConfig().variant) }
+    var resolution by remember { mutableStateOf(SeedanceConfig().resolution) }
+    var duration by remember { mutableStateOf(SeedanceConfig().durationSeconds) }
+    var ratio by remember { mutableStateOf(SeedanceConfig().ratio) }
+    var watermark by remember { mutableStateOf(SeedanceConfig().watermark) }
+    var sceneDescription by remember { mutableStateOf(SeedanceConfig().sceneDescription) }
+    var backgroundPath by remember { mutableStateOf(SeedanceConfig().backgroundImagePath) }
     var backgroundError by remember { mutableStateOf<String?>(null) }
     var saved by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val c = settings.getSeedanceConfigNow()
+        apiKey = c.apiKey
+        baseUrl = c.baseUrl
+        variant = c.variant
+        resolution = c.resolution
+        duration = c.durationSeconds
+        ratio = c.ratio
+        watermark = c.watermark
+        sceneDescription = c.sceneDescription
+        backgroundPath = c.backgroundImagePath
+    }
     LaunchedEffect(saved) {
         if (saved) { delay(2000); saved = false }
     }
@@ -936,7 +950,6 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
                     onSuccess = { path ->
                         backgroundPath = path
                         backgroundError = null
-                        settings.setSeedanceConfig(settings.getSeedanceConfigNow().copy(backgroundImagePath = path))
                     },
                     onFailure = { e -> backgroundError = e.message ?: "背景图保存失败" },
                 )
@@ -1025,7 +1038,6 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
                             sceneStore.remove()
                             backgroundPath = null
                             backgroundError = null
-                            settings.setSeedanceConfig(settings.getSeedanceConfigNow().copy(backgroundImagePath = null))
                         }
                     }) { Text("清除", color = scheme.error, fontSize = 12.sp) }
                 }

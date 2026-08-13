@@ -318,31 +318,86 @@ internal fun normalizeAssetPath(source: String): String = when {
 }
 
 /**
- * 生产图片探测：BitmapFactory 边界解码获取尺寸/编码 MIME + 魔数嗅探确定真实 MIME
- * （BitmapFactory 无法解析的 heic/heif 也能被识别并交给校验层拒绝）。
- * 整个来源读入内存（参考图 ≤30MB，非热路径；Worker/设置页调用）。
+ * 生产图片探测：BitmapFactory 边界解码（只读头部，不缓冲完整位图）获取尺寸/编码 MIME +
+ * 魔数嗅探确定真实 MIME（BitmapFactory 无法解析的 heic/heif 也能被识别并交给校验层拒绝）。
+ * 字节大小**从不整读内存**：文件源用 File.length()；流式源用有界缓冲计数，超过 30MB 上限即提前终止，
+ * 返回上限值触发校验层“不能超过 30MB”拒绝，而不是继续读满整个大文件（避免 OOM）。
  */
 class AndroidImageProbe : ImageProbe {
     override fun probe(source: ProbeSource): ProbeResult? {
-        val bytes = try {
+        // 字节大小：文件直接取长度；流式源有界计数，超过上限提前终止。
+        val byteSize = when (source) {
+            is ProbeSource.FromFile -> {
+                if (!source.file.isFile) return null
+                source.file.length()
+            }
+            is ProbeSource.FromStream -> countStreamBytes(source) ?: return null
+        }
+
+        // 尺寸：边界解码（仅头部，不缓冲完整位图），每次用全新流。
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        val decodedMime = try {
             when (source) {
-                is ProbeSource.FromFile -> if (source.file.isFile) source.file.readBytes() else return null
-                is ProbeSource.FromStream -> source.openStream()?.use { it.readBytes() } ?: return null
+                is ProbeSource.FromFile -> source.file.inputStream().use {
+                    BitmapFactory.decodeStream(it, null, options); options.outMimeType
+                }
+                is ProbeSource.FromStream -> source.openStream()?.use {
+                    BitmapFactory.decodeStream(it, null, options); options.outMimeType
+                }
             }
         } catch (e: Exception) {
-            return null
+            null
         }
-        if (bytes.isEmpty()) return null
-        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
         if (options.outWidth <= 0 || options.outHeight <= 0) return null
-        val mime = sniffMime(bytes) ?: options.outMimeType ?: return null
+
+        // MIME：魔数嗅探优先（只需头部若干字节），回退到 BitmapFactory 识别结果。
+        val mime = sniffHeaderMime(source) ?: decodedMime ?: return null
         return ProbeResult(
             mimeType = mime,
             width = options.outWidth,
             height = options.outHeight,
-            byteSize = bytes.size.toLong(),
+            byteSize = byteSize,
         )
+    }
+
+    /** 流式源字节计数：达到/超过 30MB 上限立即终止并返回上限值，不再读满全量。 */
+    private fun countStreamBytes(source: ProbeSource.FromStream): Long? {
+        val stream = source.openStream() ?: return null
+        return stream.use { input ->
+            val buffer = ByteArray(64 * 1024)
+            var total = 0L
+            while (true) {
+                val n = input.read(buffer)
+                if (n < 0) break
+                total += n
+                if (total >= REFERENCE_MAX_BYTES) return@use REFERENCE_MAX_BYTES
+            }
+            total
+        }
+    }
+
+    /** 读取头部少量字节做魔数嗅探（文件源/流式源各自独立打开）。 */
+    private fun sniffHeaderMime(source: ProbeSource): String? {
+        val header = try {
+            when (source) {
+                is ProbeSource.FromFile -> source.file.inputStream().use { readUpTo(it, 32) }
+                is ProbeSource.FromStream -> source.openStream()?.use { readUpTo(it, 32) }
+            }
+        } catch (e: Exception) {
+            null
+        } ?: return null
+        return sniffMime(header)
+    }
+
+    private fun readUpTo(input: InputStream, max: Int): ByteArray? {
+        val buffer = ByteArray(max)
+        var count = 0
+        while (count < max) {
+            val n = input.read(buffer, count, max - count)
+            if (n < 0) break
+            count += n
+        }
+        return if (count == 0) null else buffer.copyOf(count)
     }
 
     companion object {
