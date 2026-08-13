@@ -54,6 +54,7 @@ import com.chatbyyourside.ui.music.MusicScreen
 import com.chatbyyourside.ui.settings.BackendSettingsScreen
 import com.chatbyyourside.ui.settings.SettingsScreen
 import com.chatbyyourside.ui.theme.LocalDynamicAccent
+import com.chatbyyourside.ui.video.EncounterScreen
 import androidx.compose.ui.graphics.Color
 
 /**
@@ -185,6 +186,9 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false) {
                             onNavigateToCharacters = {
                                 navController.navigate(BottomTab.Characters.route) { launchSingleTop = true }
                             },
+                            onOpenEncounter = {
+                                feedNavController.navigate(FeedRoute.ENCOUNTER) { launchSingleTop = true }
+                            },
                         )
                     }
                     composable(FeedRoute.CHAT) {
@@ -196,6 +200,14 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false) {
                             onNavigateToCharacters = {
                                 navController.navigate(BottomTab.Characters.route) { launchSingleTop = true }
                             },
+                        )
+                    }
+                    composable(FeedRoute.ENCOUNTER) {
+                        EncounterScreen(
+                            container = container,
+                            // 底栏高度：浮层 dock 之上预留交互内容空间（背景层全屏铺满）。
+                            bottomBarHeight = bottomBarHeight,
+                            onBack = { feedNavController.popBackStack() },
                         )
                     }
                 }

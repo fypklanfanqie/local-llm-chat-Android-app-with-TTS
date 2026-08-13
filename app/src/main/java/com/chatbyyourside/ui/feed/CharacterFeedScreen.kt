@@ -57,6 +57,7 @@ import kotlinx.coroutines.launch
 object FeedRoute {
     const val FEED = "feed"
     const val CHAT = "chat_detail"
+    const val ENCOUNTER = "encounter"
 }
 
 /**
@@ -70,6 +71,8 @@ fun CharacterFeedScreen(
     bottomBarHeight: Dp = 0.dp,
     onOpenChat: (String) -> Unit,
     onNavigateToCharacters: () -> Unit,
+    /** 进入「邂逅」沉浸式视频历史流（顶栏玻璃按钮）。 */
+    onOpenEncounter: () -> Unit = {},
     /** 当前落定立绘的主题色上报（供 dock 栏等全局着色）；页面销毁时应回传 null 复位。 */
     onAccent: (Color?) -> Unit = {},
 ) {
@@ -206,6 +209,19 @@ fun CharacterFeedScreen(
                 ) {
                     Text(
                         "全部角色",
+                        color = Color.White.copy(alpha = 0.92f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+                GlassButton(
+                    onClick = onOpenEncounter,
+                    style = GlassButtonStyle.Glass,
+                    horizontalPadding = 12.dp,
+                    verticalPadding = 8.dp,
+                ) {
+                    Text(
+                        "邂逅",
                         color = Color.White.copy(alpha = 0.92f),
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium,
