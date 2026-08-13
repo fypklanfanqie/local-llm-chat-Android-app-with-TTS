@@ -338,6 +338,24 @@ class SeedanceClientTest {
         assertEquals("req-err-1", expectApiException().requestId)
     }
 
+    @Test
+    fun error_retryAfterHeaderSurfacedAsMillis() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(429).setHeader("Retry-After", "120").setBody("""{"error":{"code":"RateLimited"}}""")
+        )
+        val ex = expectApiException()
+        assertEquals(SeedanceError.TRANSIENT_429_5XX, ex.classification)
+        assertEquals(120_000L, ex.retryAfterMillis)
+    }
+
+    @Test
+    fun error_retryAfterNonNumericIsNull() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(500).setHeader("Retry-After", "soon").setBody("""{"error":{}}""")
+        )
+        assertNull(expectApiException().retryAfterMillis)
+    }
+
     // ---- 取消（已确认 DELETE） ----
 
     @Test

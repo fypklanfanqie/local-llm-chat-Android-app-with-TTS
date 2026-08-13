@@ -153,8 +153,11 @@ class SeedancePipelineCoordinatorTest {
     }
 
     private class FakeEncoder : SeedanceImageEncoder {
-        override suspend fun encode(path: String, mime: String): SeedanceImageContent =
-            SeedanceImageContent(mime, "base64-of-$path")
+        var fail = false
+        override suspend fun encode(path: String, mime: String): SeedanceImageContent {
+            if (fail) throw IOException("参考图缺失或不可读")
+            return SeedanceImageContent(mime, "base64-of-$path")
+        }
     }
 
     private class Env(initial: SeedanceVideo, root: File) {
@@ -334,19 +337,46 @@ class SeedancePipelineCoordinatorTest {
     }
 
     @Test
-    fun transient429AutoRetriesSubmit() = runBlocking {
+    fun transient429FailsSubmissionNeverResubmits() = runBlocking {
         val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
-        e.submitter.createError = { SeedanceApiException(SeedanceError.TRANSIENT_429_5XX, "繁忙") }
-        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        e.submitter.createError = {
+            SeedanceApiException(SeedanceError.TRANSIENT_429_5XX, "视频服务暂时繁忙（HTTP 429），请稍后重试")
+        }
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
         val t = e.store.current(1)
-        assertEquals(SeedanceVideoState.SUBMISSION_PENDING, t.state)
-        assertEquals(1, t.automaticRetryCount)
+        assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
+        assertEquals("TRANSIENT_429_5XX", t.errorCode)
+        assertEquals("manual", t.retryDisposition)
         assertFalse(t.requiresCostConfirmation)
-        // 重试成功
-        e.submitter.createError = null
-        e.submitter.createResult = { SeedanceTaskResponse(id = "remote-10", status = "queued") }
-        e.coordinator.advance(1)
-        assertEquals(SeedanceVideoState.QUEUED, e.store.current(1).state)
+        assertEquals(1, e.submitter.createCount)
+        assertNotNull(t.submissionAttemptId)
+        assertNotNull(t.requestFingerprint)
+    }
+
+    @Test
+    fun transient5xxFailsSubmissionNeverResubmits() = runBlocking {
+        val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
+        e.submitter.createError = { SeedanceApiException(SeedanceError.TRANSIENT_429_5XX, "视频服务暂时繁忙（HTTP 502），请稍后重试") }
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
+        assertEquals("manual", t.retryDisposition)
+        assertFalse(t.requiresCostConfirmation)
+        assertEquals(1, e.submitter.createCount)
+    }
+
+    @Test
+    fun imageEncodeFailureFailsSubmissionWithSnapshotStage() = runBlocking {
+        val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
+        e.encoder.fail = true
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
+        assertEquals("SNAPSHOT", t.errorStage)
+        assertEquals("manual", t.retryDisposition)
+        assertFalse(t.requiresCostConfirmation)
+        assertEquals(0, e.submitter.createCount)
+        assertNotNull(t.submissionAttemptId)
     }
 
     @Test
@@ -410,6 +440,24 @@ class SeedancePipelineCoordinatorTest {
         assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
         assertEquals(ERROR_CODE_AMBIGUOUS_POST, t.errorCode)
         assertTrue(t.requiresCostConfirmation)
+    }
+
+    @Test
+    fun normalizeFreshSubmittingIsNotReset() = runBlocking {
+        // clockNow=1_000_000；100 秒前开始提交，仍在 POST 超时内，不得复位（避免撞在途 Worker）。
+        val e = env(SeedanceVideoState.SUBMITTING) { copy(submissionStartedAt = 900_000L) }
+        e.coordinator.normalizeStaleInProgress()
+        assertEquals(SeedanceVideoState.SUBMITTING, e.store.current(1).state)
+    }
+
+    @Test
+    fun normalizeStaleSubmittingWithOldStartedAtIsReset() = runBlocking {
+        // 900 秒前开始提交，超过 5 分钟阈值，应复位为歧义失败。
+        val e = env(SeedanceVideoState.SUBMITTING) { copy(submissionStartedAt = 100_000L) }
+        e.coordinator.normalizeStaleInProgress()
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
+        assertEquals(ERROR_CODE_AMBIGUOUS_POST, t.errorCode)
     }
 
     @Test
@@ -481,6 +529,20 @@ class SeedancePipelineCoordinatorTest {
         assertEquals(SeedanceVideoState.QUEUED, t.state)
         assertEquals(1, t.automaticRetryCount)
         assertNotNull(t.nextRetryAt)
+    }
+
+    @Test
+    fun pollRetryHonorsRetryAfterMillis() = runBlocking {
+        val e = env(SeedanceVideoState.QUEUED) { copy(remoteTaskId = "remote-1") }
+        e.submitter.getError = {
+            SeedanceApiException(SeedanceError.TRANSIENT_429_5XX, "繁忙", retryAfterMillis = 2_000L)
+        }
+        val outcome = e.coordinator.advance(1)
+        assertTrue(outcome is PipelineOutcome.Reschedule)
+        assertEquals(2_000L, (outcome as PipelineOutcome.Reschedule).delayMillis)
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.QUEUED, t.state)
+        assertEquals(1, t.automaticRetryCount)
     }
 
     @Test

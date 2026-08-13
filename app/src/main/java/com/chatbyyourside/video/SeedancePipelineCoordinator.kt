@@ -143,6 +143,9 @@ const val ERROR_CODE_AMBIGUOUS_POST = "AMBIGUOUS_POST"
 /** 视频签名 URL 预估有效期（Seedance 返回的签名地址通常约 1 小时）。 */
 private const val URL_TTL_MILLIS = 60 * 60_000L
 
+/** SUBMITTING 残留判定阈值：超过该时长未完成即视为中断，可复位为 FAILED_SUBMISSION（歧义）。 */
+private const val SUBMISSION_STALE_THRESHOLD_MS = 5 * 60_000L
+
 private const val STAGE_SNAPSHOT = "SNAPSHOT"
 private const val STAGE_PROMPT = "PROMPT"
 private const val STAGE_SUBMIT = "SUBMIT"
@@ -210,11 +213,18 @@ class SeedancePipelineCoordinator(
         store.listByStates(setOf(SeedanceVideoState.DOWNLOADING)).forEach { stale ->
             store.claim(stale.id, SeedanceVideoState.DOWNLOADING, SeedanceVideoState.DOWNLOAD_PENDING)
         }
+        // SUBMITTING 可能是并发恢复中被重新认领的「在途」任务，仅当确实陈旧（无 startedAt 或
+        // 超过阈值）才按歧义复位，避免误复位仍在进行的 POST。
+        val now = clock()
         store.listByStates(setOf(SeedanceVideoState.SUBMITTING)).forEach { stale ->
-            store.transition(stale.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
-                it.copy(errorStage = STAGE_SUBMIT, errorCode = ERROR_CODE_AMBIGUOUS_POST,
-                    errorMessage = "提交中断，无法确认任务是否已创建，请确认后重试",
-                    requiresCostConfirmation = true, retryDisposition = "ambiguous_post")
+            val startedAt = stale.submissionStartedAt
+            val isStale = startedAt == null || now - startedAt > SUBMISSION_STALE_THRESHOLD_MS
+            if (isStale) {
+                store.transition(stale.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
+                    it.copy(errorStage = STAGE_SUBMIT, errorCode = ERROR_CODE_AMBIGUOUS_POST,
+                        errorMessage = "提交中断，无法确认任务是否已创建，请确认后重试",
+                        requiresCostConfirmation = true, retryDisposition = "ambiguous_post")
+                }
             }
         }
     }
@@ -353,18 +363,30 @@ class SeedancePipelineCoordinator(
             ))
         }
 
-        val request = CreateSeedanceTask(
-            finalPrompt = finalPrompt,
-            character = encoder.encode(charPath, charMime),
-            background = task.backgroundImagePath?.takeIf { it.isNotBlank() }?.let { path ->
-                encoder.encode(path, task.backgroundImageMime ?: charMime)
-            },
-            variant = task.modelVariant,
-            resolution = task.resolution,
-            ratio = task.ratio,
-            durationSeconds = task.durationSeconds,
-            watermark = task.watermark,
-        )
+        // 参考图编码 + 请求构造与提交放入同一段受控流程：编码抛异常（参考图缺失/不可读）
+        // 时转 FAILED_SUBMISSION/SNAPSHOT 等待用户，而不是把任务留在 SUBMITTING 直到下次重启。
+        val request = try {
+            CreateSeedanceTask(
+                finalPrompt = finalPrompt,
+                character = encoder.encode(charPath, charMime),
+                background = task.backgroundImagePath?.takeIf { it.isNotBlank() }?.let { path ->
+                    encoder.encode(path, task.backgroundImageMime ?: charMime)
+                },
+                variant = task.modelVariant,
+                resolution = task.resolution,
+                ratio = task.ratio,
+                durationSeconds = task.durationSeconds,
+                watermark = task.watermark,
+            )
+        } catch (e: Exception) {
+            store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
+                it.copy(errorStage = STAGE_SNAPSHOT, errorCode = "SNAPSHOT_ENCODE_FAILED",
+                    errorMessage = "参考图缺失或不可读", requiresCostConfirmation = false,
+                    retryDisposition = "manual",
+                    submissionAttemptId = attemptId, submissionStartedAt = startedAt, requestFingerprint = fingerprint)
+            }
+            return PipelineOutcome.WaitingForUser
+        }
 
         val response = try {
             submitter.create(config, request)
@@ -412,29 +434,13 @@ class SeedancePipelineCoordinator(
                 }
                 PipelineOutcome.WaitingForUser
             }
-            SeedanceError.TRANSIENT_429_5XX -> {
-                // 明确 429/5xx 未受理：有界自动重试。
-                val delay = retryPolicy.retryDelayMillis(task.automaticRetryCount)
-                if (delay == null) {
-                    store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
-                        it.copy(errorStage = STAGE_SUBMIT, errorCode = code,
-                            errorMessage = e.message, retryDisposition = "manual")
-                    }
-                    PipelineOutcome.WaitingForUser
-                } else {
-                    store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.SUBMISSION_PENDING) {
-                        it.copy(nextRetryAt = clock() + delay, automaticRetryCount = it.automaticRetryCount + 1,
-                            errorStage = STAGE_SUBMIT, errorCode = code,
-                            errorMessage = e.message, retryDisposition = "bounded_retry")
-                    }
-                    PipelineOutcome.Reschedule(delay)
-                }
-            }
+            // 任何非歧义的明确失败（含 429/5xx）：POST **绝不**自动重发。502/504 可能是在服务端
+            // 已创建任务之后才返回，自动重发会重复计费；一律转 FAILED_SUBMISSION 等待用户确认。
             else -> {
-                // 明确 4xx / 敏感 / 配额等：非歧义失败，不自动重发。
                 store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
                     it.copy(errorStage = STAGE_SUBMIT, errorCode = code,
                         errorMessage = e.message, retryDisposition = "manual",
+                        requiresCostConfirmation = false,
                         submissionAttemptId = attemptId, submissionStartedAt = startedAt, requestFingerprint = fingerprint)
                 }
                 PipelineOutcome.WaitingForUser
@@ -466,7 +472,7 @@ class SeedancePipelineCoordinator(
     }
 
     private suspend fun handlePollFailure(task: SeedanceVideo, e: SeedanceApiException): PipelineOutcome {
-        val delay = retryPolicy.retryDelayMillis(task.automaticRetryCount)
+        val delay = retryPolicy.retryDelayMillis(task.automaticRetryCount, e.retryAfterMillis)
         if (delay == null) {
             store.transition(task.id, task.state, SeedanceVideoState.FAILED_QUERY) {
                 it.copy(errorStage = STAGE_QUERY, errorCode = e.classification.name,
@@ -634,8 +640,9 @@ class SeedancePipelineCoordinator(
         stage: String,
         code: String,
         message: String?,
+        retryAfterMillis: Long? = null,
     ): PipelineOutcome {
-        val delay = retryPolicy.retryDelayMillis(task.automaticRetryCount)
+        val delay = retryPolicy.retryDelayMillis(task.automaticRetryCount, retryAfterMillis)
         if (delay == null) {
             store.transition(task.id, from, exhaustedState) {
                 it.copy(errorStage = stage, errorCode = code,

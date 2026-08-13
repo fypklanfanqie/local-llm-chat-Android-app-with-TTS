@@ -26,7 +26,7 @@ class SeedanceRetryPolicy(
     fun retryDelayMillis(automaticRetryCount: Int, retryAfterMillis: Long? = null): Long? {
         if (automaticRetryCount >= maxAutomaticRetries) return null
         if (retryAfterMillis != null && retryAfterMillis > 0) {
-            return minOf(retryAfterMillis, maxBackoffMillis)
+            return minOf(retryAfterMillis, MAX_RETRY_AFTER_MILLIS)
         }
         val exponent = automaticRetryCount.coerceAtMost(30)
         val factor = 1L shl exponent
@@ -42,6 +42,9 @@ class SeedanceRetryPolicy(
 
         /** 退避封顶。 */
         const val DEFAULT_MAX_BACKOFF_MILLIS = 5 * 60_000L
+
+        /** Retry-After 头封顶：服务端指令最长采纳 10 分钟。 */
+        const val MAX_RETRY_AFTER_MILLIS = 10 * 60_000L
 
         /** 排队/生成中任务的下一次轮询间隔。 */
         const val POLL_INTERVAL_MILLIS = 10_000L

@@ -67,6 +67,8 @@ class SeedanceApiException(
     val remoteCode: String? = null,
     val requestId: String? = null,
     val taskId: String? = null,
+    /** 服务端 Retry-After 头（秒 → 毫秒）；缺失/非数值时为 null。 */
+    val retryAfterMillis: Long? = null,
     cause: Throwable? = null,
 ) : Exception(message, cause)
 

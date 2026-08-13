@@ -137,7 +137,7 @@ class SeedanceClient(
                     val requestId = extractRequestId(response)
                     val raw = response.body?.string().orEmpty()
                     if (!response.isSuccessful) {
-                        throw buildApiError(response.code, raw, requestId, taskId)
+                        throw buildApiError(response.code, raw, requestId, taskId, response.retryAfterMillis())
                     }
                     parseResponse(raw).copy(requestId = requestId)
                 }
@@ -161,6 +161,7 @@ class SeedanceClient(
         raw: String,
         requestId: String?,
         taskId: String?,
+        retryAfterMillis: Long?,
     ): SeedanceApiException {
         val (code, message) = parseErrorBody(raw)
         val classification = classifySeedanceError(httpStatus, code, message)
@@ -173,8 +174,13 @@ class SeedanceClient(
             remoteCode = code,
             requestId = requestId,
             taskId = taskId,
+            retryAfterMillis = retryAfterMillis,
         )
     }
+
+    /** 解析 Retry-After 头（秒 → 毫秒）；缺失或非数值时返回 null。 */
+    private fun Response.retryAfterMillis(): Long? =
+        header("Retry-After")?.trim()?.toLongOrNull()?.takeIf { it > 0 }?.let { it * 1_000L }
 
     private fun buildCreateRequest(config: SeedanceConfig, request: CreateSeedanceTask): CreateSeedanceTaskRequest {
         val content = mutableListOf<SeedanceContentPart>(
