@@ -61,6 +61,9 @@ class ChatViewModel(
     /** 最近一次历史快照，供深度思考开关切换时重渲染（show/hide 思考过程）。 */
     private var latestHistory: List<ChatMessage> = emptyList()
 
+    /** 最近一次会话内 Seedance 视频快照，供深度思考开关切换时重渲染（否则视频卡会被空列表冲掉）。 */
+    private var latestVideos: List<SeedanceVideo> = emptyList()
+
     /**
      * 乐观完成消息：assistant 已落库但 Room Flow 尚未回填该行的临时桥。
      * Room 快照包含同一 databaseId 或切走会话时才清除（见 [renderMessages]），
@@ -135,6 +138,7 @@ class ChatViewModel(
                     }
                     .collect { (history, videos) ->
                         latestHistory = history
+                        latestVideos = videos
                         renderMessages(history, videos)
                     }
             } catch (e: CancellationException) { throw e }
@@ -195,7 +199,7 @@ class ChatViewModel(
             try {
                 container.settingsRepository.deepThinking.collect { enabled ->
                     _uiState.update { it.copy(deepThinkingEnabled = enabled) }
-                    renderMessages(latestHistory)
+                    renderMessages(latestHistory, videos = latestVideos)
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
