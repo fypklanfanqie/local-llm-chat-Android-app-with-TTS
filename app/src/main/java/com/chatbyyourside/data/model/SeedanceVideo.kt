@@ -5,24 +5,36 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 /**
- * 手动重试视为「重新生成」：把当前 [SeedanceVideo.remoteTaskId] 追加进
+ * 手动重试的通用准备：按目标入口状态 [entryState] 决定是否走「重新生成」语义。
+ *
+ * 仅当 [entryState] == [SeedanceVideoState.SUBMISSION_PENDING]（FAILED_SUBMISSION /
+ * FAILED_REMOTE / EXPIRED 重试）才归档当前 [SeedanceVideo.remoteTaskId] 进
  * [SeedanceVideo.previousRemoteTasksJson]（JSON 字符串数组；解析失败/脏数据时从空数组
- * 重新开始，绝不让坏值阻塞重试），[SeedanceVideo.generationAttempt] += 1，并重置
- * [SeedanceVideo.automaticRetryCount] 与 [SeedanceVideo.requiresCostConfirmation]
- * （用户已确认才走到手动重试，无需再卡一次费用确认）。
+ * 重新开始，绝不让坏值阻塞重试）并 [SeedanceVideo.generationAttempt] += 1。
+ *
+ * 其余重试（FAILED_QUERY -> QUEUED 继续查询、FAILED_DOWNLOAD -> DOWNLOAD_PENDING
+ * 重新下载、FAILED_SNAPSHOT -> SNAPSHOT_PENDING / FAILED_PROMPT -> PROMPT_PENDING）不归档
+ * 也不加次数：QUERY/DOWNLOAD 复用的是仍在生效的同一 remoteTaskId，SNAPSHOT/PROMPT 从未
+ * 创建过远端任务。
+ *
+ * [SeedanceVideo.automaticRetryCount] = 0 与 [SeedanceVideo.requiresCostConfirmation] = false
+ * 对**所有**手动重试无条件重置（用户已确认才走到手动重试，无需再卡一次费用确认）。
  *
  * 供 [com.chatbyyourside.ui.chat.ChatViewModel.retryVideoTask] 与
  * [com.chatbyyourside.ui.video.EncounterViewModel.retryTask] 共用。
  */
-internal fun SeedanceVideo.prepareRegenerationRetry(): SeedanceVideo {
-    val archived = if (remoteTaskId.isNullOrBlank()) previousRemoteTasksJson else {
+internal fun SeedanceVideo.prepareRetry(entryState: SeedanceVideoState): SeedanceVideo {
+    val regenerate = entryState == SeedanceVideoState.SUBMISSION_PENDING
+    val archived = if (regenerate && !remoteTaskId.isNullOrBlank()) {
         val existing = runCatching { Json.decodeFromString<List<String>>(previousRemoteTasksJson) }
             .getOrElse { emptyList() }
         Json.encodeToString(existing + remoteTaskId)
+    } else {
+        previousRemoteTasksJson
     }
     return copy(
         previousRemoteTasksJson = archived,
-        generationAttempt = generationAttempt + 1,
+        generationAttempt = if (regenerate) generationAttempt + 1 else generationAttempt,
         automaticRetryCount = 0,
         requiresCostConfirmation = false,
     )

@@ -431,15 +431,17 @@ class ChatViewModel(
      * FAILED_DOWNLOAD -> DOWNLOAD_PENDING。费用性重试（FAILED_REMOTE/EXPIRED/歧义 FAILED_SUBMISSION）
      * 由视频卡先弹确认对话框，用户确认后才调用本方法。
      *
-     * 手动重试 = 重新生成：先把当前 remoteTaskId 归档进 previousRemoteTasksJson、
-     * generationAttempt += 1、重置自动退避与费用确认标记，再回到入口状态。
+     * 手动重试走 [com.chatbyyourside.data.model.prepareRetry]：仅当回入口状态
+     * SUBMISSION_PENDING（重新生成）才归档当前 remoteTaskId 进 previousRemoteTasksJson 并
+     * generationAttempt += 1；继续查询/重新下载复用同一 remoteTaskId 不归档不加次数。
+     * 所有手动重试都重置自动退避与费用确认标记，再回到入口状态。
      */
     fun retryVideoTask(taskId: Long) {
         viewModelScope.launch {
             val video = container.seedanceVideoRepository.getById(taskId) ?: return@launch
             val entry = retryEntryStateOf(video.state) ?: return@launch
             container.seedanceVideoRepository.update(
-                video.prepareRegenerationRetry().copy(
+                video.prepareRetry(entry).copy(
                     state = entry,
                     errorStage = null,
                     errorCode = null,

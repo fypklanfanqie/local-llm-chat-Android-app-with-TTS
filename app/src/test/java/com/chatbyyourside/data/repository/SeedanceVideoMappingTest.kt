@@ -6,6 +6,7 @@ import com.chatbyyourside.data.model.SeedanceRatio
 import com.chatbyyourside.data.model.SeedanceResolution
 import com.chatbyyourside.data.model.SeedanceVideo
 import com.chatbyyourside.data.model.SeedanceVideoState
+import com.chatbyyourside.data.model.prepareRetry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -470,5 +471,106 @@ class SeedanceVideoMappingTest {
         assertNull(e.sourceUserMessageId)
         assertNull(e.backgroundImageSourceSnapshot)
         assertEquals("", e.sceneDescriptionSnapshot)
+    }
+
+    // ===== 手动重试准备（prepareRetry，Task 10 验收） =====
+
+    /**
+     * 重新生成重试（目标 SUBMISSION_PENDING）：归档当前 remoteTaskId 追加进
+     * previousRemoteTasksJson、generationAttempt += 1；重置无条件生效。
+     */
+    @Test
+    fun prepareRetry_submissionPending_archivesRemoteTaskAndBumpsAttempt() {
+        val v = domain().copy(
+            state = SeedanceVideoState.FAILED_REMOTE,
+            remoteTaskId = "t-123",
+            previousRemoteTasksJson = """["t-old-1","t-old-2"]""",
+            generationAttempt = 1,
+            automaticRetryCount = 2,
+            requiresCostConfirmation = true,
+        )
+
+        val prepared = v.prepareRetry(SeedanceVideoState.SUBMISSION_PENDING)
+
+        // 归档追加当前 remoteTaskId（JSON 数组按序）
+        assertEquals("""["t-old-1","t-old-2","t-123"]""", prepared.previousRemoteTasksJson)
+        assertEquals(2, prepared.generationAttempt)
+        // 重置对所有手动重试无条件生效
+        assertEquals(0, prepared.automaticRetryCount)
+        assertEquals(false, prepared.requiresCostConfirmation)
+    }
+
+    /** 继续查询（FAILED_QUERY -> QUEUED）：复用同一 remoteTaskId，不归档也不加次数。 */
+    @Test
+    fun prepareRetry_continueQuery_doesNotArchiveActiveTaskNorBump() {
+        val v = domain().copy(
+            state = SeedanceVideoState.FAILED_QUERY,
+            remoteTaskId = "t-active",
+            previousRemoteTasksJson = """["t-old-1"]""",
+            generationAttempt = 3,
+            automaticRetryCount = 2,
+            requiresCostConfirmation = true,
+        )
+
+        val prepared = v.prepareRetry(SeedanceVideoState.QUEUED)
+
+        assertEquals("""["t-old-1"]""", prepared.previousRemoteTasksJson)
+        assertEquals(3, prepared.generationAttempt)
+        assertEquals(0, prepared.automaticRetryCount)
+        assertEquals(false, prepared.requiresCostConfirmation)
+    }
+
+    /** 重新下载（FAILED_DOWNLOAD -> DOWNLOAD_PENDING）：复用同一 remoteTaskId，不归档也不加次数。 */
+    @Test
+    fun prepareRetry_redownload_doesNotArchiveActiveTaskNorBump() {
+        val v = domain().copy(
+            state = SeedanceVideoState.FAILED_DOWNLOAD,
+            remoteTaskId = "t-active",
+            previousRemoteTasksJson = """["t-old-1"]""",
+            generationAttempt = 3,
+            automaticRetryCount = 2,
+            requiresCostConfirmation = true,
+        )
+
+        val prepared = v.prepareRetry(SeedanceVideoState.DOWNLOAD_PENDING)
+
+        assertEquals("""["t-old-1"]""", prepared.previousRemoteTasksJson)
+        assertEquals(3, prepared.generationAttempt)
+        assertEquals(0, prepared.automaticRetryCount)
+        assertEquals(false, prepared.requiresCostConfirmation)
+    }
+
+    /** 快照/提示词重试：从未创建远端任务（remoteTaskId 为空），不归档也不加次数。 */
+    @Test
+    fun prepareRetry_snapshotOrPrompt_noRemoteTask_doesNotArchiveNorBump() {
+        val snap = domain().copy(
+            state = SeedanceVideoState.FAILED_SNAPSHOT,
+            remoteTaskId = null,
+            previousRemoteTasksJson = "",
+            generationAttempt = 0,
+            automaticRetryCount = 2,
+            requiresCostConfirmation = true,
+        )
+
+        val preparedSnap = snap.prepareRetry(SeedanceVideoState.SNAPSHOT_PENDING)
+        assertEquals("", preparedSnap.previousRemoteTasksJson)
+        assertEquals(0, preparedSnap.generationAttempt)
+        assertEquals(0, preparedSnap.automaticRetryCount)
+        assertEquals(false, preparedSnap.requiresCostConfirmation)
+
+        val prompt = domain().copy(
+            state = SeedanceVideoState.FAILED_PROMPT,
+            remoteTaskId = null,
+            previousRemoteTasksJson = "",
+            generationAttempt = 1,
+            automaticRetryCount = 2,
+            requiresCostConfirmation = true,
+        )
+
+        val preparedPrompt = prompt.prepareRetry(SeedanceVideoState.PROMPT_PENDING)
+        assertEquals("", preparedPrompt.previousRemoteTasksJson)
+        assertEquals(1, preparedPrompt.generationAttempt)
+        assertEquals(0, preparedPrompt.automaticRetryCount)
+        assertEquals(false, preparedPrompt.requiresCostConfirmation)
     }
 }
