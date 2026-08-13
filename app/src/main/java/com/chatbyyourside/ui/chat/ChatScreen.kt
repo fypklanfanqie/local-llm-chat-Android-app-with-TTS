@@ -61,9 +61,13 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import android.os.Build
 import android.widget.Toast
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.chatbyyourside.data.model.TtsLanguage
 import coil.compose.AsyncImage
 import com.chatbyyourside.AppContainer
@@ -73,11 +77,17 @@ import com.chatbyyourside.data.model.Conversation
 import com.chatbyyourside.data.model.DisplayMessage
 import com.chatbyyourside.data.model.MessageCompletionState
 import com.chatbyyourside.data.model.MessageSegment
+import com.chatbyyourside.data.model.SeedanceVideo
 import com.chatbyyourside.data.repository.ChatBackgroundConfig
 import com.chatbyyourside.perfmon.PerformanceGlassOverlay
 import com.chatbyyourside.ui.glass.GlassSegmented
 import com.chatbyyourside.ui.navigation.ClampedImeBottomPadding
+import com.chatbyyourside.ui.video.BgmDuck
+import com.chatbyyourside.ui.video.LocalSeedancePlaybackController
+import com.chatbyyourside.ui.video.SEEDANCE_FULLSCREEN_PLAYER_TAG
+import com.chatbyyourside.ui.video.SeedancePlaybackController
 import com.chatbyyourside.ui.video.SeedanceVideoCard
+import com.chatbyyourside.ui.video.SeedanceVideoPlayer
 import com.chatbyyourside.ui.glass.LocalBackdropState
 import com.chatbyyourside.ui.glass.MonogramAvatar
 import com.chatbyyourside.ui.glass.frostedGlass
@@ -85,6 +95,10 @@ import com.chatbyyourside.ui.glass.liquidGlass
 import com.chatbyyourside.ui.applySystemBarIcons
 import com.chatbyyourside.ui.theme.GlassShapes
 import com.chatbyyourside.ui.theme.LocalDarkTheme
+import com.chatbyyourside.video.SeedanceVideoExporter
+import com.chatbyyourside.video.VideoExportTarget
+import com.chatbyyourside.video.exportTargetForSdk
+import com.chatbyyourside.video.suggestedVideoFileName
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -202,6 +216,85 @@ fun ChatScreen(
         }
     }
 
+    // ===== Seedance 视频播放 / 导出（Task 8）=====
+    // 屏幕级唯一播放控制器：内联卡片与全屏共用同一 ExoPlayer，只播放本地归档文件；
+    // 视频出声时暂停全局 BGM、退后台/销毁时暂停并释放（绝不复用 audioManager 的播放器实例）。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val playbackController = remember {
+        SeedancePlaybackController(
+            context = context.applicationContext,
+            bgm = object : BgmDuck {
+                override fun isPlaying(): Boolean = container.audioManager.isPlaying
+                override fun pause() { container.audioManager.pauseMusic() }
+                override fun resume() { container.audioManager.playMusic() }
+            },
+            lifecycle = lifecycleOwner.lifecycle,
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { playbackController.release() }
+    }
+
+    val exporter = remember { SeedanceVideoExporter(context.applicationContext) }
+    val videoScope = rememberCoroutineScope()
+    // Android 7–9 导出：SAF ACTION_CREATE_DOCUMENT 由用户选择保存位置后流式写入内部文件。
+    var pendingExport by remember { mutableStateOf<Pair<SeedanceVideo, String>?>(null) }
+    val createDocumentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("video/*")
+    ) { uri ->
+        val pending = pendingExport
+        pendingExport = null
+        if (uri != null && pending != null) {
+            val (video, _) = pending
+            videoScope.launch {
+                exporter.exportToUri(video, uri).onSuccess {
+                    Toast.makeText(context, "视频已保存到所选位置", Toast.LENGTH_SHORT).show()
+                }.onFailure { e ->
+                    Toast.makeText(context, "保存失败：${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+    // 内联播放开关（卡片「播放」）：同一视频再次点击暂停，其他视频切换加载；全屏由卡片 onFullScreen 接管。
+    val handleVideoPlay: (SeedanceVideo) -> Unit = { video ->
+        val path = video.localVideoPath
+        if (path.isNullOrBlank()) {
+            Toast.makeText(context, "视频文件尚未就绪", Toast.LENGTH_SHORT).show()
+        } else {
+            playbackController.toggle(File(path))
+        }
+    }
+    // 全屏预览（卡片「全屏」）：确保该视频已加载播放后开启全屏，内联表面让出，仅全屏表面持有播放器。
+    val handleVideoFullScreen: (SeedanceVideo) -> Unit = { video ->
+        val path = video.localVideoPath
+        if (path.isNullOrBlank()) {
+            Toast.makeText(context, "视频文件尚未就绪", Toast.LENGTH_SHORT).show()
+        } else {
+            playbackController.play(File(path))
+            playbackController.setFullScreen(true)
+        }
+    }
+    // 保存到本地（卡片「保存到本地」）：Android 10+ 写 MediaStore 相册；7–9 弹 SAF 选择器后流式写入。
+    val handleVideoExport: (SeedanceVideo) -> Unit = { video ->
+        if (video.localVideoPath.isNullOrBlank()) {
+            Toast.makeText(context, "视频文件尚未就绪", Toast.LENGTH_SHORT).show()
+        } else {
+            when (exportTargetForSdk(Build.VERSION.SDK_INT)) {
+                VideoExportTarget.MediaStoreMovies -> videoScope.launch {
+                    exporter.exportToMediaStore(video).onSuccess {
+                        Toast.makeText(context, "视频已保存到相册 Movies/ChatByYourSide", Toast.LENGTH_SHORT).show()
+                    }.onFailure { e ->
+                        Toast.makeText(context, "保存失败：${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                VideoExportTarget.CreateDocument -> {
+                    pendingExport = video to suggestedVideoFileName(video)
+                    createDocumentLauncher.launch(suggestedVideoFileName(video))
+                }
+            }
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -273,15 +366,22 @@ fun ChatScreen(
                         },
                     )
                 } else {
-                    ChatMessageList(
-                        state = state,
-                        onTts = { viewModel.playTts(it) },
-                        modifier = Modifier.fillMaxSize(),
-                        // Task 8 接入播放/导出（当前为 null，READY 卡不渲染播放/保存按钮）；
-                        // Task 7 接取消/重试。
-                        onCancelVideo = { viewModel.cancelVideoTask(it.id) },
-                        onRetryVideo = { viewModel.retryVideoTask(it.id) },
-                    )
+                    // 屏幕级播放控制器注入：卡片经 CompositionLocal 判定活动内联表面并驱动全屏。
+                    CompositionLocalProvider(
+                        LocalSeedancePlaybackController provides playbackController,
+                    ) {
+                        ChatMessageList(
+                            state = state,
+                            onTts = { viewModel.playTts(it) },
+                            modifier = Modifier.fillMaxSize(),
+                            // Task 8：内联播放开关 / 全屏 / 保存到本地；Task 7 接取消/重试。
+                            onPlayVideo = { video -> handleVideoPlay(video) },
+                            onFullScreenVideo = { video -> handleVideoFullScreen(video) },
+                            onExportVideo = { video -> handleVideoExport(video) },
+                            onCancelVideo = { viewModel.cancelVideoTask(it.id) },
+                            onRetryVideo = { viewModel.retryVideoTask(it.id) },
+                        )
+                    }
                 }
 
                 val ttsActive = state.ttsLoadingIndex >= 0 || state.ttsPlayingIndex >= 0
@@ -340,6 +440,19 @@ fun ChatScreen(
                 onRename = { id, title -> viewModel.renameConversation(id, title) },
                 onDelete = { viewModel.deleteConversation(it) },
                 onDismiss = { viewModel.toggleConversationSheet(false) },
+            )
+        }
+
+        // Seedance 全屏预览（Task 8）：全屏 Dialog，与内联卡片共用同一播放器；
+        // 打开时内联表面让出，同一时刻仅一个活动表面；关闭即暂停。
+        val fullScreenOpen by playbackController.fullScreen.collectAsState()
+        if (fullScreenOpen) {
+            SeedanceFullScreenPlayer(
+                player = playbackController.player,
+                onClose = {
+                    playbackController.setFullScreen(false)
+                    playbackController.pause()
+                },
             )
         }
     }
@@ -692,6 +805,7 @@ internal fun MessageBubble(
     characterName: String,
     onTts: () -> Unit,
     onPlayVideo: (() -> Unit)? = null,
+    onFullScreenVideo: (() -> Unit)? = null,
     onExportVideo: (() -> Unit)? = null,
     onCancelVideo: (() -> Unit)? = null,
     onRetryVideo: (() -> Unit)? = null,
@@ -834,6 +948,7 @@ internal fun MessageBubble(
                     SeedanceVideoCard(
                         video = video,
                         onPlay = onPlayVideo,
+                        onFullScreen = onFullScreenVideo,
                         onExport = onExportVideo,
                         onCancel = onCancelVideo,
                         onRetry = onRetryVideo,
@@ -1536,6 +1651,43 @@ private fun ConversationItem(
             }
             IconButton(onClick = onDelete, modifier = Modifier.size(30.dp)) {
                 Icon(Icons.Outlined.Delete, contentDescription = "删除", tint = scheme.error, modifier = Modifier.size(16.dp))
+            }
+        }
+    }
+}
+
+/**
+ * Seedance 全屏预览（Task 8）：全屏 [Dialog] 内挂载 [SeedanceVideoPlayer]，
+ * 与内联卡片共用同一 [SeedancePlaybackController] 的播放器——全屏开启时内联表面让出，
+ * 仅全屏表面挂载播放器，保证同一时刻至多一个活动表面。关闭即暂停并让出音频。
+ */
+@Composable
+private fun SeedanceFullScreenPlayer(
+    player: androidx.media3.common.Player,
+    onClose: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize().background(Color.Black),
+            contentAlignment = Alignment.Center,
+        ) {
+            SeedanceVideoPlayer(
+                player = player,
+                showControls = true,
+                testTag = SEEDANCE_FULLSCREEN_PLAYER_TAG,
+                modifier = Modifier.fillMaxSize(),
+            )
+            IconButton(
+                onClick = onClose,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .size(40.dp),
+            ) {
+                Icon(Icons.Outlined.Close, contentDescription = "关闭全屏", tint = Color.White)
             }
         }
     }

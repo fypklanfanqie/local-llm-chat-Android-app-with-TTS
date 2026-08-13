@@ -156,8 +156,8 @@ dependencies {
 
     // Media3
     implementation(libs.androidx.media3.exoplayer)
-    // media3-ui 未使用（无 PlayerView/StyledPlayerView），移除以减小体积
-    // implementation(libs.androidx.media3.ui)
+    // media3-ui：Seedance 视频卡内联播放与全屏预览的 PlayerView 宿主（Task 8）
+    implementation(libs.androidx.media3.ui)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)

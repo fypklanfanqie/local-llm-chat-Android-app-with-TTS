@@ -26,6 +26,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,14 +53,18 @@ const val SEEDANCE_VIDEO_CARD_TAG = "seedance_video_card"
  *    重新生成提示词 / 重新提交 / 重新生成）；
  *  - 费用性重试（FAILED_REMOTE / EXPIRED / 歧义 FAILED_SUBMISSION）必须先弹确认对话框
  *    （「可能产生费用，确认重新生成？」），用户确认后才调用 [onRetry]；
- *  - READY 显示播放 / 全屏 / 保存到本地；播放与导出回调由 Task 8 注入——回调为 null 时不渲染对应按钮。
+ *  - READY 显示播放 / 全屏 / 保存到本地；播放 / 全屏 / 导出回调由 Task 8 注入——回调为 null 时不渲染对应按钮。
  *
- * [onCancel]/[onRetry] 由 ViewModel 提供（Task 7 已接线）；[onPlay]/[onExport] 由 Task 8 接线。
+ * [onCancel]/[onRetry] 由 ViewModel 提供（Task 7 已接线）；[onPlay]/[onExport]/[onFullScreen] 由 Task 8 接线。
+ * 活动内联表面判定读取 [LocalSeedancePlaybackController]（屏幕级控制器由 ChatScreen 提供）：卡片仅
+ * 在自身是「活动内联视频」（controller 已加载本卡且全屏未开启）时挂载内联播放器表面（见
+ * [SeedanceVideoPlayer]），其余卡片显示预览占位——防止 LazyColumn 每行一个 PlayerView。
  */
 @Composable
 fun SeedanceVideoCard(
     video: SeedanceVideo,
     onPlay: (() -> Unit)? = null,
+    onFullScreen: (() -> Unit)? = null,
     onExport: (() -> Unit)? = null,
     onCancel: (() -> Unit)? = null,
     onRetry: (() -> Unit)? = null,
@@ -69,6 +74,13 @@ fun SeedanceVideoCard(
     // 费用性重试确认对话框：状态或任务 id 变化时重置，避免陈旧对话框残留。
     var confirmRegenerate by remember(video.id, video.state) { mutableStateOf(false) }
     val costBearing = isCostBearingRetry(video)
+    // 活动内联表面判定（Task 8）：屏幕级控制器（CompositionLocal）已加载本视频且全屏未开启 →
+    // 本卡挂载 PlayerView；其余卡片（或未接线控制器）显示预览占位，保证同一时刻至多一个活动表面。
+    val controller = LocalSeedancePlaybackController.current
+    val activePath = controller?.activePath?.let { it.collectAsState().value }
+    val fullScreen = controller?.fullScreen?.let { it.collectAsState().value } == true
+    val isActiveInline = !fullScreen && activePath != null &&
+        video.localVideoPath != null && activePath == video.localVideoPath
 
     Surface(
         color = scheme.surfaceContainerLow,
@@ -98,7 +110,20 @@ fun SeedanceVideoCard(
 
             when (video.state) {
                 SeedanceVideoState.READY -> {
-                    PreviewPlaceholder(video = video)
+                    if (isActiveInline) {
+                        // 活动内联视频：挂载 PlayerView（与全屏共用同一播放器，同一时刻仅一个表面）。
+                        SeedanceVideoPlayer(
+                            player = controller?.player,
+                            showControls = false,
+                            testTag = SEEDANCE_INLINE_PLAYER_TAG,
+                            modifier = Modifier
+                                .padding(top = 8.dp)
+                                .fillMaxWidth()
+                                .height(96.dp),
+                        )
+                    } else {
+                        PreviewPlaceholder(video = video)
+                    }
                     Row(
                         modifier = Modifier.padding(top = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -107,8 +132,8 @@ fun SeedanceVideoCard(
                             CardActionButton("播放", onPlay, leadingIcon = {
                                 Icon(Icons.Outlined.PlayArrow, contentDescription = null, modifier = Modifier.size(12.dp))
                             })
-                            // 全屏播放（Task 8 由 onPlay 处理器区分内联/全屏；此处共用同一入口）。
-                            CardActionButton("全屏", onPlay, leadingIcon = {
+                            // 全屏：Task 8 提供独立入口；未接线时回退到 onPlay（与 Task 7 共用入口兼容）。
+                            CardActionButton("全屏", onFullScreen ?: onPlay, leadingIcon = {
                                 Icon(Icons.Outlined.Fullscreen, contentDescription = null, modifier = Modifier.size(12.dp))
                             })
                         }
