@@ -913,8 +913,9 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
     val sceneStore = remember { SeedanceSceneStore(context) }
 
     // 可编辑字段只在进入组合后播种一次（读持久化配置），之后不再随 config 流回填。
-    // 背景图选择/清除只改本地 backgroundPath + SeedanceSceneStore 文件，不再触发 config 重发，
-    // 避免冲掉用户尚未保存的文本编辑（如正在输入的 API Key）；仅“保存”按钮 setSeedanceConfig 持久化。
+    // 背景图选择/清除仅改本地 UI 状态（pendingBackgroundUri / backgroundCleared / 预览路径），
+    // 不触碰磁盘与 DataStore；install/remove 与 setSeedanceConfig 在“保存”时一起原子完成，
+    // 避免“改了背景但未保存”时 DataStore 仍指向已被删除的旧文件（悬空路径）。
     var apiKey by remember { mutableStateOf("") }
     var showApiKey by remember { mutableStateOf(false) }
     var baseUrl by remember { mutableStateOf(SeedanceConfig().baseUrl) }
@@ -925,6 +926,9 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
     var watermark by remember { mutableStateOf(SeedanceConfig().watermark) }
     var sceneDescription by remember { mutableStateOf(SeedanceConfig().sceneDescription) }
     var backgroundPath by remember { mutableStateOf(SeedanceConfig().backgroundImagePath) }
+    // 待保存的背景变更：选择来源 Uri（未落盘）与“清除”标记，均在“保存”时才落实到磁盘。
+    var pendingBackgroundUri by remember { mutableStateOf<Uri?>(null) }
+    var backgroundCleared by remember { mutableStateOf(false) }
     var backgroundError by remember { mutableStateOf<String?>(null) }
     var saved by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
@@ -945,15 +949,9 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            scope.launch {
-                sceneStore.install(uri).fold(
-                    onSuccess = { path ->
-                        backgroundPath = path
-                        backgroundError = null
-                    },
-                    onFailure = { e -> backgroundError = e.message ?: "背景图保存失败" },
-                )
-            }
+            pendingBackgroundUri = uri
+            backgroundCleared = false
+            backgroundError = null
         }
     }
 
@@ -1010,7 +1008,11 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
             )
             FieldLabel("背景图（可选）")
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                val preview = backgroundPath?.let { File(it).takeIf { f -> f.exists() } }
+                val preview: Any? = when {
+                    pendingBackgroundUri != null -> pendingBackgroundUri
+                    backgroundCleared -> null
+                    else -> backgroundPath?.let { File(it).takeIf { f -> f.exists() } }
+                }
                 if (preview != null) {
                     Box(modifier = Modifier.size(72.dp).clip(RoundedCornerShape(12.dp))) {
                         AsyncImage(
@@ -1034,11 +1036,9 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
                 }
                 if (preview != null) {
                     TextButton(onClick = {
-                        scope.launch {
-                            sceneStore.remove()
-                            backgroundPath = null
-                            backgroundError = null
-                        }
+                        pendingBackgroundUri = null
+                        backgroundCleared = true
+                        backgroundError = null
                     }) { Text("清除", color = scheme.error, fontSize = 12.sp) }
                 }
             }
@@ -1063,6 +1063,27 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
                 } else {
                     resolution
                 }
+                // 磁盘变更与路径持久化在“保存”时原子完成：先 install/remove，再把结果路径写入 DataStore。
+                var finalBackgroundPath = backgroundPath
+                val chosenUri = pendingBackgroundUri
+                if (chosenUri != null) {
+                    val installedPath = sceneStore.install(chosenUri).getOrNull()
+                    if (installedPath == null) {
+                        backgroundError = "背景图保存失败"
+                        return@launch
+                    }
+                    finalBackgroundPath = installedPath
+                    backgroundPath = installedPath
+                    pendingBackgroundUri = null
+                    backgroundCleared = false
+                    backgroundError = null
+                } else if (backgroundCleared) {
+                    sceneStore.remove()
+                    finalBackgroundPath = null
+                    backgroundPath = null
+                    backgroundCleared = false
+                    backgroundError = null
+                }
                 settings.setSeedanceConfig(
                     SeedanceConfig(
                         baseUrl = baseUrl,
@@ -1072,7 +1093,7 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
                         ratio = ratio,
                         durationSeconds = duration.coerceIn(SEEDANCE_MIN_DURATION_SECONDS, SEEDANCE_MAX_DURATION_SECONDS),
                         watermark = watermark,
-                        backgroundImagePath = backgroundPath,
+                        backgroundImagePath = finalBackgroundPath,
                         sceneDescription = sceneDescription,
                     )
                 )
