@@ -113,6 +113,12 @@ fun EncounterScreen(
         onDispose { playbackController.release() }
     }
 
+    // 列表清空时：pager 被空状态替换，其 LaunchedEffect 未 settle 到 null，
+    // 若不显式暂停，控制器会在空状态下继续出声，直到本屏销毁。
+    LaunchedEffect(videos.isEmpty()) {
+        if (videos.isEmpty()) playbackController.pause()
+    }
+
     // ===== 导出（Task 8 复用）=====
     val exporter = remember { SeedanceVideoExporter(context.applicationContext) }
     val videoScope = rememberCoroutineScope()
@@ -237,7 +243,8 @@ internal fun EncounterVideoPager(
         modifier = modifier,
     ) { page ->
         val video = videos.getOrNull(page) ?: return@VerticalPager
-        val isActive = settledPage == page && video.state == SeedanceVideoState.READY
+        // 与 settleEncounterPlayback 一致：READY + 非空本地归档路径才挂载，避免黑屏表面。
+        val isActive = settledPage == page && video.state == SeedanceVideoState.READY && !video.localVideoPath.isNullOrBlank()
         EncounterVideoPage(
             video = video,
             settled = settledPage == page,

@@ -435,7 +435,8 @@ class EncounterScreenTest {
         rule.onNodeWithText(SeedanceResolution.P720.storageKey).assertExists()
         rule.onNodeWithText(SeedanceRatio.PORTRAIT.storageKey).assertExists()
         rule.onNodeWithText("5 秒").assertExists()
-        rule.onNodeWithText("关闭").assertExists()
+        // 关闭按钮是 Icon（contentDescription 语义键），并非 Text 节点。
+        rule.onNodeWithContentDescription("关闭").assertExists()
         rule.onNodeWithText("generation").assertExists()
         rule.onNodeWithText("1001").assertExists()
         rule.onNodeWithText("远端生成失败").assertExists()

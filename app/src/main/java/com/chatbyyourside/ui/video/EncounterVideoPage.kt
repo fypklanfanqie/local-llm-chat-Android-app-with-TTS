@@ -59,8 +59,10 @@ fun EncounterVideoPage(
     bottomBarHeight: Dp = 0.dp,
     modifier: Modifier = Modifier,
 ) {
-    // 仅落定页的 READY 视频挂载播放器表面（`settledPage == index` 门控在此兑现）。
-    val attached = settled && video.state == SeedanceVideoState.READY && player != null
+    // 仅落定页的 READY + 非空归档路径视频挂载播放器表面（与 settleEncounterPlayback 门控一致，
+    // 避免 READY 但缺文件时挂载一个播放空黑的 PlayerView）。
+    val attached = settled && video.state == SeedanceVideoState.READY &&
+        !video.localVideoPath.isNullOrBlank() && player != null
     Box(
         modifier
             .fillMaxSize()
