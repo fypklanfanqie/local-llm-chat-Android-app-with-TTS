@@ -39,9 +39,6 @@ class SeedanceSceneStore(
     fun currentFile(): File? = sceneDir.listFiles()
         ?.firstOrNull { it.isFile && it.name.startsWith("$FILE_PREFIX.") && !it.name.endsWith(".tmp") }
 
-    /** 当前背景的展示路径（供 UI 预览；文件缺失返回 null）。 */
-    fun previewPath(): String? = currentFile()?.absolutePath
-
     /**
      * 安装新背景：content URI -> 探测校验 -> 完整复制到 tmp -> 删除旧图 -> 原子改名。
      * 成功返回新背景绝对路径；失败返回 Result.failure（中文原因），旧图不受影响。

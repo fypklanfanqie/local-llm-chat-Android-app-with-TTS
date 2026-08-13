@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.chatbyyourside.AppContainer
 import com.chatbyyourside.data.model.SeedanceVideo
 import com.chatbyyourside.data.model.SeedanceVideoState
+import com.chatbyyourside.data.model.prepareRegenerationRetry
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -53,6 +54,8 @@ class EncounterViewModel(
     /**
      * 重试失败/过期的任务：按当前状态映射回 Worker 可自动认领的入口状态后重新入队。
      * 与 [com.chatbyyourside.ui.chat.ChatViewModel.retryVideoTask] 相同的入口。
+     * 手动重试 = 重新生成：[prepareRegenerationRetry] 归档当前 remoteTaskId、generationAttempt += 1、
+     * 重置自动退避与费用确认标记。
      */
     fun retry(taskId: Long) = retryTask(taskId)
 
@@ -67,7 +70,7 @@ class EncounterViewModel(
             val video = container.seedanceVideoRepository.getById(taskId) ?: return@launch
             val entry = retryEntryStateOf(video.state) ?: return@launch
             container.seedanceVideoRepository.update(
-                video.copy(
+                video.prepareRegenerationRetry().copy(
                     state = entry,
                     errorStage = null,
                     errorCode = null,

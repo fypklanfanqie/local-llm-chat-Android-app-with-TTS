@@ -140,8 +140,13 @@ fun interface SeedancePromptProvider {
 /** 提交歧义错误码（POST 可能已到服务端但未持久化任务 ID，绝不自动重发）。 */
 const val ERROR_CODE_AMBIGUOUS_POST = "AMBIGUOUS_POST"
 
-/** 视频签名 URL 预估有效期（Seedance 返回的签名地址通常约 1 小时）。 */
-private const val URL_TTL_MILLIS = 60 * 60_000L
+/**
+ * 视频签名 URL 预估有效期。volcengine 官方文档：output.video_url 约 24 小时后删除失效
+ * （重新生成需付费），故此处对齐官方值（24h = 86_400_000 ms）。该过期判断只是兜底——
+ * 成功轮询到 URL 后立即进入下载阶段（[advanceDownload]），正常路径远早于过期前完成下载，
+ * 不会触发付费性重新生成。
+ */
+private const val URL_TTL_MILLIS = 24 * 60 * 60_000L
 
 /** SUBMITTING 残留判定阈值：超过该时长未完成即视为中断，可复位为 FAILED_SUBMISSION（歧义）。 */
 private const val SUBMISSION_STALE_THRESHOLD_MS = 5 * 60_000L

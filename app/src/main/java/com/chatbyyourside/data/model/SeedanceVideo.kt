@@ -1,5 +1,33 @@
 package com.chatbyyourside.data.model
 
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+
+/**
+ * 手动重试视为「重新生成」：把当前 [SeedanceVideo.remoteTaskId] 追加进
+ * [SeedanceVideo.previousRemoteTasksJson]（JSON 字符串数组；解析失败/脏数据时从空数组
+ * 重新开始，绝不让坏值阻塞重试），[SeedanceVideo.generationAttempt] += 1，并重置
+ * [SeedanceVideo.automaticRetryCount] 与 [SeedanceVideo.requiresCostConfirmation]
+ * （用户已确认才走到手动重试，无需再卡一次费用确认）。
+ *
+ * 供 [com.chatbyyourside.ui.chat.ChatViewModel.retryVideoTask] 与
+ * [com.chatbyyourside.ui.video.EncounterViewModel.retryTask] 共用。
+ */
+internal fun SeedanceVideo.prepareRegenerationRetry(): SeedanceVideo {
+    val archived = if (remoteTaskId.isNullOrBlank()) previousRemoteTasksJson else {
+        val existing = runCatching { Json.decodeFromString<List<String>>(previousRemoteTasksJson) }
+            .getOrElse { emptyList() }
+        Json.encodeToString(existing + remoteTaskId)
+    }
+    return copy(
+        previousRemoteTasksJson = archived,
+        generationAttempt = generationAttempt + 1,
+        automaticRetryCount = 0,
+        requiresCostConfirmation = false,
+    )
+}
+
 /**
  * Seedance 视频任务的持久化状态机（Room `seedance_video.state` 列取值）。
  *

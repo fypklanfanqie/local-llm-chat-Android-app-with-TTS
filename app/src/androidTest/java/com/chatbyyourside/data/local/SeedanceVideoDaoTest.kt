@@ -237,6 +237,68 @@ class SeedanceVideoDaoTest {
         assertEquals(0, db.conversationDao().updateAutoVideoEnabled(9999, true))
     }
 
+    @Test
+    fun listRecoverable_returnsExactlyTheSevenAutoClaimableStates() = runBlocking {
+        // 钉住 listRecoverable 的 7 个硬编码状态字面量（与 DAO SQL 一一对应）：
+        // snapshot_pending / prompt_pending / submission_pending / queued / running /
+        // cancel_requested / download_pending。PROMPTING/SUBMITTING/DOWNLOADING 由恢复流程
+        // 显式重置，不在此直接扫描；终态与失败态一律不出现。
+        val dao = db.seedanceVideoDao()
+        val recoverable = listOf(
+            SeedanceVideoState.SNAPSHOT_PENDING,
+            SeedanceVideoState.PROMPT_PENDING,
+            SeedanceVideoState.SUBMISSION_PENDING,
+            SeedanceVideoState.QUEUED,
+            SeedanceVideoState.RUNNING,
+            SeedanceVideoState.CANCEL_REQUESTED,
+            SeedanceVideoState.DOWNLOAD_PENDING,
+        )
+        recoverable.forEachIndexed { i, state ->
+            dao.insertIgnore(
+                videoEntity(taskUuid = "rec-$i", sourceAssistantMessageId = 100L + i, state = state.storageKey)
+            )
+        }
+        val nonRecoverable = listOf(
+            SeedanceVideoState.PROMPTING,
+            SeedanceVideoState.SUBMITTING,
+            SeedanceVideoState.DOWNLOADING,
+            SeedanceVideoState.READY,
+            SeedanceVideoState.CANCELLED,
+            SeedanceVideoState.EXPIRED,
+            SeedanceVideoState.FAILED_SNAPSHOT,
+            SeedanceVideoState.FAILED_PROMPT,
+            SeedanceVideoState.FAILED_PROMPT_CONFIG_CHANGED,
+            SeedanceVideoState.FAILED_SUBMISSION,
+            SeedanceVideoState.FAILED_REMOTE,
+            SeedanceVideoState.FAILED_QUERY,
+            SeedanceVideoState.FAILED_DOWNLOAD,
+        )
+        nonRecoverable.forEachIndexed { i, state ->
+            dao.insertIgnore(
+                videoEntity(taskUuid = "not-$i", sourceAssistantMessageId = 200L + i, state = state.storageKey)
+            )
+        }
+
+        val ids = dao.listRecoverable(now = 1L).map { it.taskUuid }.toSet()
+        assertEquals((0..6).map { "rec-$it" }.toSet(), ids)
+    }
+
+    @Test
+    fun listRecoverable_excludesRowsWithFutureNextRetryAt() = runBlocking {
+        val dao = db.seedanceVideoDao()
+        dao.insertIgnore(
+            videoEntity(taskUuid = "due", sourceAssistantMessageId = 11, state = SeedanceVideoState.QUEUED.storageKey, nextRetryAt = 100L)
+        )
+        dao.insertIgnore(
+            videoEntity(taskUuid = "future", sourceAssistantMessageId = 12, state = SeedanceVideoState.QUEUED.storageKey, nextRetryAt = 200L)
+        )
+
+        // now = 100：到期任务可见，退避未到的不可见
+        assertEquals(listOf("due"), dao.listRecoverable(now = 100L).map { it.taskUuid })
+        // 放宽到 200 后两者都可见
+        assertEquals(setOf("due", "future"), dao.listRecoverable(now = 200L).map { it.taskUuid }.toSet())
+    }
+
     companion object {
         private var COUNTER = 0
     }
