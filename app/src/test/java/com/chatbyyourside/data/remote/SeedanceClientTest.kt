@@ -9,7 +9,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -586,35 +585,6 @@ class SeedanceClientTest {
         val relay = server.url("/v1/media/generate").toString().trimEnd('/')
         client.createTask(SeedanceConfig(baseUrl = relay), request())
         assertEquals("/v1/media/generate", server.takeRequest().path)
-    }
-
-    // ---- Seedance 1.5 Pro：首帧角色图，背景不发送 ----
-
-    @Test
-    fun createTask_seedance15Pro_usesFirstFrameRole_andOmitsBackground() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"id":"cgt-abc"}"""))
-        client.createTask(
-            config(),
-            request(
-                variant = SeedanceModelVariant.SEEDANCE_1_5_PRO,
-                resolution = SeedanceResolution.P1080,
-                durationSeconds = 12,
-                background = background, // 1.5 Pro 应忽略背景参考图
-            ),
-        )
-        val recorded = server.takeRequest()
-        val body = recorded.body.readUtf8()
-        val obj = testJson.parseToJsonElement(body).jsonObject
-        val content = obj["content"]!!.jsonArray
-        // 只有 text + 角色首帧，无背景图。
-        assertEquals(2, content.size)
-        assertEquals("text", content[0].jsonObject["type"]?.jsonPrimitive?.content)
-        assertEquals("image_url", content[1].jsonObject["type"]?.jsonPrimitive?.content)
-        assertEquals("first_frame", content[1].jsonObject["role"]?.jsonPrimitive?.content)
-        assertFalse("1.5 Pro 请求体不得包含背景图", body.contains("d29ybGQ="))
-        assertEquals("doubao-seedance-1-5-pro-251215", obj["model"]?.jsonPrimitive?.content)
-        assertEquals("1080p", obj["resolution"]?.jsonPrimitive?.content)
-        assertEquals(12, obj["duration"]?.jsonPrimitive?.contentOrNull?.toIntOrNull())
     }
 
     @Test

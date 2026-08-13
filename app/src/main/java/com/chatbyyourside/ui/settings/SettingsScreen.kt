@@ -53,8 +53,6 @@ import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.SeedanceModelVariant
 import com.chatbyyourside.data.model.SeedanceRatio
 import com.chatbyyourside.data.model.SeedanceResolution
-import com.chatbyyourside.video.SEEDANCE_MAX_DURATION_SECONDS
-import com.chatbyyourside.video.SEEDANCE_MIN_DURATION_SECONDS
 import com.chatbyyourside.video.SeedanceSceneStore
 import com.chatbyyourside.work.GreetingScheduler
 import kotlinx.coroutines.CoroutineScope
@@ -896,7 +894,6 @@ private fun resolutionLabel(resolution: SeedanceResolution): String = when (reso
 private fun variantLabel(variant: SeedanceModelVariant): String = when (variant) {
     SeedanceModelVariant.STANDARD -> "标准（2.0）"
     SeedanceModelVariant.FAST -> "Fast（2.0）"
-    SeedanceModelVariant.SEEDANCE_1_5_PRO -> "1.5 Pro"
 }
 
 /** “测试连接”探测的超时上限（ms）：远超底层 OkHttp 连接超时，但保证 UI 按钮不会久转。 */
@@ -904,8 +901,8 @@ private const val PROBE_TIMEOUT_MS = 10_000L
 
 /**
  * “Seedance 对话视频”设置分区（自包含；文件较大故独立成函数）。
- * API Key 密码输入、服务地址、模型（2.0 标准/Fast、1.5 Pro）、按模型能力动态的分辨率与时长
- * （Fast 仅 480p/720p；1.5 Pro 时长 4–12 秒）、画幅比例、水印、可选背景图
+ * API Key 密码输入、服务地址、模型（2.0 标准/Fast）、按模型能力动态的分辨率与时长
+ * （Fast 仅 480p/720p）、画幅比例、水印、可选背景图
  * （经 [SeedanceSceneStore] 校验并复制到内部存储）、可选场景描述、固定开启语音的只读说明。
  * 无 fps 选项。含「测试连接」按钮校验服务地址。
  */

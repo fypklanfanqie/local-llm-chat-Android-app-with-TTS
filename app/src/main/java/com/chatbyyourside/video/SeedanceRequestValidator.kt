@@ -16,12 +16,6 @@ sealed interface SeedanceValidationResult {
     data class Invalid(val message: String) : SeedanceValidationResult
 }
 
-/** Seedance 2.0 系列支持的最短视频时长（秒）。 */
-const val SEEDANCE_MIN_DURATION_SECONDS = 4
-
-/** Seedance 2.0 系列支持的最长视频时长（秒）；1.5 Pro 以 [SeedanceModelVariant.maxDurationSeconds] 为准。 */
-const val SEEDANCE_MAX_DURATION_SECONDS = 15
-
 /**
  * 校验一次 Seedance 视频生成请求：
  *  - [SeedanceConfig.baseUrl]/[SeedanceConfig.apiKey] 非空；

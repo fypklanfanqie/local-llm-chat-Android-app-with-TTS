@@ -182,41 +182,4 @@ class SeedanceRequestValidatorTest {
             assertEquals(expected, (result as SeedanceValidationResult.Invalid).message)
         }
     }
-
-    // ---- Seedance 1.5 Pro 能力矩阵 ----
-
-    @Test
-    fun seedance15Pro_acceptsDurationUpToTwelve() {
-        val base = config(variant = SeedanceModelVariant.SEEDANCE_1_5_PRO)
-        assertEquals(SeedanceValidationResult.Valid,
-            validateSeedanceRequest(base.copy(durationSeconds = 12), CHARACTER_PATH))
-    }
-
-    @Test
-    fun seedance15Pro_rejectsDurationAboveTwelve() {
-        val base = config(variant = SeedanceModelVariant.SEEDANCE_1_5_PRO)
-        assertInvalid(validateSeedanceRequest(base.copy(durationSeconds = 13), CHARACTER_PATH))
-    }
-
-    @Test
-    fun seedance15Pro_acceptsAllResolutions() {
-        val base = config(variant = SeedanceModelVariant.SEEDANCE_1_5_PRO)
-        for (resolution in SeedanceResolution.entries) {
-            assertEquals("1.5 Pro 应支持 $resolution", SeedanceValidationResult.Valid,
-                validateSeedanceRequest(base.copy(resolution = resolution), CHARACTER_PATH))
-        }
-    }
-
-    @Test
-    fun seedance15Pro_capabilityContract() {
-        assertEquals("doubao-seedance-1-5-pro-251215", SeedanceModelVariant.SEEDANCE_1_5_PRO.modelId)
-        assertEquals(4, SeedanceModelVariant.SEEDANCE_1_5_PRO.minDurationSeconds)
-        assertEquals(12, SeedanceModelVariant.SEEDANCE_1_5_PRO.maxDurationSeconds)
-        assertEquals("first_frame", SeedanceModelVariant.SEEDANCE_1_5_PRO.referenceImageRole)
-        assertFalse(SeedanceModelVariant.SEEDANCE_1_5_PRO.supportsBackgroundReference)
-        // 2.0 系列保持 reference_image 与背景参考。
-        assertEquals("reference_image", SeedanceModelVariant.STANDARD.referenceImageRole)
-        assertTrue(SeedanceModelVariant.STANDARD.supportsBackgroundReference)
-        assertEquals(15, SeedanceModelVariant.STANDARD.maxDurationSeconds)
-    }
 }
