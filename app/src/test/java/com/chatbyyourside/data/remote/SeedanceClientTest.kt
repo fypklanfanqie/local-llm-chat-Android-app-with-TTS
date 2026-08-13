@@ -30,8 +30,10 @@ import java.util.concurrent.TimeUnit
  *
  * 覆盖：POST/GET/DELETE 路径与 Bearer 鉴权、content 顺序与 role=reference_image、
  * generate_audio=true、模型 ID、参数编码（分辨率/画幅/时长/水印）、无 fps/seed/camera、
- * 响应可空字段与未知字段容错、全部官方状态映射、错误分类（敏感/配额/鉴权/429/500/参数）、
- * 非 JSON 错误体、request-id 捕获、取消传播，以及 API Key / base64 不泄漏。
+ * 响应可空字段与未知字段容错、全部官方状态映射、错误分类（敏感/配额/鉴权/429/500/参数，
+ * 含官方审核错误码 InputText/Image/OutputVideoSensitiveContentDetected）、
+ * 非 JSON 错误体、request-id 捕获、取消传播、5xx httpStatus 透传、离线连接失败
+ * 判 AMBIGUOUS_TRANSPORT，以及 API Key / base64 不泄漏。
  */
 class SeedanceClientTest {
 
@@ -322,6 +324,73 @@ class SeedanceClientTest {
             MockResponse().setResponseCode(400).setBody("""{"error":{"code":"InvalidParameter","message":"resolution 非法"}}""")
         )
         assertEquals(SeedanceError.INVALID_PARAMETER, expectApiException().classification)
+    }
+
+    // ---- 内容审核（官方错误码） ----
+
+    @Test
+    fun error_inputTextSensitiveContentDetected_isClassified() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(400).setBody(
+                """{"error":{"code":"InputTextSensitiveContentDetected","message":"输入文本触发安全策略"}}"""
+            )
+        )
+        assertEquals(SeedanceError.SENSITIVE_CONTENT, expectApiException().classification)
+    }
+
+    @Test
+    fun error_inputImageSensitiveContentDetected_isClassified() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(400).setBody(
+                """{"error":{"code":"InputImageSensitiveContentDetected","message":"输入图片未通过审核"}}"""
+            )
+        )
+        assertEquals(SeedanceError.SENSITIVE_CONTENT, expectApiException().classification)
+    }
+
+    @Test
+    fun error_outputVideoSensitiveContentDetected_isClassified() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(400).setBody(
+                """{"error":{"code":"OutputVideoSensitiveContentDetected","message":"生成结果命中审核策略"}}"""
+            )
+        )
+        assertEquals(SeedanceError.SENSITIVE_CONTENT, expectApiException().classification)
+    }
+
+    // ---- 鉴权 / 5xx httpStatus / 离线 ----
+
+    @Test
+    fun error_403_isClassifiedAuth() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(403).setBody("""{"error":{"code":"Forbidden","message":"no permission"}}""")
+        )
+        assertEquals(SeedanceError.AUTH, expectApiException().classification)
+    }
+
+    @Test
+    fun error_5xxSurfacesHttpStatusForCostConfirmation() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(502).setBody("""{"error":{"code":"BadGateway","message":"upstream error"}}""")
+        )
+        val ex = expectApiException()
+        assertEquals(SeedanceError.TRANSIENT_429_5XX, ex.classification)
+        assertEquals(502, ex.httpStatus)
+    }
+
+    @Test
+    fun error_offlineConnectionRefused_isAmbiguousTransport() = runBlocking {
+        // 指向一个已关闭的端口 -> 连接失败 -> IOException -> AMBIGUOUS_TRANSPORT（不误判为配额/参数）。
+        val dead = MockWebServer()
+        dead.start()
+        val deadBaseUrl = dead.url("/").toString().trimEnd('/')
+        dead.shutdown()
+        val cfg = config().copy(baseUrl = deadBaseUrl)
+        val ex = runCatching { client.createTask(cfg, request()) }.exceptionOrNull()
+        assertTrue("期望 SeedanceApiException，实际 ${ex?.javaClass?.simpleName}", ex is SeedanceApiException)
+        val apiEx = ex as SeedanceApiException
+        assertEquals(SeedanceError.AMBIGUOUS_TRANSPORT, apiEx.classification)
+        assertNull("离线失败不应携带 HTTP 状态", apiEx.httpStatus)
     }
 
     @Test

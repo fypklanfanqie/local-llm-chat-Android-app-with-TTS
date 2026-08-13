@@ -434,13 +434,15 @@ class SeedancePipelineCoordinator(
                 }
                 PipelineOutcome.WaitingForUser
             }
-            // 任何非歧义的明确失败（含 429/5xx）：POST **绝不**自动重发。502/504 可能是在服务端
-            // 已创建任务之后才返回，自动重发会重复计费；一律转 FAILED_SUBMISSION 等待用户确认。
+            // 任何非歧义的明确失败（含 429/5xx）：POST **绝不**自动重发，一律转 FAILED_SUBMISSION 等待用户。
+            // 5xx（尤其 502/504 网关错误）可能在服务端已创建任务后才返回，自动重发会重复计费，因此
+            // 重试须先经费用确认（requiresCostConfirmation=true）；4xx（含 429）为明确未受理，保持 false。
             else -> {
+                val costConfirmation = e.httpStatus != null && e.httpStatus >= 500
                 store.transition(task.id, SeedanceVideoState.SUBMITTING, SeedanceVideoState.FAILED_SUBMISSION) {
                     it.copy(errorStage = STAGE_SUBMIT, errorCode = code,
                         errorMessage = e.message, retryDisposition = "manual",
-                        requiresCostConfirmation = false,
+                        requiresCostConfirmation = costConfirmation,
                         submissionAttemptId = attemptId, submissionStartedAt = startedAt, requestFingerprint = fingerprint)
                 }
                 PipelineOutcome.WaitingForUser

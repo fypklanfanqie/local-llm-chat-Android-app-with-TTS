@@ -79,8 +79,11 @@ fun SeedanceVideoCard(
     val controller = LocalSeedancePlaybackController.current
     val activePath = controller?.activePath?.let { it.collectAsState().value }
     val fullScreen = controller?.fullScreen?.let { it.collectAsState().value } == true
+    // 路径比较前归一化：控制器侧来自 File.absolutePath，卡片侧来自 Room 持久化的 localVideoPath，
+    // 统一分隔符并折叠多余斜杠，避免同一文件的等价路径因表示差异不匹配。
     val isActiveInline = !fullScreen && activePath != null &&
-        video.localVideoPath != null && activePath == video.localVideoPath
+        video.localVideoPath != null &&
+        normalizeVideoPathForCompare(activePath) == normalizeVideoPathForCompare(video.localVideoPath)
 
     Surface(
         color = scheme.surfaceContainerLow,
@@ -326,3 +329,11 @@ internal fun isCostBearingRetry(video: SeedanceVideo): Boolean = when (video.sta
     SeedanceVideoState.FAILED_SUBMISSION -> video.requiresCostConfirmation
     else -> false
 }
+
+/**
+ * 本地视频路径比较归一化（纯函数）：统一 Windows/Unix 分隔符并折叠多余斜杠、去除尾部斜杠，
+ * 使同一文件的等价路径表示（如 `/data/user/0/pkg//files/a.mp4` 与 `\data\user\0\pkg\files\a.mp4`）
+ * 在「活动内联视频」判定中可比。不解析符号链接、不做文件系统 I/O。
+ */
+internal fun normalizeVideoPathForCompare(path: String): String =
+    path.replace('\\', '/').replace(Regex("/{2,}"), "/").trimEnd('/')

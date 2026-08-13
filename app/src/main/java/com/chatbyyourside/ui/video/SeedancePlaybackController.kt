@@ -112,21 +112,27 @@ class SeedancePlaybackController(
         })
     }
 
-    /** 加载并播放本地文件；同一文件重复调用视为继续/恢复播放。 */
+    /** 加载并播放本地文件；同一文件重复调用视为继续/恢复播放（自然播完后重播回到片头）。 */
     fun play(file: File) {
         val path = file.absolutePath
         if (_activePath.value != path) {
             player.setMediaItem(MediaItem.fromUri(Uri.fromFile(file)))
             player.prepare()
             _activePath.value = path
+        } else if (player.playbackState == Player.STATE_ENDED) {
+            // 自然播完后再次点击：seekTo 回片头重播，而不是停留在 STATE_ENDED 上 setPlayWhenReady。
+            player.seekTo(0)
         }
         acquireAudio()
         player.play()
     }
 
-    /** 内联播放开关：当前文件正在播放则暂停，否则加载/恢复播放。 */
+    /** 内联播放开关：当前文件正在播放则暂停（已自然播完视为非播放态，触发重播），否则加载/恢复播放。 */
     fun toggle(file: File) {
-        if (_activePath.value == file.absolutePath && player.playWhenReady) {
+        if (_activePath.value == file.absolutePath &&
+            player.playWhenReady &&
+            player.playbackState != Player.STATE_ENDED
+        ) {
             pause()
         } else {
             play(file)

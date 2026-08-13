@@ -30,11 +30,12 @@ import java.io.File
 import java.io.IOException
 
 /**
- * [SeedancePipelineCoordinator] 状态机契约测试（Task 6，纯 JVM，假 store/submitter/llm/clock）。
+ * [SeedancePipelineCoordinator] 状态机契约测试（Task 6 + Task 10 加固，纯 JVM，假 store/submitter/llm/clock）。
  *
  * 覆盖：CAS 单胜者、提示词重试、配置变更门禁、POST 歧义（不自动重发 + requiresCostConfirmation）、
- * 排队->运行->下载轮询、取消竞态、下载->READY 仅限有效最终文件、进程死亡（SUBMITTING/DOWNLOADING 复位）、
- * 残留 .part、URL 过期、磁盘满、既有有效成品幂等 READY。
+ * 明确 4xx（含审核/配额/鉴权）失败、5xx 费用确认、裸 IOException（提交=歧义、轮询=有界重试）、
+ * 重复调度不重复提交、排队->运行->下载轮询、取消竞态/取消终态、下载->READY 仅限有效最终文件、
+ * 进程死亡（SUBMITTING/DOWNLOADING 复位）、残留 .part、URL 过期、磁盘满、既有有效成品幂等 READY。
  */
 class SeedancePipelineCoordinatorTest {
 
@@ -122,6 +123,7 @@ class SeedancePipelineCoordinatorTest {
 
     private class FakeSubmitter : SeedanceSubmitter {
         var createCount = 0
+        var createDelayMillis = 0L
         var createResult: (() -> SeedanceTaskResponse)? = null
         var createError: (() -> Throwable)? = null
         var getResult: (() -> SeedanceTaskResponse)? = null
@@ -131,6 +133,7 @@ class SeedancePipelineCoordinatorTest {
         override suspend fun create(config: SeedanceConfig, request: CreateSeedanceTask): SeedanceTaskResponse {
             createCount++
             createError?.let { throw it() }
+            if (createDelayMillis > 0) delay(createDelayMillis)
             return createResult?.invoke() ?: SeedanceTaskResponse(id = "remote-1", status = "queued")
         }
         override suspend fun get(config: SeedanceConfig, taskId: String): SeedanceTaskResponse {
@@ -354,15 +357,109 @@ class SeedancePipelineCoordinatorTest {
     }
 
     @Test
-    fun transient5xxFailsSubmissionNeverResubmits() = runBlocking {
+    fun transient5xxFailsSubmissionRequiresCostConfirmation() = runBlocking {
         val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
-        e.submitter.createError = { SeedanceApiException(SeedanceError.TRANSIENT_429_5XX, "视频服务暂时繁忙（HTTP 502），请稍后重试") }
+        // 502/504 网关错误可能在服务端已创建任务后才返回：须费用确认，绝不自动重发。
+        e.submitter.createError = {
+            SeedanceApiException(SeedanceError.TRANSIENT_429_5XX, "视频服务暂时繁忙（HTTP 502），请稍后重试", httpStatus = 502)
+        }
         assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
         val t = e.store.current(1)
         assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
         assertEquals("manual", t.retryDisposition)
+        assertTrue(t.requiresCostConfirmation)
+        assertEquals(1, e.submitter.createCount)
+    }
+
+    @Test
+    fun submitModerationFailureFailsSubmissionWithoutCostConfirmation() = runBlocking {
+        val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
+        e.submitter.createError = {
+            SeedanceApiException(SeedanceError.SENSITIVE_CONTENT, "视频生成内容未通过审核，请修改角色或场景描述后重试", httpStatus = 400)
+        }
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
+        assertEquals("SENSITIVE_CONTENT", t.errorCode)
         assertFalse(t.requiresCostConfirmation)
         assertEquals(1, e.submitter.createCount)
+    }
+
+    @Test
+    fun submitQuotaFailureFailsSubmissionWithoutCostConfirmation() = runBlocking {
+        val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
+        e.submitter.createError = {
+            SeedanceApiException(SeedanceError.QUOTA_EXCEEDED, "额度不足或已达上限，请稍后重试", httpStatus = 400)
+        }
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
+        assertEquals("QUOTA_EXCEEDED", t.errorCode)
+        assertFalse(t.requiresCostConfirmation)
+        assertEquals(1, e.submitter.createCount)
+    }
+
+    @Test
+    fun submitAuthFailureFailsSubmissionWithoutCostConfirmation() = runBlocking {
+        val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
+        e.submitter.createError = {
+            SeedanceApiException(SeedanceError.AUTH, "Seedance API Key 无效或未授权", httpStatus = 401)
+        }
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
+        assertEquals("AUTH", t.errorCode)
+        assertFalse(t.requiresCostConfirmation)
+        assertEquals(1, e.submitter.createCount)
+    }
+
+    @Test
+    fun submitRawIoExceptionIsAmbiguousAndCostConfirming() = runBlocking {
+        // 客户端把离线/传输异常统一映射为 AMBIGUOUS_TRANSPORT；此处模拟 submitter 抛裸 IOException。
+        val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
+        e.submitter.createError = { IOException("socket closed") }
+        assertEquals(PipelineOutcome.WaitingForUser, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.FAILED_SUBMISSION, t.state)
+        assertEquals(ERROR_CODE_AMBIGUOUS_POST, t.errorCode)
+        assertTrue(t.requiresCostConfirmation)
+        assertEquals(1, e.submitter.createCount)
+    }
+
+    @Test
+    fun pollRawIoExceptionKeepsRecoverableState() = runBlocking {
+        val e = env(SeedanceVideoState.QUEUED) { copy(remoteTaskId = "remote-1") }
+        e.submitter.getError = { IOException("socket closed") }
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.QUEUED, t.state)
+        assertEquals(1, t.automaticRetryCount)
+        assertNotNull(t.nextRetryAt)
+    }
+
+    @Test
+    fun duplicateAdvanceDoesNotDoubleSubmit() = runBlocking {
+        val e = env(SeedanceVideoState.SUBMISSION_PENDING, submitTask)
+        // 让 create 挂起，制造两个并发 advance 同时撞上 SUBMISSION_PENDING 的窗口；
+        // CAS 认领保证只有一个 Worker 真正发起 POST。
+        e.submitter.createDelayMillis = 50
+        e.submitter.createResult = { SeedanceTaskResponse(id = "remote-9", status = "queued") }
+        val jobs = listOf(launch { e.coordinator.advance(1) }, launch { e.coordinator.advance(1) })
+        jobs.forEach { it.join() }
+        assertEquals(1, e.submitter.createCount)
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.QUEUED, t.state)
+        assertEquals("remote-9", t.remoteTaskId)
+    }
+
+    @Test
+    fun cancelQueuedTransitionsToCancelled() = runBlocking {
+        val e = env(SeedanceVideoState.CANCEL_REQUESTED) { copy(remoteTaskId = "remote-1") }
+        e.submitter.getResult = { SeedanceTaskResponse(id = "remote-1", status = "cancelled") }
+        assertEquals(PipelineOutcome.Complete, e.coordinator.advance(1))
+        val t = e.store.current(1)
+        assertEquals(SeedanceVideoState.CANCELLED, t.state)
+        assertEquals(1, e.submitter.cancelCount)
     }
 
     @Test
