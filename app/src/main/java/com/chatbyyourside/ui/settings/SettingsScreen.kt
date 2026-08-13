@@ -49,6 +49,13 @@ import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.ThemeMode
 import com.chatbyyourside.data.model.VoicePair
 import com.chatbyyourside.data.model.Character
+import com.chatbyyourside.data.model.SeedanceConfig
+import com.chatbyyourside.data.model.SeedanceModelVariant
+import com.chatbyyourside.data.model.SeedanceRatio
+import com.chatbyyourside.data.model.SeedanceResolution
+import com.chatbyyourside.video.SEEDANCE_MAX_DURATION_SECONDS
+import com.chatbyyourside.video.SEEDANCE_MIN_DURATION_SECONDS
+import com.chatbyyourside.video.SeedanceSceneStore
 import com.chatbyyourside.work.GreetingScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -216,6 +223,7 @@ fun SettingsScreen(
 
         GreetingSection(container = container, scope = scope)
         ChatBackgroundSection(container = container, scope = scope)
+        SeedanceSettingsSection(container = container, scope = scope)
 
         // ===== 语音合成 =====
         GlassListSection(title = "语音合成 (TTS) · 火山引擎") {
@@ -870,6 +878,245 @@ private fun ProviderDropdown(
                 DropdownMenuItem(
                     text = { Text(provider.displayName, color = if (selectedProvider == provider) scheme.primary else scheme.onSurface, fontSize = 13.sp) },
                     onClick = { onProviderSelected(provider) },
+                )
+            }
+        }
+    }
+}
+
+/** Fast 模型支持的分辨率档位（标准模型支持全部）。 */
+private val FAST_RESOLUTIONS = setOf(SeedanceResolution.P480, SeedanceResolution.P720)
+
+private fun resolutionLabel(resolution: SeedanceResolution): String = when (resolution) {
+    SeedanceResolution.P480 -> "480p"
+    SeedanceResolution.P720 -> "720p"
+    SeedanceResolution.P1080 -> "1080p"
+    SeedanceResolution.P4K -> "4K"
+}
+
+private fun variantLabel(variant: SeedanceModelVariant): String = when (variant) {
+    SeedanceModelVariant.STANDARD -> "标准"
+    SeedanceModelVariant.FAST -> "Fast"
+}
+
+/**
+ * “Seedance 对话视频”设置分区（自包含；文件较大故独立成函数）。
+ * API Key 密码输入、服务地址、标准/Fast、动态分辨率（Fast 隐藏 1080p/4K）、4–15 秒时长、
+ * 画幅比例、水印、可选背景图（经 [SeedanceSceneStore] 校验并复制到内部存储）、可选场景描述、
+ * 固定开启语音的只读说明。无 fps 选项。
+ */
+@Composable
+private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineScope) {
+    val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val settings = container.settingsRepository
+    val config by settings.seedanceConfig.collectAsState(initial = SeedanceConfig())
+    val sceneStore = remember { SeedanceSceneStore(context) }
+
+    var apiKey by remember(config) { mutableStateOf(config.apiKey) }
+    var showApiKey by remember { mutableStateOf(false) }
+    var baseUrl by remember(config) { mutableStateOf(config.baseUrl) }
+    var variant by remember(config) { mutableStateOf(config.variant) }
+    var resolution by remember(config) { mutableStateOf(config.resolution) }
+    var duration by remember(config) { mutableStateOf(config.durationSeconds) }
+    var ratio by remember(config) { mutableStateOf(config.ratio) }
+    var watermark by remember(config) { mutableStateOf(config.watermark) }
+    var sceneDescription by remember(config) { mutableStateOf(config.sceneDescription) }
+    var backgroundPath by remember(config) { mutableStateOf(config.backgroundImagePath) }
+    var backgroundError by remember { mutableStateOf<String?>(null) }
+    var saved by remember { mutableStateOf(false) }
+    LaunchedEffect(saved) {
+        if (saved) { delay(2000); saved = false }
+    }
+
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                sceneStore.install(uri).fold(
+                    onSuccess = { path ->
+                        backgroundPath = path
+                        backgroundError = null
+                        settings.setSeedanceConfig(settings.getSeedanceConfigNow().copy(backgroundImagePath = path))
+                    },
+                    onFailure = { e -> backgroundError = e.message ?: "背景图保存失败" },
+                )
+            }
+        }
+    }
+
+    GlassListSection(title = "Seedance 对话视频") {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                "角色回复后自动生成对应短视频（火山方舟 Seedance 2.0），API Key 与对话模型分开配置。",
+                color = scheme.onSurfaceVariant, fontSize = 11.sp,
+            )
+            PasswordField("API Key", apiKey, showApiKey, { apiKey = it }, { showApiKey = !showApiKey })
+            FieldLabel("服务地址")
+            GlassInputField(value = baseUrl, onValueChange = { baseUrl = it }, placeholder = SeedanceConfig().baseUrl)
+            FieldLabel("模型")
+            SeedanceDropdown(
+                items = SeedanceModelVariant.entries.map { it to variantLabel(it) },
+                selected = variant,
+                onSelect = { v ->
+                    variant = v
+                    if (v == SeedanceModelVariant.FAST && resolution !in FAST_RESOLUTIONS) {
+                        resolution = SeedanceResolution.P720
+                    }
+                },
+            )
+            FieldLabel("分辨率")
+            SeedanceDropdown(
+                items = (if (variant == SeedanceModelVariant.FAST) FAST_RESOLUTIONS else SeedanceResolution.entries.toSet())
+                    .map { it to resolutionLabel(it) },
+                selected = resolution,
+                onSelect = { resolution = it },
+            )
+            Text("视频时长：$duration 秒", color = scheme.onSurface, fontSize = 12.sp)
+            Slider(
+                value = duration.toFloat(),
+                onValueChange = { duration = it.toInt().coerceIn(SEEDANCE_MIN_DURATION_SECONDS, SEEDANCE_MAX_DURATION_SECONDS) },
+                valueRange = SEEDANCE_MIN_DURATION_SECONDS.toFloat()..SEEDANCE_MAX_DURATION_SECONDS.toFloat(),
+                steps = SEEDANCE_MAX_DURATION_SECONDS - SEEDANCE_MIN_DURATION_SECONDS - 1,
+            )
+            FieldLabel("画幅比例")
+            SeedanceDropdown(
+                items = SeedanceRatio.entries.map { it to it.apiValue },
+                selected = ratio,
+                onSelect = { ratio = it },
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("生成结果带水印", color = scheme.onSurface, fontSize = 13.sp)
+                    Text("默认关闭", color = scheme.onSurfaceVariant, fontSize = 10.sp)
+                }
+                Switch(checked = watermark, onCheckedChange = { watermark = it })
+            }
+            Text(
+                "视频语音固定开启（Seedance 2.0 不支持关闭）。",
+                color = scheme.onSurfaceVariant, fontSize = 10.sp,
+            )
+            FieldLabel("背景图（可选）")
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val preview = backgroundPath?.let { File(it).takeIf { f -> f.exists() } }
+                if (preview != null) {
+                    Box(modifier = Modifier.size(72.dp).clip(RoundedCornerShape(12.dp))) {
+                        AsyncImage(
+                            model = preview,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop,
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .size(72.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(scheme.primary.copy(alpha = 0.12f))
+                        .border(1.dp, scheme.primary.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                        .clickable { imagePicker.launch(arrayOf("image/*")) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(if (preview == null) "＋ 选择" else "更换", color = scheme.primary, fontSize = 11.sp)
+                }
+                if (preview != null) {
+                    TextButton(onClick = {
+                        scope.launch {
+                            sceneStore.remove()
+                            backgroundPath = null
+                            backgroundError = null
+                            settings.setSeedanceConfig(settings.getSeedanceConfigNow().copy(backgroundImagePath = null))
+                        }
+                    }) { Text("清除", color = scheme.error, fontSize = 12.sp) }
+                }
+            }
+            backgroundError?.let { Text(it, color = scheme.error, fontSize = 10.sp) }
+            FieldLabel("场景描述（可选）")
+            GlassInputField(
+                value = sceneDescription,
+                onValueChange = { sceneDescription = it },
+                placeholder = "如「雨夜的街道」",
+                singleLine = false,
+            )
+        }
+    }
+
+    SaveButton(
+        text = "保存 Seedance 设置",
+        saved = saved,
+        onClick = {
+            scope.launch {
+                val safeResolution = if (variant == SeedanceModelVariant.FAST && resolution !in FAST_RESOLUTIONS) {
+                    SeedanceResolution.P720
+                } else {
+                    resolution
+                }
+                settings.setSeedanceConfig(
+                    SeedanceConfig(
+                        baseUrl = baseUrl,
+                        apiKey = apiKey,
+                        variant = variant,
+                        resolution = safeResolution,
+                        ratio = ratio,
+                        durationSeconds = duration.coerceIn(SEEDANCE_MIN_DURATION_SECONDS, SEEDANCE_MAX_DURATION_SECONDS),
+                        watermark = watermark,
+                        backgroundImagePath = backgroundPath,
+                        sceneDescription = sceneDescription,
+                    )
+                )
+                saved = true
+            }
+        },
+    )
+}
+
+/** 玻璃风格下拉选择框（通用，供 Seedance 分区选用枚举档位）。 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun <T> SeedanceDropdown(
+    items: List<Pair<T, String>>,
+    selected: T,
+    onSelect: (T) -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+        BasicTextField(
+            value = items.firstOrNull { it.first == selected }?.second ?: "",
+            onValueChange = {},
+            readOnly = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor()
+                .clip(RoundedCornerShape(12.dp))
+                .background(scheme.surface.copy(alpha = 0.6f))
+                .clickable { expanded = true }
+                .padding(12.dp),
+            textStyle = TextStyle(color = scheme.onSurface, fontSize = 14.sp),
+            singleLine = true,
+            decorationBox = { innerTextField ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    innerTextField()
+                    Text(if (expanded) "▲" else "▼", color = scheme.onSurfaceVariant, fontSize = 10.sp)
+                }
+            },
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.background(scheme.surfaceContainerHigh),
+        ) {
+            items.forEach { (value, label) ->
+                DropdownMenuItem(
+                    text = { Text(label, color = if (value == selected) scheme.primary else scheme.onSurface, fontSize = 13.sp) },
+                    onClick = {
+                        onSelect(value)
+                        expanded = false
+                    },
                 )
             }
         }

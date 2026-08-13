@@ -5,6 +5,7 @@ import com.chatbyyourside.data.local.SettingsStore
 import com.chatbyyourside.data.model.ApiConfig
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.ChatProviderType
+import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.ThemeMode
 import com.chatbyyourside.data.model.TtsConfig
 import com.chatbyyourside.data.model.TtsLanguage
@@ -13,6 +14,7 @@ import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.config.Characters
 import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
+import com.chatbyyourside.llm.thinking.LocalThinkingLevel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
@@ -27,6 +29,8 @@ class SettingsRepository(private val store: SettingsStore) {
     val themeMode: Flow<ThemeMode> = store.themeMode
 
     val apiConfig: Flow<ApiConfig> = store.apiConfig
+    /** Seedance 视频生成配置（聚合快照）。 */
+    val seedanceConfig: Flow<SeedanceConfig> = store.seedanceConfig
     val ttsConfig: Flow<TtsConfig> = store.ttsConfig
     val ttsLanguage: Flow<TtsLanguage> = store.ttsLanguage
     val ttsVolume: Flow<Int> = store.ttsVolume
@@ -55,6 +59,8 @@ class SettingsRepository(private val store: SettingsStore) {
     val llmLookahead: Flow<Boolean> = store.llmLookahead
     /** 深度思考模式开关（本地 + 云端通用）。 */
     val deepThinking: Flow<Boolean> = store.deepThinking
+    /** 本地思考档位（默认 AUTO，仅本地生效）；云端不读取。 */
+    val localThinkingLevel: Flow<LocalThinkingLevel> = store.localThinkingLevel
     /** 性能浮窗液态玻璃开关（默认开）。 */
     val liquidGlass: Flow<Boolean> = store.liquidGlass
     /** 推理参数是否相对上次成功加载已变更（供设置页展示"将自动重载"横幅）*/
@@ -73,6 +79,7 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun setThemeMode(mode: ThemeMode) = store.setThemeMode(mode)
 
     suspend fun setApiConfig(config: ApiConfig) = store.setApiConfig(config)
+    suspend fun setSeedanceConfig(config: SeedanceConfig) = store.setSeedanceConfig(config)
     suspend fun setTtsConfig(config: TtsConfig) = store.setTtsConfig(config)
     suspend fun setTtsLanguage(lang: TtsLanguage) = store.setTtsLanguage(lang)
     suspend fun setTtsVolume(vol: Int) = store.setTtsVolume(vol)
@@ -115,6 +122,8 @@ class SettingsRepository(private val store: SettingsStore) {
 
     suspend fun setDeepThinking(enabled: Boolean) = store.setDeepThinking(enabled)
 
+    suspend fun setLocalThinkingLevel(level: LocalThinkingLevel) = store.setLocalThinkingLevel(level)
+
     suspend fun setLiquidGlass(enabled: Boolean) = store.setLiquidGlass(enabled)
 
     suspend fun setGreetingEnabled(enabled: Boolean) = store.setGreetingEnabled(enabled)
@@ -142,6 +151,11 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun getTtsConfigNow(): TtsConfig = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         ttsConfig.first()
     } ?: TtsConfig(apiKey = "", appId = "", accessKey = "")
+
+    /** 同步获取当前 Seedance 配置（5s 超时回退默认配置，保证国产 ROM 文件 I/O 被拦截时 UI 不卡死）。 */
+    suspend fun getSeedanceConfigNow(): SeedanceConfig = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        seedanceConfig.first()
+    } ?: SeedanceConfig()
 
     suspend fun getTtsLanguageNow(): TtsLanguage = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         ttsLanguage.first()
