@@ -6,19 +6,49 @@ package com.chatbyyourside.data.model
  * 仅支持中国火山方舟 Seedance 2.0；`modelId` 直接作为创建任务请求的 `model` 字段值：
  *  - [STANDARD]：标准模型，支持全部分辨率；
  *  - [FAST]：快速模型，仅支持 480p/720p（见 [com.chatbyyourside.video.validateSeedanceRequest]）。
+ *
+ * 持久化用 [storageKey]（= modelId）；[fromStorageKey] 还原时对未知/空值保守回落 [DEFAULT]。
  */
 enum class SeedanceModelVariant(val modelId: String) {
     STANDARD("doubao-seedance-2-0-260128"),
-    FAST("doubao-seedance-2-0-fast-260128"),
+    FAST("doubao-seedance-2-0-fast-260128");
+
+    /** Room 持久化键 = modelId（请求原值，稳定且唯一）。 */
+    val storageKey: String get() = modelId
+
+    companion object {
+        val DEFAULT: SeedanceModelVariant = STANDARD
+
+        /** 从存储键还原；未知/空值保守回落 [DEFAULT]（SeedanceConfig 默认档位）。 */
+        fun fromStorageKey(value: String?): SeedanceModelVariant =
+            entries.firstOrNull { it.modelId == value } ?: DEFAULT
+    }
 }
 
 /**
  * 视频分辨率。标准模型支持全部档位，Fast 模型仅支持 [P480]/[P720]。
+ *
+ * 持久化用 [storageKey]（= 枚举名，如 "P720"）；[fromStorageKey] 对未知/空值保守回落 [DEFAULT]。
  */
-enum class SeedanceResolution { P480, P720, P1080, P4K }
+enum class SeedanceResolution {
+    P480, P720, P1080, P4K;
+
+    /** Room 持久化键 = 枚举名（P480/P720/P1080/P4K）。 */
+    val storageKey: String get() = name
+
+    companion object {
+        val DEFAULT: SeedanceResolution = P720
+
+        /** 从存储键还原；未知/空值保守回落 [DEFAULT]（SeedanceConfig 默认档位）。 */
+        fun fromStorageKey(value: String?): SeedanceResolution =
+            entries.firstOrNull { it.name == value } ?: DEFAULT
+    }
+}
 
 /**
  * 视频画幅比例，`apiValue` 为创建任务请求中使用的字符串。
+ *
+ * 持久化用 [storageKey]（= apiValue）；[fromStorageKey] 对未知/空值保守回落 [DEFAULT]。
  */
 enum class SeedanceRatio(val apiValue: String) {
     /** 竖屏 9:16（默认）。 */
@@ -34,7 +64,18 @@ enum class SeedanceRatio(val apiValue: String) {
     /** 超宽屏 21:9。 */
     ULTRAWIDE("21:9"),
     /** 由模型自适应画幅。 */
-    ADAPTIVE("adaptive"),
+    ADAPTIVE("adaptive");
+
+    /** Room 持久化键 = apiValue（"9:16" 等请求原值）。 */
+    val storageKey: String get() = apiValue
+
+    companion object {
+        val DEFAULT: SeedanceRatio = PORTRAIT
+
+        /** 从存储键还原；未知/空值保守回落 [DEFAULT]（SeedanceConfig 默认档位）。 */
+        fun fromStorageKey(value: String?): SeedanceRatio =
+            entries.firstOrNull { it.apiValue == value } ?: DEFAULT
+    }
 }
 
 /**

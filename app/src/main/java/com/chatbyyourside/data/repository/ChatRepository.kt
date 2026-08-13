@@ -4,6 +4,7 @@ import com.chatbyyourside.data.local.ChatDao
 import com.chatbyyourside.data.local.ChatHistoryEntity
 import com.chatbyyourside.data.model.AttachedFile
 import com.chatbyyourside.data.model.ChatMessage
+import com.chatbyyourside.data.model.MessageCompletionState
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
@@ -14,6 +15,9 @@ import kotlinx.serialization.builtins.serializer
  * 聊天记录仓库
  * 按会话（conversationId）分桶读写消息；会话本身见 [ConversationRepository]。
  * 对应小程序 storage.getHistory / setHistory / clearHistory。
+ *
+ * 注：助手回复需要与自动视频 outbox 同事务落库的路径走 [ChatCompletionRepository.finalizeAssistant]
+ * （Task 2 引入），本类保持通用消息读写不变。
  */
 class ChatRepository(private val dao: ChatDao) {
 
@@ -45,6 +49,7 @@ class ChatRepository(private val dao: ChatDao) {
 
 /**
  * 实体 -> 领域消息。[modelContent] 原样还原；旧行该列为 null，由调用方 `modelContent ?: content` 兼容。
+ * [completionState] 从存储键还原，未知值保守回退 [MessageCompletionState.COMPLETE]。
  */
 internal fun ChatHistoryEntity.toMessage(): ChatMessage = ChatMessage(
     role = role,
@@ -56,6 +61,7 @@ internal fun ChatHistoryEntity.toMessage(): ChatMessage = ChatMessage(
     modelContent = modelContent,
     // 回填 Room 自增主键：持久消息的稳定标识（Compose key + 完成消息协调）。
     databaseId = id,
+    completionState = MessageCompletionState.fromStorageKey(completionState),
 )
 
 /**
@@ -73,6 +79,7 @@ internal fun ChatMessage.toEntity(characterId: String, conversationId: Long): Ch
     fileNamesJson = encodeStringList(fileNames),
     timestamp = timestamp,
     modelContent = modelContent,
+    completionState = completionState.storageKey,
 )
 
 /** 实体字段编解码用的 JSON（宽松：容忍历史行多余/缺失字段）。 */
