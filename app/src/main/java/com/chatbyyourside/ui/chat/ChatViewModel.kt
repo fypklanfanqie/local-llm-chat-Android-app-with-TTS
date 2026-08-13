@@ -7,9 +7,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.chatbyyourside.AppContainer
 import com.chatbyyourside.config.AppConfig
+import com.chatbyyourside.config.AssetPaths
 import com.chatbyyourside.config.Characters
 import com.chatbyyourside.data.model.*
 import com.chatbyyourside.data.remote.ChatMessageDto
+import com.chatbyyourside.data.repository.AutoVideoOutboxDraft
+import com.chatbyyourside.data.repository.ChatCompletionRepository
 import com.chatbyyourside.data.repository.ConversationRepository
 import com.chatbyyourside.provider.local.LocalChatProvider
 import com.chatbyyourside.util.MarkdownParser
@@ -65,6 +68,16 @@ class ChatViewModel(
      */
     private var pendingFinal: PendingFinal? = null
 
+    /** 生成请求自增序号（Task 7）：与 uiState.activeGenerationId 配对，防止迟到 finally 串台。 */
+    private var generationCounter = 0L
+
+    /** 当前生成已累积的原始流式文本（Task 7）：用户显式停止/云端 IOException 时用于保留部分输出。 */
+    @Volatile
+    private var latestAccumulated: String = ""
+
+    /** 助手回复 + 自动视频 outbox 同事务落库（Task 7）：进程在回复保存后死亡也不漏自动视频。 */
+    private val chatCompletionRepository = ChatCompletionRepository(container.database)
+
     init {
         // 监听活跃角色变化：加载角色信息。
         // 只绑定 activeCharacter（不绑会话映射），避免 setActiveConversation 触发重复 loadCharacter / 重播语音。
@@ -105,17 +118,24 @@ class ChatViewModel(
                 _uiState.update { it.copy(errorMessage = "会话数据加载失败：${e.message}", showWelcome = false) }
             }
         }
-        // 监听活跃会话 + 聊天记录（flatMapLatest 保证会话切换时取消旧订阅，避免历史串台）
+        // 监听活跃会话 + 聊天记录 + 会话内 Seedance 视频（flatMapLatest 保证会话切换时取消旧订阅，
+        // 避免历史/视频串台）。视频状态/提示词/路径仅用于展示层，绝不进入 LLM 历史。
         viewModelScope.launch {
             try {
                 _activeConversationId
                     .flatMapLatest { id ->
-                        if (id != null) container.chatRepository.getHistoryFlow(id)
-                        else flowOf(emptyList())
+                        if (id != null) {
+                            combine(
+                                container.chatRepository.getHistoryFlow(id),
+                                container.seedanceVideoRepository.observeForConversation(id),
+                            ) { history, videos -> history to videos }
+                        } else {
+                            flowOf(emptyList<ChatMessage>() to emptyList<SeedanceVideo>())
+                        }
                     }
-                    .collect { history ->
+                    .collect { (history, videos) ->
                         latestHistory = history
-                        renderMessages(history)
+                        renderMessages(history, videos)
                     }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
@@ -184,7 +204,8 @@ class ChatViewModel(
         }
     }
 
-    /** 从会话列表 + 当前活跃 id 同步 uiState 的 activeConversationId / activeConversationTitle */
+    /** 从会话列表 + 当前活跃 id 同步 uiState 的 activeConversationId / activeConversationTitle /
+     *  activeConversationAutoVideoEnabled */
     private fun syncActiveMeta() {
         val list = _uiState.value.conversations
         val id = _activeConversationId.value
@@ -193,6 +214,7 @@ class ChatViewModel(
             it.copy(
                 activeConversationId = id,
                 activeConversationTitle = active?.title ?: ConversationRepository.DEFAULT_TITLE,
+                activeConversationAutoVideoEnabled = active?.autoVideoEnabled ?: false,
             )
         }
     }
@@ -234,11 +256,12 @@ class ChatViewModel(
         }
     }
 
-    private fun renderMessages(history: List<ChatMessage>) {
+    private fun renderMessages(history: List<ChatMessage>, videos: List<SeedanceVideo> = emptyList()) {
         // 统一走 ChatTimelineReconciler：Room 快照 + 流式气泡 + 乐观完成消息协调渲染。
         // - 流式输出期间保留 streaming 气泡（仅 isStreaming=true 时，避免切会话/角色后旧气泡串台）；
         // - Room 以行 ID 确认完成消息前保留 pendingFinal，杜绝延迟 Flow 覆盖（回答消失）；
-        // - 跨会话 pending 丢弃并清除。
+        // - 跨会话 pending 丢弃并清除；
+        // - 会话内 Seedance 视频按 sourceAssistantMessageId 附加到助手消息（仅展示层）。
         val streaming = if (_uiState.value.isStreaming) {
             _uiState.value.messages.firstOrNull { it.id == "streaming" }
         } else null
@@ -249,6 +272,7 @@ class ChatViewModel(
             streaming = streaming,
             showThink = _uiState.value.deepThinkingEnabled,
             characterName = _uiState.value.characterName,
+            videos = videos,
         )
         if (result.pendingResolved) pendingFinal = null
         _uiState.update { it.copy(messages = result.messages, showWelcome = result.showWelcome) }
@@ -274,6 +298,8 @@ class ChatViewModel(
                     showConversationSheet = false,
                     isStreaming = false,
                     showTyping = false,
+                    stopRequested = false,
+                    activeGenerationId = null,
                 )
             }
         }
@@ -292,7 +318,15 @@ class ChatViewModel(
             val charId = _uiState.value.characterId
             container.settingsRepository.setActiveConversation(charId, id)
             _activeConversationId.value = id
-            _uiState.update { it.copy(showConversationSheet = false, isStreaming = false, showTyping = false) }
+            _uiState.update {
+                it.copy(
+                    showConversationSheet = false,
+                    isStreaming = false,
+                    showTyping = false,
+                    stopRequested = false,
+                    activeGenerationId = null,
+                )
+            }
         }
     }
 
@@ -333,6 +367,95 @@ class ChatViewModel(
 
     fun toggleConversationSheet(open: Boolean) {
         _uiState.update { it.copy(showConversationSheet = open) }
+    }
+
+    /**
+     * 开启/关闭当前会话的 Seedance 自动视频（Task 7）。
+     *
+     * 关闭直接生效；开启时先做准入检查（Seedance API Key 非空、角色立绘存在），
+     * 不满足则提示并**不**落库开启（保留原开关值）。Provider == LOCAL 时由 UI 层禁用
+     * （显示「仅云端可用」，不清空已存储的开关值），此处不拦截。
+     */
+    fun setAutoVideoEnabled(conversationId: Long, enabled: Boolean) {
+        if (!enabled) {
+            viewModelScope.launch { container.conversationRepository.setAutoVideoEnabled(conversationId, false) }
+            return
+        }
+        viewModelScope.launch {
+            val seedance = container.settingsRepository.getSeedanceConfigNow()
+            if (seedance.apiKey.isBlank()) {
+                _uiState.update {
+                    it.copy(errorMessage = "未配置 Seedance API Key，请先到「设置」中配置后再开启自动视频")
+                }
+                return@launch
+            }
+            val charId = _uiState.value.characterId
+            val char = container.characterRepository.getNow(charId)
+            val hasCharacterImage = if (char == null) false
+            else if (char.isCustom) char.image.isNotBlank()
+            else AssetPaths.PICTURES[charId] != null
+            if (!hasCharacterImage) {
+                _uiState.update {
+                    it.copy(errorMessage = "该角色未设置立绘图片，请先到角色页配置后再开启自动视频")
+                }
+                return@launch
+            }
+            container.conversationRepository.setAutoVideoEnabled(conversationId, true)
+        }
+    }
+
+    /** 取消排队中的 Seedance 视频任务（仅 QUEUED 可发起；结果以服务端状态为准）。 */
+    fun cancelVideoTask(taskId: Long) {
+        viewModelScope.launch {
+            val claimed = container.seedanceVideoRepository.claim(
+                taskId,
+                SeedanceVideoState.QUEUED,
+                SeedanceVideoState.CANCEL_REQUESTED,
+            )
+            if (claimed) {
+                container.seedanceVideoScheduler.enqueue(taskId)
+            }
+        }
+    }
+
+    /**
+     * 重试失败/过期的 Seedance 视频任务（Task 7）。
+     *
+     * 按当前状态映射回可被 Worker 自动认领的入口状态后重新入队：
+     * FAILED_SNAPSHOT -> SNAPSHOT_PENDING；FAILED_PROMPT/CONFIG_CHANGED -> PROMPT_PENDING；
+     * FAILED_SUBMISSION/FAILED_REMOTE/EXPIRED -> SUBMISSION_PENDING；FAILED_QUERY -> QUEUED（继续查询）；
+     * FAILED_DOWNLOAD -> DOWNLOAD_PENDING。费用性重试（FAILED_REMOTE/EXPIRED/歧义 FAILED_SUBMISSION）
+     * 由视频卡先弹确认对话框，用户确认后才调用本方法。
+     */
+    fun retryVideoTask(taskId: Long) {
+        viewModelScope.launch {
+            val video = container.seedanceVideoRepository.getById(taskId) ?: return@launch
+            val entry = retryEntryStateOf(video.state) ?: return@launch
+            container.seedanceVideoRepository.update(
+                video.copy(
+                    state = entry,
+                    errorStage = null,
+                    errorCode = null,
+                    errorMessage = null,
+                    retryDisposition = null,
+                    nextRetryAt = null,
+                ),
+            )
+            container.seedanceVideoScheduler.enqueue(taskId)
+        }
+    }
+
+    /** 失败/过期状态 -> 可自动认领的入口状态（纯函数；非可重试状态返回 null）。 */
+    private fun retryEntryStateOf(state: SeedanceVideoState): SeedanceVideoState? = when (state) {
+        SeedanceVideoState.FAILED_SNAPSHOT -> SeedanceVideoState.SNAPSHOT_PENDING
+        SeedanceVideoState.FAILED_PROMPT,
+        SeedanceVideoState.FAILED_PROMPT_CONFIG_CHANGED -> SeedanceVideoState.PROMPT_PENDING
+        SeedanceVideoState.FAILED_SUBMISSION,
+        SeedanceVideoState.FAILED_REMOTE,
+        SeedanceVideoState.EXPIRED -> SeedanceVideoState.SUBMISSION_PENDING
+        SeedanceVideoState.FAILED_QUERY -> SeedanceVideoState.QUEUED
+        SeedanceVideoState.FAILED_DOWNLOAD -> SeedanceVideoState.DOWNLOAD_PENDING
+        else -> null
     }
 
     // ===== 输入 / 附件 =====
@@ -391,6 +514,8 @@ class ChatViewModel(
                 s.copy(
                     isStreaming = false,
                     showTyping = false,
+                    stopRequested = false,
+                    activeGenerationId = null,
                     messages = s.messages.filterNot { it.id == "streaming" },
                 )
             }
@@ -403,6 +528,24 @@ class ChatViewModel(
             val enabled = !container.settingsRepository.getDeepThinkingNow()
             container.settingsRepository.setDeepThinking(enabled)
         }
+    }
+
+    /**
+     * 请求停止当前生成（Task 7）。
+     *
+     * 不取消 streamingJob（否则 CancellationException 会走回滚路径、丢弃部分文本），而是：
+     * 1. 置 stopRequested=true（UI 显示「正在停止」、禁用重复点击）；
+     * 2. 调 [ChatProviderManager.cancelAll]（LocalChatProvider 经 ExecutionControl 发布 USER_CANCEL，
+     *    MnnBackend 每 token 检测 abort；云端则取消 HTTP 调用）。
+     *
+     * prefill 是阻塞调用，无法即时中断——点击后可能等待 prefill 返回才真正停止，UI 必须保持「正在停止」。
+     * 停止完成后由 sendMessage 正常收尾：保留部分输出并标记停止状态。
+     */
+    fun stopGeneration() {
+        val state = _uiState.value
+        if (!state.isStreaming || state.stopRequested) return
+        _uiState.update { it.copy(stopRequested = true) }
+        container.chatProviderManager.cancelAll()
     }
 
     /**
@@ -427,8 +570,20 @@ class ChatViewModel(
             return
         }
 
+        // Task 7：为本次生成分配唯一请求序号，防止迟到 finally 清掉新一轮流式状态。
+        val generationId = ++generationCounter
+        latestAccumulated = ""
         _uiState.update {
-            it.copy(inputText = "", uploadedImages = emptyList(), uploadedFiles = emptyList(), isStreaming = true, showTyping = true, showWelcome = false)
+            it.copy(
+                inputText = "",
+                uploadedImages = emptyList(),
+                uploadedFiles = emptyList(),
+                isStreaming = true,
+                showTyping = true,
+                showWelcome = false,
+                stopRequested = false,
+                activeGenerationId = generationId,
+            )
         }
 
         streamingJob = viewModelScope.launch {
@@ -436,9 +591,25 @@ class ChatViewModel(
             // 须在 try 外声明，catch/finally 才可见（try 块内声明的局部变量不对 catch/finally 可见）。
             var termReason = "已停止"
             var userMsgId = 0L   // 已落库用户消息 id；发送失败时 catch 据此回滚删除
+            var userDisplayText = ""  // 用户消息展示文本（自动视频 outbox 的用户文本快照；try 外声明供 catch 可见）
+            // Task 7：发送起点捕获的自动视频快照与角色来源（try 外声明，catch 的停止路径也可安全传参；
+            // 停止路径 shouldCreateAutoVideo 恒为 false，不会实际创建 outbox）。
+            var autoVideoSnapshot: AutoVideoTriggerSnapshot? = null
+            var autoCharacter: Character? = null
+            var autoCharacterImageSource: String? = null
             try {
                 val char = container.characterRepository.getNow(charId)
                     ?: throw Exception("角色不存在")
+                autoCharacter = char
+                // Task 7：发送起点捕获自动视频触发快照（Provider/会话开关/API 配置/Seedance 配置/
+                // 角色图来源）。生成期间切换 Provider、开关或配置均不影响本次判定；
+                // 视频生成独立于 streamingJob/isStreaming，不阻塞下一轮对话。
+                val autoProvider = container.settingsRepository.getActiveProviderNow()
+                val autoEnabled = _uiState.value.conversations.firstOrNull { it.id == convId }?.autoVideoEnabled ?: false
+                val autoApiConfig = container.settingsRepository.getApiConfigNow()
+                val autoSeedanceConfig = container.settingsRepository.getSeedanceConfigNow()
+                autoCharacterImageSource =
+                    if (char.isCustom) char.image.takeIf { it.isNotBlank() } else AssetPaths.PICTURES[char.id]
                 // 存储用户消息
                 val displayText = text.ifEmpty {
                     when {
@@ -447,6 +618,7 @@ class ChatViewModel(
                         else -> "[附件]"
                     }
                 }
+                userDisplayText = displayText
                 val userMessage = ChatMessage(
                     role = "user",
                     content = displayText,
@@ -455,6 +627,13 @@ class ChatViewModel(
                     fileNames = files.map { it.name },
                 )
                 userMsgId = container.chatRepository.addMessage(charId, convId, userMessage)
+                autoVideoSnapshot = AutoVideoTriggerSnapshot(
+                    provider = autoProvider,
+                    enabled = autoEnabled,
+                    userMessageId = userMsgId,
+                    apiConfig = autoApiConfig,
+                    seedanceConfig = autoSeedanceConfig,
+                )
 
                 // 自动生成会话标题：首条用户消息后，若标题仍是默认值，用消息摘要命名
                 if (state.activeConversationTitle == ConversationRepository.DEFAULT_TITLE) {
@@ -504,6 +683,8 @@ class ChatViewModel(
                 // 调用 Provider
                 val showThink = _uiState.value.deepThinkingEnabled
                 val onChunk: (String) -> Unit = { accumulated ->
+                    // Task 7：先记录权威累积文本（停止时落库内容不受渲染节流影响），再节流渲染。
+                    latestAccumulated = accumulated
                     // 节流：仅首块或距上次重渲染 >= STREAM_THROTTLE_MS 时才重解析 Markdown + 重组列表。
                     // 末块若被跳过，下方完成路径会用完整 displayResponse 覆盖并落库，不会丢字。
                     val now = SystemClock.elapsedRealtime()
@@ -545,90 +726,241 @@ class ChatViewModel(
                     modelText = null
                 }
 
-                // 流式完成 -> 移除临时 streaming 消息，落库持久化；明确区分 timeout/max-token。
+                // 流式完成 -> 移除临时 streaming 消息，落库持久化；明确区分 timeout/max-token/用户停止。
                 // token 数取 native 实测 generatedTokens（批处理后回调数≠token 数）。
-                termReason = when (localCompletionReason) {
-                    com.chatbyyourside.llm.metrics.CompletionReason.TIMEOUT -> "生成超时"
-                    com.chatbyyourside.llm.metrics.CompletionReason.MAX_TOKENS -> "达到生成上限"
+                val stoppedByUser = _uiState.value.stopRequested &&
+                    _uiState.value.activeGenerationId == generationId
+                termReason = when {
+                    stoppedByUser -> "已停止（保留部分输出）"
+                    localCompletionReason == com.chatbyyourside.llm.metrics.CompletionReason.TIMEOUT -> "生成超时"
+                    localCompletionReason == com.chatbyyourside.llm.metrics.CompletionReason.MAX_TOKENS -> "达到生成上限"
                     else -> "完成: $generatedTokens tokens"
                 }
-                val assistantMessage = ChatMessage(role = "assistant", content = displayResponse, modelContent = modelText)
-                val assistantRowId = container.chatRepository.addMessage(charId, convId, assistantMessage)
-                // 刷新会话 updatedAt，把它顶到列表最前
-                container.conversationRepository.touch(convId)
-
-                // 同步构建 assistant DisplayMessage 替换 streaming 气泡，确保 UI 即时显示完整回复。
-                // 不依赖异步 Room Flow 回填——本地模型 prefill 完成到 DB invalidation 到达之间有可感知
-                // 延迟，若仅移除 streaming 而不补 assistant，用户会看到消息短暂消失（首次对话尤其明显）。
-                // 关键改进：以 addMessage 返回的**行 ID** 构造乐观完成消息（key=`msg-$assistantRowId`），
-                // 与 Room 回填后的渲染 key 一致，并登记 pendingFinal。renderMessages 据此在 Room 确认前
-                // 保留该回复、确认后只显示一次，杜绝延迟/旧 Flow 覆盖完成回复（回答消失竞态）。
-                val finalShowThink = _uiState.value.deepThinkingEnabled
-                val assistantSrc = if (finalShowThink) displayResponse else MarkdownParser.stripThink(displayResponse)
-                val assistantDisplay = DisplayMessage(
-                    id = "msg-$assistantRowId",
-                    role = "assistant",
-                    content = displayResponse,
-                    segments = MarkdownParser.parseWithThink(assistantSrc, isStreaming = false),
-                    sender = state.characterName.ifEmpty { "AI" },
-                )
-                pendingFinal = PendingFinal(
-                    conversationId = convId,
-                    databaseId = assistantRowId,
-                    message = assistantDisplay,
-                )
-                _uiState.update { s ->
-                    val msgs = s.messages.toMutableList()
-                    val streamIdx = msgs.indexOfFirst { it.id == "streaming" }
-                    // 若 Room 回填已先于乐观替换到达（msgs 已含同 id 的 assistant 行），
-                    // 只移除 streaming，绝不重复添加；否则以乐观消息替换 streaming。
-                    val alreadyRendered = msgs.any { it.id == assistantDisplay.id }
-                    if (alreadyRendered) {
-                        if (streamIdx >= 0) msgs.removeAt(streamIdx)
-                    } else {
-                        if (streamIdx >= 0) msgs[streamIdx] = assistantDisplay
-                        else msgs.add(assistantDisplay)
-                    }
-                    s.copy(messages = msgs, isStreaming = false, showTyping = false)
+                val completionState = if (stoppedByUser) {
+                    stoppedCompletionState(displayResponse)
+                } else {
+                    MessageCompletionState.COMPLETE
                 }
+                // 统一完成/停止落库：插入 assistant（+自动视频 outbox 同事务）、touch、乐观显示、清理流式状态。
+                finalizeAssistant(
+                    charId = charId,
+                    convId = convId,
+                    senderName = state.characterName.ifEmpty { "AI" },
+                    displayResponse = displayResponse,
+                    modelText = modelText,
+                    completionState = completionState,
+                    autoVideoSnapshot = autoVideoSnapshot,
+                    character = autoCharacter,
+                    userText = userDisplayText,
+                    characterImageSource = autoCharacterImageSource,
+                )
             } catch (e: CancellationException) {
                 // 取消（切角色/切会话）必须传播，不能当普通错误处理，否则破坏结构化并发
                 throw e
             } catch (e: Exception) {
-                termReason = "出错: ${e.message ?: "请求失败"}"
-                // 回滚：删除已落库的用户消息（无对应回复，避免孤儿），恢复输入框内容，
-                // 让用户可直接重试而无需重输（重发产生新消息，不会重复）。
-                if (userMsgId != 0L) runCatching { container.chatRepository.deleteMessage(userMsgId) }
-                pendingFinal = null
-                _uiState.update { s ->
-                    val msgs = s.messages.filterNot { it.id == "streaming" }.toMutableList()
-                    s.copy(
-                        messages = msgs,
-                        isStreaming = false,
-                        showTyping = false,
-                        errorMessage = e.message ?: "请求失败",
-                        inputText = text,
-                        uploadedImages = images,
-                        uploadedFiles = files,
+                val stoppedByUser = _uiState.value.stopRequested &&
+                    _uiState.value.activeGenerationId == generationId
+                if (stoppedByUser) {
+                    // 云端显式停止：HTTP 调用被取消表现为 IOException。此时不是错误——保留部分输出，
+                    // 不删除已落库的用户消息，不展示错误横幅。
+                    termReason = "已停止（保留部分输出）"
+                    val partial = latestAccumulated
+                    finalizeAssistant(
+                        charId = charId,
+                        convId = convId,
+                        senderName = state.characterName.ifEmpty { "AI" },
+                        displayResponse = partial,
+                        modelText = null,
+                        completionState = stoppedCompletionState(partial),
+                        autoVideoSnapshot = autoVideoSnapshot,
+                        character = autoCharacter,
+                        userText = userDisplayText,
+                        characterImageSource = autoCharacterImageSource,
                     )
+                } else {
+                    termReason = "出错: ${e.message ?: "请求失败"}"
+                    // 回滚：删除已落库的用户消息（无对应回复，避免孤儿），恢复输入框内容，
+                    // 让用户可直接重试而无需重输（重发产生新消息，不会重复）。
+                    if (userMsgId != 0L) runCatching { container.chatRepository.deleteMessage(userMsgId) }
+                    pendingFinal = null
+                    _uiState.update { s ->
+                        val msgs = s.messages.filterNot { it.id == "streaming" }.toMutableList()
+                        s.copy(
+                            messages = msgs,
+                            isStreaming = false,
+                            showTyping = false,
+                            stopRequested = false,
+                            activeGenerationId = null,
+                            errorMessage = e.message ?: "请求失败",
+                            inputText = text,
+                            uploadedImages = images,
+                            uploadedFiles = files,
+                        )
+                    }
                 }
             } finally {
                 // 取消路径下 catch 会 rethrow 跳过清理，用 finally 兜底重置流式状态，
-                // 确保切角色/切会话后发送按钮不再禁用、无残留 streaming 消息
-                // 性能浮窗：写入终态日志（完成/出错/已停止），停生成后速率归零
+                // 确保切角色/切会话后发送按钮不再禁用、无残留 streaming 消息。
+                // Task 7：只有 finally 的 generationId 等于当前 activeGenerationId 才清理，
+                // 防止旧请求迟到的 finally 抹掉新一轮请求的状态（切会话/发新消息后）。
+                // 性能浮窗：写入终态日志（完成/出错/已停止），停生成后速率归零。
                 container.performanceCollector.updateLog(termReason)
                 container.performanceCollector.updateTokenRate(0f)
-                _uiState.update { s ->
-                    if (s.isStreaming || s.messages.any { it.id == "streaming" }) {
-                        s.copy(
-                            messages = s.messages.filterNot { it.id == "streaming" },
-                            isStreaming = false,
-                            showTyping = false,
-                        )
-                    } else s
+                if (_uiState.value.activeGenerationId == generationId) {
+                    _uiState.update { s ->
+                        if (s.isStreaming || s.messages.any { it.id == "streaming" }) {
+                            s.copy(
+                                messages = s.messages.filterNot { it.id == "streaming" },
+                                isStreaming = false,
+                                showTyping = false,
+                                stopRequested = false,
+                                activeGenerationId = null,
+                            )
+                        } else s
+                    }
                 }
             }
         }
+    }
+
+    /**
+     * 用户停止后的完成状态（Task 7）。
+     *
+     * 优先按展示文本（含 `<think>` 折叠装饰）判断：思考模型「未闭合思考」会被 renderLocalThink 包装成
+     * `<think>...`，因此能正确得到 STOPPED_BEFORE_FINAL；闭合思考后有正文则得到 STOPPED_PARTIAL。
+     * 仅当没有任何真实输出（latestAccumulated 为空，如 prefill 阶段被停止、非思考模型展示为占位文案）时，
+     * 回退原始文本判空，得到「尚未生成最终答案」。
+     */
+    private fun stoppedCompletionState(displayResponse: String): MessageCompletionState {
+        val inspected = if (latestAccumulated.isBlank()) latestAccumulated else displayResponse
+        return StoppedOutputInspector.inspect(inspected)
+    }
+
+    /**
+     * 统一完成/用户停止落库（Task 7）：
+     * - 助手消息与自动视频 outbox **同事务**落库（[ChatCompletionRepository.finalizeAssistant]），
+     *   进程在回复保存后死亡也不漏自动视频；事务提交后在工作管理器入队视频任务；
+     * - 以返回的**行 ID** 构造乐观完成消息（key=`msg-$assistantRowId`），与 Room 回填 key 一致，
+     *   并登记 pendingFinal（renderMessages 在 Room 确认前保留、确认后只显示一次，杜绝回答消失竞态）；
+     * - 替换 streaming 气泡、清理 isStreaming/stopRequested/activeGenerationId。
+     *
+     * [autoVideoSnapshot]/[character]/[characterImageSource] 为发送起点捕获值；停止路径
+     * [shouldCreateAutoVideo] 恒为 false，不会实际创建 outbox。
+     */
+    private suspend fun finalizeAssistant(
+        charId: String,
+        convId: Long,
+        senderName: String,
+        displayResponse: String,
+        modelText: String?,
+        completionState: MessageCompletionState,
+        autoVideoSnapshot: AutoVideoTriggerSnapshot?,
+        character: Character?,
+        userText: String,
+        characterImageSource: String?,
+    ) {
+        val assistantMessage = ChatMessage(
+            role = "assistant",
+            content = displayResponse,
+            modelContent = modelText,
+            completionState = completionState,
+        )
+        val outbox = buildAutoVideoOutbox(
+            snapshot = autoVideoSnapshot,
+            assistant = assistantMessage,
+            conversationId = convId,
+            character = character,
+            userText = userText,
+            characterImageSource = characterImageSource,
+        )
+        val finalized = chatCompletionRepository.finalizeAssistant(charId, convId, assistantMessage, outbox)
+        val assistantRowId = finalized.assistantMessageId
+        // 事务外入队（WorkManager KEEP 语义）：进程死亡由启动恢复 [recoverPending] 兜底。
+        val videoTaskId = finalized.videoTaskId
+        if (videoTaskId != null) {
+            runCatching { container.seedanceVideoScheduler.enqueue(videoTaskId) }
+        }
+        // 刷新会话 updatedAt，把它顶到列表最前
+        container.conversationRepository.touch(convId)
+
+        val finalShowThink = _uiState.value.deepThinkingEnabled
+        val assistantSrc = if (finalShowThink) displayResponse else MarkdownParser.stripThink(displayResponse)
+        val assistantDisplay = DisplayMessage(
+            id = "msg-$assistantRowId",
+            role = "assistant",
+            content = displayResponse,
+            segments = MarkdownParser.parseWithThink(assistantSrc, isStreaming = false),
+            sender = senderName,
+            completionState = completionState,
+        )
+        pendingFinal = PendingFinal(
+            conversationId = convId,
+            databaseId = assistantRowId,
+            message = assistantDisplay,
+        )
+        _uiState.update { s ->
+            val msgs = s.messages.toMutableList()
+            val streamIdx = msgs.indexOfFirst { it.id == "streaming" }
+            // 若 Room 回填已先于乐观替换到达（msgs 已含同 id 的 assistant 行），
+            // 只移除 streaming，绝不重复添加；否则以乐观消息替换 streaming。
+            val alreadyRendered = msgs.any { it.id == assistantDisplay.id }
+            if (alreadyRendered) {
+                if (streamIdx >= 0) msgs.removeAt(streamIdx)
+            } else {
+                if (streamIdx >= 0) msgs[streamIdx] = assistantDisplay
+                else msgs.add(assistantDisplay)
+            }
+            s.copy(
+                messages = msgs,
+                isStreaming = false,
+                showTyping = false,
+                stopRequested = false,
+                activeGenerationId = null,
+            )
+        }
+    }
+
+    /**
+     * 构建自动视频 outbox 草稿（Task 7）。
+     *
+     * 触发条件由 [shouldCreateAutoVideo] 纯策略判定；不满足时返回 null（仅普通落库助手消息）。
+     * 快照来自发送起点捕获，任务不随源头变化而漂移；[characterImageSource] 为角色立绘来源
+     * （内置角色 assets 相对路径 / 自定义角色 `file://` 内部路径，与
+     * [com.chatbyyourside.video.SeedanceReferenceStore] 的读取方式一致）。
+     */
+    private fun buildAutoVideoOutbox(
+        snapshot: AutoVideoTriggerSnapshot?,
+        assistant: ChatMessage,
+        conversationId: Long,
+        character: Character?,
+        userText: String,
+        characterImageSource: String?,
+    ): AutoVideoOutboxDraft? {
+        if (snapshot == null || character == null) return null
+        if (!shouldCreateAutoVideo(snapshot, assistant)) return null
+        return AutoVideoOutboxDraft(
+            taskUuid = "auto-${snapshot.userMessageId}-${System.currentTimeMillis()}",
+            triggerType = "auto",
+            sourceConversationId = conversationId,
+            sourceUserMessageId = snapshot.userMessageId,
+            characterIdSnapshot = character.id,
+            characterNameSnapshot = character.name,
+            characterRoleSnapshot = character.role,
+            characterSystemPromptSnapshot = character.systemPrompt,
+            userTextSnapshot = userText,
+            assistantTextSnapshot = assistant.content,
+            sceneDescriptionSnapshot = snapshot.seedanceConfig.sceneDescription,
+            promptBaseUrlSnapshot = snapshot.apiConfig.baseUrl,
+            promptModelSnapshot = snapshot.apiConfig.model,
+            characterImageSourceSnapshot = characterImageSource.orEmpty(),
+            backgroundImageSourceSnapshot = snapshot.seedanceConfig.backgroundImagePath,
+            modelVariant = snapshot.seedanceConfig.variant,
+            resolution = snapshot.seedanceConfig.resolution,
+            ratio = snapshot.seedanceConfig.ratio,
+            durationSeconds = snapshot.seedanceConfig.durationSeconds,
+            generateAudio = snapshot.seedanceConfig.generateAudio,
+            watermark = snapshot.seedanceConfig.watermark,
+        )
     }
 
     /**

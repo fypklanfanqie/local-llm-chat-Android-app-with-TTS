@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.chatbyyourside.data.model.DisplayMessage
+import com.chatbyyourside.data.model.SeedanceVideo
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -49,6 +50,10 @@ fun ChatMessageList(
     state: ChatUiState,
     onTts: (DisplayMessage) -> Unit,
     modifier: Modifier = Modifier,
+    onPlayVideo: ((SeedanceVideo) -> Unit)? = null,
+    onExportVideo: ((SeedanceVideo) -> Unit)? = null,
+    onCancelVideo: (SeedanceVideo) -> Unit = {},
+    onRetryVideo: (SeedanceVideo) -> Unit = {},
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -108,6 +113,11 @@ fun ChatMessageList(
                     characterImage = state.characterImage,
                     characterName = state.characterName,
                     onTts = { onTts(msg) },
+                    // 视频卡回调仅在对应助手消息附带视频时注入（Task 8 接播放/导出，Task 7 接取消/重试）。
+                    onPlayVideo = msg.video?.let { video -> onPlayVideo?.let { cb -> { cb(video) } } },
+                    onExportVideo = msg.video?.let { video -> onExportVideo?.let { cb -> { cb(video) } } },
+                    onCancelVideo = msg.video?.let { video -> { onCancelVideo(video) } },
+                    onRetryVideo = msg.video?.let { video -> { onRetryVideo(video) } },
                 )
             }
             if (state.showTyping) {

@@ -32,6 +32,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -70,11 +71,13 @@ import com.chatbyyourside.data.model.AttachedFile
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.Conversation
 import com.chatbyyourside.data.model.DisplayMessage
+import com.chatbyyourside.data.model.MessageCompletionState
 import com.chatbyyourside.data.model.MessageSegment
 import com.chatbyyourside.data.repository.ChatBackgroundConfig
 import com.chatbyyourside.perfmon.PerformanceGlassOverlay
 import com.chatbyyourside.ui.glass.GlassSegmented
 import com.chatbyyourside.ui.navigation.ClampedImeBottomPadding
+import com.chatbyyourside.ui.video.SeedanceVideoCard
 import com.chatbyyourside.ui.glass.LocalBackdropState
 import com.chatbyyourside.ui.glass.MonogramAvatar
 import com.chatbyyourside.ui.glass.frostedGlass
@@ -229,11 +232,19 @@ fun ChatScreen(
                 ttsLanguage = state.ttsLanguage,
                 conversationCount = state.conversations.size,
                 deepThinkingEnabled = state.deepThinkingEnabled,
+                videoAutoEnabled = state.activeConversationAutoVideoEnabled,
+                videoToggleDisabled = isLocal,
                 onBack = onBack,
                 onClickCharacter = onNavigateToCharacters,
                 onSwitchProvider = { viewModel.switchProvider(it) },
                 onToggleLang = { viewModel.toggleTtsLanguage() },
                 onToggleDeepThinking = { viewModel.toggleDeepThinking() },
+                onToggleVideoAuto = {
+                    val convId = state.activeConversationId
+                    if (convId != null) {
+                        viewModel.setAutoVideoEnabled(convId, !state.activeConversationAutoVideoEnabled)
+                    }
+                },
                 onOpenConversations = { viewModel.toggleConversationSheet(true) },
             )
 
@@ -266,6 +277,10 @@ fun ChatScreen(
                         state = state,
                         onTts = { viewModel.playTts(it) },
                         modifier = Modifier.fillMaxSize(),
+                        // Task 8 接入播放/导出（当前为 null，READY 卡不渲染播放/保存按钮）；
+                        // Task 7 接取消/重试。
+                        onCancelVideo = { viewModel.cancelVideoTask(it.id) },
+                        onRetryVideo = { viewModel.retryVideoTask(it.id) },
                     )
                 }
 
@@ -295,10 +310,12 @@ fun ChatScreen(
             ChatInputBar(
                 text = state.inputText,
                 isStreaming = state.isStreaming,
+                stopRequested = state.stopRequested,
                 images = state.uploadedImages,
                 files = state.uploadedFiles,
                 onTextChange = { viewModel.updateInputText(it) },
                 onSend = { viewModel.sendMessage() },
+                onStop = { viewModel.stopGeneration() },
                 onPickImage = { imagePicker.launch(arrayOf("image/*")) },
                 onPickFile = { filePicker.launch(arrayOf("*/*")) },
                 onRemoveImage = { viewModel.removeImage(it) },
@@ -476,11 +493,14 @@ private fun ChatTopBar(
     ttsLanguage: com.chatbyyourside.data.model.TtsLanguage,
     conversationCount: Int,
     deepThinkingEnabled: Boolean,
+    videoAutoEnabled: Boolean,
+    videoToggleDisabled: Boolean,
     onBack: () -> Unit,
     onClickCharacter: () -> Unit,
     onSwitchProvider: (ChatProviderType) -> Unit,
     onToggleLang: () -> Unit,
     onToggleDeepThinking: () -> Unit,
+    onToggleVideoAuto: () -> Unit,
     onOpenConversations: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -556,6 +576,20 @@ private fun ChatTopBar(
             contentDescription = "深度思考",
             highlighted = deepThinkingEnabled,
             onClick = onToggleDeepThinking,
+        )
+        // Seedance 自动视频开关（Task 7）：LOCAL Provider 下禁用并提示「仅云端可用」，
+        // 不清空已存储的会话开关值；开启准入（Key/立绘）由 ViewModel 校验。
+        IconBubble(
+            icon = Icons.Outlined.Videocam,
+            contentDescription = if (videoToggleDisabled) "自动视频：仅云端可用" else "自动视频",
+            highlighted = videoAutoEnabled && !videoToggleDisabled,
+            onClick = {
+                if (videoToggleDisabled) {
+                    Toast.makeText(context, "自动视频仅云端可用", Toast.LENGTH_SHORT).show()
+                } else {
+                    onToggleVideoAuto()
+                }
+            },
         )
         IconBubble(
             icon = Icons.AutoMirrored.Outlined.Chat,
@@ -657,6 +691,10 @@ internal fun MessageBubble(
     characterImage: String,
     characterName: String,
     onTts: () -> Unit,
+    onPlayVideo: (() -> Unit)? = null,
+    onExportVideo: (() -> Unit)? = null,
+    onCancelVideo: (() -> Unit)? = null,
+    onRetryVideo: (() -> Unit)? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     val glass = chatGlass()
@@ -775,8 +813,34 @@ internal fun MessageBubble(
                         if (message.isStreaming) {
                             StreamingCursor(color = bubbleContentColor)
                         }
+                        // Task 6/7：停止状态 badge（独立于 content/modelContent；仅非流式展示）。
+                        // 复制、TTS 与后续模型上下文均通过 content/modelContent 取文本，不含此标记。
+                        if (!message.isStreaming && message.completionState != MessageCompletionState.COMPLETE) {
+                            Text(
+                                text = when (message.completionState) {
+                                    MessageCompletionState.STOPPED_PARTIAL -> "已停止（已保留部分输出）"
+                                    MessageCompletionState.STOPPED_BEFORE_FINAL -> "已停止（尚未生成最终答案）"
+                                    MessageCompletionState.COMPLETE -> ""
+                                },
+                                color = bubbleContentColor.copy(alpha = 0.6f),
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(top = 6.dp),
+                            )
+                        }
                     }
                 }
+                // Seedance 视频卡（Task 7）：紧贴助手气泡下方渲染；播放/导出由 Task 8 注入。
+                message.video?.let { video ->
+                    SeedanceVideoCard(
+                        video = video,
+                        onPlay = onPlayVideo,
+                        onExport = onExportVideo,
+                        onCancel = onCancelVideo,
+                        onRetry = onRetryVideo,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+
                 // 操作胶囊：复制 / 朗读 / 重生成（仅 AI 且非流式）
                 if (!message.isStreaming) {
                     Row(
@@ -1082,13 +1146,15 @@ private fun StreamingCursor(color: Color) {
 }
 
 @Composable
-private fun ChatInputBar(
+internal fun ChatInputBar(
     text: String,
     isStreaming: Boolean,
+    stopRequested: Boolean,
     images: List<String>,
     files: List<AttachedFile>,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
+    onStop: () -> Unit,
     onPickImage: () -> Unit,
     onPickFile: () -> Unit,
     onRemoveImage: (Int) -> Unit,
@@ -1200,7 +1266,8 @@ private fun ChatInputBar(
                     inner()
                 },
             )
-            // 圆形发送按钮
+            // 发送 / 停止按钮（Task 7）：生成中切换为「停止」，stopRequested 时显示「正在停止」并禁用重复点击。
+            // 视觉圆形保持 36dp（与原有发送按钮一致，未改变触摸目标尺寸）。
             Box(
                 modifier = Modifier
                     .size(36.dp)
@@ -1210,16 +1277,41 @@ private fun ChatInputBar(
                         spotColor = Color(0xFF7C5CFF).copy(alpha = 0.45f),
                     )
                     .clip(CircleShape)
-                    .background(if (isStreaming) scheme.surfaceVariant else scheme.primary)
-                    .clickable(enabled = !isStreaming, onClick = onSend),
+                    .background(
+                        when {
+                            stopRequested -> scheme.error.copy(alpha = 0.85f)
+                            isStreaming -> scheme.error
+                            else -> scheme.primary
+                        }
+                    )
+                    .semantics {
+                        contentDescription = when {
+                            stopRequested -> "正在停止"
+                            isStreaming -> "停止生成"
+                            else -> "发送"
+                        }
+                    }
+                    .clickable(
+                        enabled = !(isStreaming && stopRequested),
+                        onClick = { if (isStreaming) onStop() else onSend() },
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    Icons.AutoMirrored.Outlined.Send,
-                    contentDescription = "发送",
-                    tint = if (isStreaming) scheme.onSurfaceVariant else scheme.onPrimary,
-                    modifier = Modifier.size(17.dp),
-                )
+                if (isStreaming) {
+                    // 停止图标：实心方框（生成中显示；stopRequested 时点击已禁用但仍保持可视状态）。
+                    Box(
+                        modifier = Modifier
+                            .size(12.dp)
+                            .background(scheme.onError, RoundedCornerShape(2.dp)),
+                    )
+                } else {
+                    Icon(
+                        Icons.AutoMirrored.Outlined.Send,
+                        contentDescription = "发送",
+                        tint = scheme.onPrimary,
+                        modifier = Modifier.size(17.dp),
+                    )
+                }
             }
         }
     }

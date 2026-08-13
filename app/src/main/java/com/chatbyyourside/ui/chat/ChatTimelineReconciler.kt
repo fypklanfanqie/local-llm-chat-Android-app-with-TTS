@@ -2,6 +2,7 @@ package com.chatbyyourside.ui.chat
 
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.data.model.DisplayMessage
+import com.chatbyyourside.data.model.SeedanceVideo
 import com.chatbyyourside.util.MarkdownParser
 
 /**
@@ -48,8 +49,9 @@ object ChatTimelineReconciler {
         streaming: DisplayMessage?,
         showThink: Boolean,
         characterName: String,
+        videos: List<SeedanceVideo> = emptyList(),
     ): Result {
-        val base = renderHistory(history, showThink, characterName)
+        val base = renderHistory(history, showThink, characterName, videos)
         val seen = HashSet<String>(base.size + 2)
         base.forEach { seen.add(it.id) }
 
@@ -82,8 +84,10 @@ object ChatTimelineReconciler {
         history: List<ChatMessage>,
         showThink: Boolean,
         characterName: String,
+        videos: List<SeedanceVideo>,
     ): List<DisplayMessage> {
         if (history.isEmpty()) return emptyList()
+        val videoByAssistantId = buildVideoByAssistantId(videos)
         return history.mapIndexed { idx, msg ->
             val src = if (showThink) msg.content else MarkdownParser.stripThink(msg.content)
             val segments = MarkdownParser.parseWithThink(src, isStreaming = false)
@@ -97,7 +101,27 @@ object ChatTimelineReconciler {
                 sender = if (msg.role == "user") "YOU" else (characterName.ifEmpty { "AI" }),
                 images = msg.images,
                 files = msg.files,
+                // Task 6/7：停止 badge 渲染源；不进入 content/modelContent。
+                completionState = msg.completionState,
+                // Task 7：Seedance 视频任务仅附加到助手消息（展示层投影，不进入 LLM 历史）。
+                video = if (msg.role == "assistant") videoByAssistantId[msg.databaseId] else null,
             )
         }
+    }
+
+    /**
+     * 按 `sourceAssistantMessageId` 聚合视频任务。
+     * 同一助手行出现多条记录时按 [SeedanceVideo.updatedAt] 后写覆盖（last-write-wins，
+     * 防御唯一索引冲突前的并发写）；[SeedanceVideo.updatedAt] 相同则后出现的覆盖。
+     */
+    private fun buildVideoByAssistantId(videos: List<SeedanceVideo>): Map<Long, SeedanceVideo> {
+        val map = HashMap<Long, SeedanceVideo>(videos.size)
+        for (video in videos) {
+            val prev = map[video.sourceAssistantMessageId]
+            if (prev == null || video.updatedAt >= prev.updatedAt) {
+                map[video.sourceAssistantMessageId] = video
+            }
+        }
+        return map
     }
 }
