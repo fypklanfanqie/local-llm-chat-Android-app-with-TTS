@@ -630,7 +630,7 @@ class SeedanceClientTest {
     // ---- 404/405 → BAD_ENDPOINT ----
 
     @Test
-    fun error_404_isClassifiedBadEndpoint_withActionableMessage() = runBlocking {
+    fun error_404_html_isClassifiedBadEndpoint_withActionableMessage() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(404).setBody("<html><body>Not Found</body></html>"))
         val ex = expectApiException()
         assertEquals(SeedanceError.BAD_ENDPOINT, ex.classification)
@@ -640,10 +640,22 @@ class SeedanceClientTest {
     }
 
     @Test
-    fun error_405_isClassifiedBadEndpoint() = runBlocking {
+    fun error_404_jsonBody_isClassifiedNotFound_notBadEndpoint() = runBlocking {
+        // 结构化 404（API 层已理解请求）是「模型/任务不存在」，不是「路径错误」。
+        server.enqueue(
+            MockResponse().setResponseCode(404)
+                .setBody("""{"error":{"code":"ModelNotFound","message":"model not found"}}""")
+        )
+        val ex = expectApiException()
+        assertEquals(SeedanceError.NOT_FOUND, ex.classification)
+        assertTrue("文案应指向模型 ID 或区域", ex.message.orEmpty().contains("模型或任务不存在"))
+    }
+
+    @Test
+    fun error_405_jsonBody_isClassifiedNotFound() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(405).setBody("""{"error":{"code":"MethodNotAllowed","message":"no"}}"""))
         val ex = expectApiException()
-        assertEquals(SeedanceError.BAD_ENDPOINT, ex.classification)
+        assertEquals(SeedanceError.NOT_FOUND, ex.classification)
     }
 
     // ---- “测试连接”探测 ----

@@ -41,7 +41,8 @@ enum class SeedanceRemoteStatus(val storageKey: String) {
  * - [QUOTA_EXCEEDED]：额度/并发/限流超限；
  * - [AUTH]：API Key 无效或未授权（HTTP 401/403 或鉴权错误码）；
  * - [INVALID_PARAMETER]：请求参数不合法（HTTP 400/422 或参数错误码）；
- * - [BAD_ENDPOINT]：服务地址/路径不正确或任务已失效（HTTP 404/405），需用户核对地址；
+ * - [BAD_ENDPOINT]：服务地址/路径不正确（HTTP 404/405 且响应体为空/HTML，即网关或路由层 404）；
+ * - [NOT_FOUND]：模型或任务不存在（HTTP 404/405 且响应体为结构化错误，API 层已理解请求）；
  * - [TRANSIENT_429_5XX]：瞬时 429/5xx，可稍后重试；
  * - [AMBIGUOUS_TRANSPORT]：网络/传输层失败，无法确定任务是否已被服务端受理，绝不自动重发；
  * - [OTHER]：其余未识别错误。
@@ -52,6 +53,7 @@ enum class SeedanceError {
     AUTH,
     INVALID_PARAMETER,
     BAD_ENDPOINT,
+    NOT_FOUND,
     TRANSIENT_429_5XX,
     AMBIGUOUS_TRANSPORT,
     OTHER,
@@ -87,9 +89,12 @@ internal fun classifySeedanceError(
 ): SeedanceError {
     if (httpStatus == 401 || httpStatus == 403) return SeedanceError.AUTH
     if (httpStatus == 429 || (httpStatus != null && httpStatus >= 500)) return SeedanceError.TRANSIENT_429_5XX
-    // 404/405：多为服务地址/路径配置错误（或任务已失效）。优先于正文启发式，
-    // 避免被网关 404 页里的任意字样误分类为配额/参数等。
-    if (httpStatus == 404 || httpStatus == 405) return SeedanceError.BAD_ENDPOINT
+    // 404/405：带结构化错误体（有 code/message）说明 API 层已理解请求、只是资源不存在（模型/任务）；
+    // 空体/HTML 说明是网关或路由层 404，即服务地址/路径错误。二者语义不同，先于正文启发式区分。
+    if (httpStatus == 404 || httpStatus == 405) {
+        return if (remoteCode != null || remoteMessage != null) SeedanceError.NOT_FOUND
+        else SeedanceError.BAD_ENDPOINT
+    }
 
     val text = "${remoteCode.orEmpty()} ${remoteMessage.orEmpty()}".lowercase()
     if (containsAny(text, SENSITIVE_MARKERS)) return SeedanceError.SENSITIVE_CONTENT

@@ -368,6 +368,8 @@ class SeedanceClient(
             SeedanceError.INVALID_PARAMETER -> "请求参数不合法，请调整生成设置"
             SeedanceError.BAD_ENDPOINT ->
                 "服务地址或路径可能不正确（HTTP $httpStatus）：官方 base 会自动补 /contents/generations/tasks；中转站请粘贴完整的「创建任务」接口地址（如 https://xxx/v1/media/generate）"
+            SeedanceError.NOT_FOUND ->
+                "模型或任务不存在（HTTP $httpStatus）：请检查模型 ID 是否可用，以及 API Key 与所选区域是否匹配（火山方舟 / BytePlus / 中转站）"
             SeedanceError.TRANSIENT_429_5XX -> "视频服务暂时繁忙（HTTP $httpStatus），请稍后重试"
             SeedanceError.AMBIGUOUS_TRANSPORT -> "网络错误，无法确认任务状态"
             SeedanceError.OTHER -> "视频生成失败（HTTP $httpStatus）"
