@@ -107,6 +107,7 @@ fun canTransition(from: SeedanceVideoState, to: SeedanceVideoState): Boolean = w
         SeedanceVideoState.CANCELLED,
         SeedanceVideoState.RUNNING,
         SeedanceVideoState.DOWNLOAD_PENDING,
+        SeedanceVideoState.FAILED_QUERY,
     )
     SeedanceVideoState.DOWNLOAD_PENDING ->
         to in setOf(SeedanceVideoState.DOWNLOADING, SeedanceVideoState.EXPIRED)

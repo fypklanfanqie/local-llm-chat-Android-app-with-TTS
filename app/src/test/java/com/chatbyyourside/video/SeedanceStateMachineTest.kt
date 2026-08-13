@@ -70,6 +70,7 @@ class SeedanceStateMachineTest {
         assertTrue(canTransition(CANCEL_REQUESTED, CANCELLED))
         assertTrue(canTransition(CANCEL_REQUESTED, RUNNING))
         assertTrue(canTransition(CANCEL_REQUESTED, DOWNLOAD_PENDING))
+        assertTrue(canTransition(CANCEL_REQUESTED, FAILED_QUERY))
         // 下载（含中断恢复重置）
         assertTrue(canTransition(DOWNLOAD_PENDING, DOWNLOADING))
         assertTrue(canTransition(DOWNLOAD_PENDING, EXPIRED))
@@ -161,7 +162,7 @@ class SeedanceStateMachineTest {
     fun legalTransitionCountMatchesContract() {
         val states = SeedanceVideoState.entries
         val legalCount = states.sumOf { from -> states.count { to -> canTransition(from, to) } }
-        assertEquals(44, legalCount)
+        assertEquals(45, legalCount)
     }
 
     // ---- 存储键 ----
