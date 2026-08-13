@@ -220,6 +220,8 @@ fun ChatScreen(
     // 屏幕级唯一播放控制器：内联卡片与全屏共用同一 ExoPlayer，只播放本地归档文件；
     // 视频出声时暂停全局 BGM、退后台/销毁时暂停并释放（绝不复用 audioManager 的播放器实例）。
     val lifecycleOwner = LocalLifecycleOwner.current
+    // TTS 抢占标记：视频出声时暂停应用内 TTS，视频释放后若此前正在播放则恢复（Task 8 音频互斥）。
+    var ttsWasPlaying by remember { mutableStateOf(false) }
     val playbackController = remember {
         SeedancePlaybackController(
             context = context.applicationContext,
@@ -227,6 +229,18 @@ fun ChatScreen(
                 override fun isPlaying(): Boolean = container.audioManager.isPlaying
                 override fun pause() { container.audioManager.pauseMusic() }
                 override fun resume() { container.audioManager.playMusic() }
+            },
+            onAcquireAudio = {
+                if (container.ttsManager.playing && !ttsWasPlaying) {
+                    ttsWasPlaying = true
+                    container.ttsManager.pause()
+                }
+            },
+            onReleaseAudio = {
+                if (ttsWasPlaying) {
+                    ttsWasPlaying = false
+                    container.ttsManager.resume()
+                }
             },
             lifecycle = lifecycleOwner.lifecycle,
         )

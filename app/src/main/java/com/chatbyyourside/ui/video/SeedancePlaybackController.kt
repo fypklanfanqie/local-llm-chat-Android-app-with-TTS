@@ -7,6 +7,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,13 +42,15 @@ interface BgmDuck {
  * 一个 [PlayerView] 表面挂载（见 [SeedanceVideoPlayer]）。只播放本地内部归档文件
  * （[com.chatbyyourside.data.model.SeedanceVideo.localVideoPath]），绝不播放远端 URL。
  *
- * 音频策略：开始播放时申请音频焦点并暂停全局 BGM；暂停/自然结束/释放时归还焦点并恢复 BGM。
- * 生命周期：[lifecycle] 进入 ON_PAUSE/ON_STOP 时自动暂停（退后台静音）；[release] 释放
- * 播放器与焦点并恢复 BGM（屏幕销毁时调用）。
+ * 音频策略：开始播放时申请音频焦点并暂停全局 BGM 与应用内 TTS；暂停/自然结束/释放时归还
+ * 焦点并恢复 BGM/TTS。生命周期：[lifecycle] 进入 ON_PAUSE/ON_STOP 时自动暂停（退后台静音）；
+ * [release] 释放播放器与焦点并恢复 BGM/TTS（屏幕销毁时调用）。
  */
 class SeedancePlaybackController(
     private val context: Context,
     private val bgm: BgmDuck? = null,
+    private val onAcquireAudio: () -> Unit = {},
+    private val onReleaseAudio: () -> Unit = {},
     lifecycle: Lifecycle? = null,
 ) {
     private val systemAudio = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -95,8 +98,16 @@ class SeedancePlaybackController(
             }
 
             override fun onPlaybackStateChanged(state: Int) {
-                // 视频自然播完：归还音频焦点并恢复 BGM
+                // 视频自然播完：归还音频焦点并恢复 BGM/TTS
                 if (state == Player.STATE_ENDED) releaseAudio()
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                // 加载/解码错误会把播放器打进 STATE_IDLE，STOP_ENDED 永不触发：
+                // 归还焦点并恢复 BGM/TTS、复位状态，保证下一次 play() 从干净状态重新准备。
+                _activePath.value = null
+                _isPlaying.value = false
+                releaseAudio()
             }
         })
     }
@@ -148,6 +159,7 @@ class SeedancePlaybackController(
             bgmWasPlaying = true
             bgm.pause()
         }
+        onAcquireAudio()
         systemAudio.requestAudioFocus(
             focusListener,
             AudioManager.STREAM_MUSIC,
@@ -161,5 +173,6 @@ class SeedancePlaybackController(
             bgmWasPlaying = false
             bgm?.resume()
         }
+        onReleaseAudio()
     }
 }

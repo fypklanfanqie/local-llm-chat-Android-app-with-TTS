@@ -133,6 +133,27 @@ class TtsManager(
         currentFile = null
     }
 
+    /**
+     * 视频等其它音频抢占焦点时暂停当前 TTS（保留临时文件与 MediaPlayer，可 [resume] 续播）。
+     * 无播放中实例时为空操作；暂停期间 [playing] 仍为 true，UI 视为「正在播放」。
+     * 与 [playAudio] 一样需在主线程调用（MediaPlayer 依赖创建线程的 Looper）。
+     */
+    fun pause() {
+        mediaPlayer?.let { mp ->
+            runCatching { if (mp.isPlaying) mp.pause() }
+        }
+    }
+
+    /**
+     * 抢占方释放音频后恢复被 [pause] 暂停的 TTS 播放。无暂停中的 MediaPlayer 时为空操作。
+     * 与 [playAudio] 一样需在主线程调用。
+     */
+    fun resume() {
+        mediaPlayer?.let { mp ->
+            runCatching { if (!mp.isPlaying) mp.start() }
+        }
+    }
+
     /** 清理 TTS 文本：去除括号内容（保持原 cleanTtsText 逻辑） */
     fun cleanTtsText(text: String): String {
         return text
