@@ -973,7 +973,7 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
             FieldLabel("服务地址")
             GlassInputField(value = baseUrl, onValueChange = { baseUrl = it }, placeholder = SeedanceConfig().baseUrl)
             Text(
-                "可填官方 base（含 /api/v3）或中转站完整接口地址（以 /contents/generations/tasks 结尾）。",
+                "官方地址填 base（含 /api/v3）；中转站请粘贴完整的「创建任务」接口地址（如 https://xxx/v1/media/generate）。",
                 color = scheme.onSurfaceVariant, fontSize = 10.sp,
             )
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {

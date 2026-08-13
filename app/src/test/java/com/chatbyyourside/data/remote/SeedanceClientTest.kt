@@ -517,6 +517,37 @@ class SeedanceClientTest {
     }
 
     @Test
+    fun resolveCollectionEndpoint_versionBase_appendsSuffix() {
+        assertEquals(
+            "https://relay.example.com/v1$SEEDANCE_TASKS_SUFFIX",
+            resolveSeedanceTaskCollectionEndpoint("https://relay.example.com/v1"),
+        )
+    }
+
+    @Test
+    fun resolveCollectionEndpoint_apiBase_appendsSuffix() {
+        assertEquals(
+            "https://relay.example.com/api$SEEDANCE_TASKS_SUFFIX",
+            resolveSeedanceTaskCollectionEndpoint("https://relay.example.com/api"),
+        )
+    }
+
+    @Test
+    fun resolveCollectionEndpoint_relayResourcePath_isUsedVerbatim() {
+        // 中转站带资源路径的完整接口地址：原样作为创建任务接口，绝不追加。
+        val relay = "https://api.lk888.ai/v1/media/generate"
+        assertEquals(relay, resolveSeedanceTaskCollectionEndpoint(relay))
+    }
+
+    @Test
+    fun resolveCollectionEndpoint_relayResourcePathWithTrailingSlash_isTrimmedAndVerbatim() {
+        assertEquals(
+            "https://api.lk888.ai/v1/media/generate",
+            resolveSeedanceTaskCollectionEndpoint("https://api.lk888.ai/v1/media/generate/"),
+        )
+    }
+
+    @Test
     fun resolveCollectionEndpoint_whitespacePadding_isTrimmed() {
         assertEquals(
             "https://relay.example.com$SEEDANCE_TASKS_SUFFIX",
@@ -533,11 +564,27 @@ class SeedanceClientTest {
     }
 
     @Test
+    fun resolveTaskEndpoint_relayResourcePath_appendsTaskIdVerbatim() {
+        assertEquals(
+            "https://api.lk888.ai/v1/media/generate/cgt-123",
+            resolveSeedanceTaskEndpoint("https://api.lk888.ai/v1/media/generate", "cgt-123"),
+        )
+    }
+
+    @Test
     fun createTask_fullEndpointBase_hitsVerbatimPath() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""{"id":"cgt-abc"}"""))
         val full = server.url("/api/v3$SEEDANCE_TASKS_SUFFIX").toString().trimEnd('/')
         client.createTask(SeedanceConfig(baseUrl = full), request())
         assertEquals("/api/v3$SEEDANCE_TASKS_SUFFIX", server.takeRequest().path)
+    }
+
+    @Test
+    fun createTask_relayResourcePathBase_hitsVerbatimPath() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"id":"cgt-abc"}"""))
+        val relay = server.url("/v1/media/generate").toString().trimEnd('/')
+        client.createTask(SeedanceConfig(baseUrl = relay), request())
+        assertEquals("/v1/media/generate", server.takeRequest().path)
     }
 
     // ---- 404/405 → BAD_ENDPOINT ----

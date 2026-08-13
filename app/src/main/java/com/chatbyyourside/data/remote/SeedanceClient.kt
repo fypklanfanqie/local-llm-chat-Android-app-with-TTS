@@ -39,14 +39,31 @@ internal const val SEEDANCE_TASKS_SUFFIX = "/contents/generations/tasks"
 /**
  * 归一化用户填写的“服务地址”为任务集合接口地址。
  *
- * 兼容两种填写方式（中转站/自建网关常见）：
- *  - 官方 base（如 `https://ark.cn-beijing.volces.com/api/v3`）：自动拼接 `[SEEDANCE_TASKS_SUFFIX]`；
- *  - 完整接口地址（已以 `/contents/generations/tasks` 结尾）：原样使用，避免“双拼”导致 404。
+ * 按路径形态区分两类填写方式：
+ *  - **官方 base 形态**（仅主机、`/api`、`/vN`、`/api/vN`，如 `https://ark.cn-beijing.volces.com/api/v3`）：
+ *    自动拼接 `[SEEDANCE_TASKS_SUFFIX]`；
+ *  - **带具体资源路径的完整接口地址**（如中转站 `https://xxx/v1/media/generate`）：
+ *    原样作为“创建任务”接口使用，不再追加，避免拼出错误路径导致 404。
+ *
+ * 已以 `[SEEDANCE_TASKS_SUFFIX]` 结尾的地址同样原样使用（防双拼）。
  */
 internal fun resolveSeedanceTaskCollectionEndpoint(baseUrl: String): String {
     val trimmed = baseUrl.trim().trimEnd('/')
-    return if (trimmed.endsWith(SEEDANCE_TASKS_SUFFIX)) trimmed else trimmed + SEEDANCE_TASKS_SUFFIX
+    if (trimmed.isEmpty()) return trimmed
+    if (trimmed.endsWith(SEEDANCE_TASKS_SUFFIX)) return trimmed
+    return if (isKnownBaseUrl(trimmed)) trimmed + SEEDANCE_TASKS_SUFFIX else trimmed
 }
+
+/** 是否为“官方 base 形态”（仅主机/根、`/api`、`/vN`、`/api/vN`）；其余带资源路径视为完整接口地址。 */
+private fun isKnownBaseUrl(url: String): Boolean {
+    val afterScheme = url.substringAfter("://", "")
+    val path = afterScheme.substringAfter('/', "")
+    val p = "/" + path.trimEnd('/')
+    return path.isBlank() || p == "/api" || BASE_PATH_PATTERNS.any { it.matches(p) }
+}
+
+/** 官方 base 形态的路径模式（版本/API 前缀，需自动补任务后缀）。 */
+private val BASE_PATH_PATTERNS = listOf(Regex("^/v\\d+$"), Regex("^/api/v\\d+$"))
 
 /** 单个任务接口地址：集合接口 + `/{taskId}`（GET 查询 / DELETE 取消共用）。 */
 internal fun resolveSeedanceTaskEndpoint(baseUrl: String, taskId: String): String =
@@ -195,7 +212,7 @@ class SeedanceClient(
                             SeedanceProbeResult.Ok("接口可达，路径正确（HTTP $status 为探测任务的预期返回）")
                         } else {
                             SeedanceProbeResult.Failed(
-                                "接口可达，但路径可能不正确（HTTP $status）：请确认地址以 $SEEDANCE_TASKS_SUFFIX 结尾；官方 base 含 /api/v3，中转站请粘贴完整接口地址"
+                                "接口可达，但路径可能不正确（HTTP $status）：请粘贴中转站完整的「创建任务」接口地址（如 https://xxx/v1/media/generate），不要只填主机或 /v1"
                             )
                         }
                     }
@@ -346,7 +363,7 @@ class SeedanceClient(
             SeedanceError.AUTH -> "Seedance API Key 无效或未授权"
             SeedanceError.INVALID_PARAMETER -> "请求参数不合法，请调整生成设置"
             SeedanceError.BAD_ENDPOINT ->
-                "服务地址或路径可能不正确（HTTP $httpStatus）：请确认以 $SEEDANCE_TASKS_SUFFIX 结尾；官方地址含 /api/v3，中转站请粘贴完整接口地址"
+                "服务地址或路径可能不正确（HTTP $httpStatus）：官方 base 会自动补 /contents/generations/tasks；中转站请粘贴完整的「创建任务」接口地址（如 https://xxx/v1/media/generate）"
             SeedanceError.TRANSIENT_429_5XX -> "视频服务暂时繁忙（HTTP $httpStatus），请稍后重试"
             SeedanceError.AMBIGUOUS_TRANSPORT -> "网络错误，无法确认任务状态"
             SeedanceError.OTHER -> "视频生成失败（HTTP $httpStatus）"
