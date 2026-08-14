@@ -2,6 +2,7 @@ package com.chatbyyourside.data.repository
 
 import com.chatbyyourside.data.local.ChatHistoryEntity
 import com.chatbyyourside.data.model.ChatMessage
+import com.chatbyyourside.data.model.MessageCompletionState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -92,5 +93,50 @@ class ChatRepositoryMappingTest {
         val restored = original.toEntity("c1", 1).toMessage()
         assertNull(restored.modelContent)
         assertEquals("display", restored.modelContent ?: restored.content)
+    }
+
+    // ===== 停止状态持久化（Task 6）=====
+
+    @Test
+    fun toMessage_preservesCompletionState() {
+        val entity = ChatHistoryEntity(
+            id = 1, characterId = "c1", conversationId = 1,
+            role = "assistant", content = "display", modelContent = "raw", timestamp = 100,
+            completionState = MessageCompletionState.STOPPED_PARTIAL.storageKey,
+        )
+        val msg = entity.toMessage()
+        assertEquals(MessageCompletionState.STOPPED_PARTIAL, msg.completionState)
+    }
+
+    @Test
+    fun toMessage_unknownCompletionStateFallsBackToComplete() {
+        val entity = ChatHistoryEntity(
+            id = 1, characterId = "c1", conversationId = 1,
+            role = "assistant", content = "display", timestamp = 100,
+            completionState = "SOME_FUTURE_STATE",
+        )
+        val msg = entity.toMessage()
+        assertEquals(MessageCompletionState.COMPLETE, msg.completionState)
+    }
+
+    @Test
+    fun toEntity_persistsCompletionState() {
+        val msg = ChatMessage(
+            role = "assistant", content = "display", timestamp = 100,
+            completionState = MessageCompletionState.STOPPED_BEFORE_FINAL,
+        )
+        val entity = msg.toEntity(characterId = "c1", conversationId = 1)
+        assertEquals(MessageCompletionState.STOPPED_BEFORE_FINAL.storageKey, entity.completionState)
+    }
+
+    @Test
+    fun roundTrip_preservesCompletionState() {
+        val original = ChatMessage(
+            role = "assistant", content = "display", modelContent = "raw", timestamp = 1,
+            completionState = MessageCompletionState.STOPPED_PARTIAL,
+        )
+        val restored = original.toEntity("c1", 1).toMessage()
+        assertEquals(original.completionState, restored.completionState)
+        assertEquals(original.modelContent, restored.modelContent)
     }
 }

@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
+import com.chatbyyourside.llm.thinking.LocalThinkingLevel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -30,6 +31,7 @@ class LocalInferenceSettingsTest {
     private val maxTokensKey = intPreferencesKey("llm_max_tokens")
     private val backendKey = stringPreferencesKey("llm_backend")
     private val thinkKey = booleanPreferencesKey("deep_thinking")
+    private val thinkingLevelKey = stringPreferencesKey("llm_thinking_level")
 
     @Test
     fun missingOrInvalidModeFallsBackToBalanced() {
@@ -73,6 +75,7 @@ class LocalInferenceSettingsTest {
         assertEquals(AppConfig.LLM.DEFAULT_MAX_TOKENS, snap.maxTokens)
         assertEquals(BackendPreference.AUTO, snap.backend)
         assertFalse(snap.deepThinking)
+        assertEquals(LocalThinkingLevel.DEFAULT, snap.thinkingLevel)
         assertEquals(InferencePerformanceMode.DEFAULT, snap.performanceMode)
     }
 
@@ -94,6 +97,43 @@ class LocalInferenceSettingsTest {
         assertEquals(4096, snap.maxTokens)
         assertEquals(BackendPreference.MNN_CPU, snap.backend)
         assertTrue(snap.deepThinking)
+    }
+
+    @Test
+    fun missingOrUnknownThinkingLevelFallsBackToAuto() {
+        val empty = LocalInferenceSettings.fromPreferences(preferencesOf())
+        assertEquals(LocalThinkingLevel.AUTO, empty.thinkingLevel)
+
+        val bogus = LocalInferenceSettings.fromPreferences(preferencesOf(thinkingLevelKey to "BOGUS_LEVEL"))
+        assertEquals(LocalThinkingLevel.AUTO, bogus.thinkingLevel)
+    }
+
+    @Test
+    fun thinkingLevelRoundTripsAcrossAllLevels() {
+        LocalThinkingLevel.entries.forEach { level ->
+            assertEquals(
+                level,
+                LocalThinkingLevel.fromStorageKey(level.storageKey),
+            )
+            val snap = LocalInferenceSettings.fromPreferences(preferencesOf(thinkingLevelKey to level.storageKey))
+            assertEquals(level, snap.thinkingLevel)
+        }
+        assertEquals("auto", LocalThinkingLevel.AUTO.storageKey)
+    }
+
+    @Test
+    fun thinkingLevelIsIndependentFromDeepThinkingSwitch() {
+        val off = LocalInferenceSettings.fromPreferences(
+            preferencesOf(thinkingLevelKey to "long", thinkKey to false),
+        )
+        assertEquals(LocalThinkingLevel.LONG, off.thinkingLevel)
+        assertFalse(off.deepThinking)
+
+        val on = LocalInferenceSettings.fromPreferences(
+            preferencesOf(thinkingLevelKey to "short", thinkKey to true),
+        )
+        assertEquals(LocalThinkingLevel.SHORT, on.thinkingLevel)
+        assertTrue(on.deepThinking)
     }
 
     /** 超时回退逻辑的纯数据面：不可用时应落到不可变默认快照。 */

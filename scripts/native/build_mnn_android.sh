@@ -35,7 +35,7 @@ set -euo pipefail
 # 若未来升级 NDK 27 重编：必须同步更新 manifest 的 ndkVersion 与全部 buildId/sha256
 # （本脚本第 5 步会以 --generate 依据实际产物自动重新生成 manifest，随后 verify 校验）。
 # ---------------------------------------------------------------------------
-MNN_COMMIT="af0142bcc7b76b7a5128373e285683dc04f55f69"
+MNN_COMMIT_DEFAULT="af0142bcc7b76b7a5128373e285683dc04f55f69"
 NDK_VERSION="26.1.10909125"
 ANDROID_API=24
 ANDROID_ABI="arm64-v8a"
@@ -50,6 +50,30 @@ JNI_BUILD="$STAGING/jni-build"
 JNI_LIBS_DIR="$REPO_ROOT/app/src/main/jniLibs/$ANDROID_ABI"
 MANIFEST="$REPO_ROOT/app/src/main/jniLibs/native-manifest.json"
 VERIFIER="$REPO_ROOT/scripts/native/verify_native_bundle.py"
+
+# ---------------------------------------------------------------------------
+# Task 4：候选构建参数化（默认值 = 现状：构建 pinned commit 到生产路径）。
+#
+#   MNN_COMMIT_OVERRIDE   构建的 MNN commit（默认 = 上方 pinned $MNN_COMMIT_DEFAULT）
+#   MNN_OUTPUT_DIR        标准 .so 输出目录（默认 = jniLibs/$ANDROID_ABI）
+#   MNN_MANIFEST_OUT      manifest 输出路径（默认 = 生产 native-manifest.json）
+#
+# 规则（升级基础设施，不改默认行为）：
+#   * 默认调用仍构建 pinned commit 到现有路径；
+#   * 候选构建必须显式传入独立 ASCII staging 输出（如 $HOME/mnn-candidates/<commit>/arm64-v8a
+#     与对应 manifest 路径），**绝不**写入生产 jniLibs 或生产 manifest；
+#   * 本脚本永不改写 MnnBridge.EXPECTED_MNN_COMMIT / CMakeLists CHAT_MNN_COMMIT —— runtime
+#     晋级由 Task 4 门禁通过后的独立变更完成（见 docs/mnn-upstream-runtime-delta.md §4）；
+#   * 候选构建的 verifier 校验 manifest.mnnCommit == 请求的候选 commit（--expected-commit）。
+# ---------------------------------------------------------------------------
+MNN_COMMIT="${MNN_COMMIT_OVERRIDE:-$MNN_COMMIT_DEFAULT}"
+OUTPUT_DIR="${MNN_OUTPUT_DIR:-$JNI_LIBS_DIR}"
+MANIFEST_OUT="${MNN_MANIFEST_OUT:-$MANIFEST}"
+
+if [[ "$MNN_COMMIT" != "$MNN_COMMIT_DEFAULT" || "$OUTPUT_DIR" != "$JNI_LIBS_DIR" || "$MANIFEST_OUT" != "$MANIFEST" ]]; then
+    log "候选构建模式: commit=$MNN_COMMIT output=$OUTPUT_DIR manifest=$MANIFEST_OUT"
+    log "候选构建绝不写入生产 jniLibs / 生产 manifest；MnnBridge.EXPECTED_MNN_COMMIT 不修改。"
+fi
 
 # 16 KiB page linker flag (also applied in cpp/CMakeLists.txt).
 PAGE_FLAG="-Wl,-z,max-page-size=16384"
@@ -90,10 +114,14 @@ case "$STAGING" in
     *[![:print:]]*) die "STAGING must be ASCII-only: $STAGING" ;;
 esac
 
-# Deterministic build id: short hash of (MNN commit + NDK + ABI + API + flags).
-BUILD_ID="$(printf '%s|%s|%s|%s|%s' "$MNN_COMMIT" "$NDK_VERSION" "$ANDROID_ABI" "$ANDROID_API" "llm,low_mem,arm82,opencl,16k" \
+# Complete feature flag set actually passed to CMake (BUILD_ID 必须包含完整 feature flags)。
+# 与 MNN_CMAKE_FLAGS 对应：LLM / 低内存 / weight dequant / transformer fuse / ARM82 / OpenCL /
+# QNN OFF / Vulkan OFF / 16 KiB pages。改动 flag 集 = 新 build id = 新 native 身份。
+FEATURE_FLAGS="llm,low_mem,cpu_weight_dequant_gemm,transformer_fuse,arm82,opencl,qnn_off,vulkan_off,16k_pages"
+# Deterministic build id: short hash of (MNN commit + NDK + ABI + API + full flags).
+BUILD_ID="$(printf '%s|%s|%s|%s|%s' "$MNN_COMMIT" "$NDK_VERSION" "$ANDROID_ABI" "$ANDROID_API" "$FEATURE_FLAGS" \
     | sha256sum | cut -c1-16)"
-log "build id: $BUILD_ID"
+log "build id: $BUILD_ID (commit=$MNN_COMMIT ndk=$NDK_VERSION abi=$ANDROID_ABI api=$ANDROID_API flags=$FEATURE_FLAGS)"
 
 # ---------------------------------------------------------------------------
 # 1. Fetch pinned MNN source
@@ -180,34 +208,37 @@ log "building JNI wrappers"
 "$CMAKE_BIN" --build "$JNI_BUILD" -j
 
 # ---------------------------------------------------------------------------
-# 4. Copy standard .so into jniLibs (QNN libs are NOT copied — Task 11)
+# 4. Copy standard .so into OUTPUT_DIR (QNN libs are NOT copied — Task 11)
+#    Task 4：候选构建输出到独立 staging（$OUTPUT_DIR），不覆盖生产 jniLibs。
 # ---------------------------------------------------------------------------
-log "copying standard .so into $JNI_LIBS_DIR"
-mkdir -p "$JNI_LIBS_DIR"
-cp -f "$MNN_INSTALL/lib/libMNN.so"      "$JNI_LIBS_DIR/libMNN.so"
-cp -f "$JNI_BUILD/libmnn_jni.so"        "$JNI_LIBS_DIR/libmnn_jni.so"
-cp -f "$JNI_BUILD/libcpu_sys_jni.so"    "$JNI_LIBS_DIR/libcpu_sys_jni.so"
+log "copying standard .so into $OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR"
+cp -f "$MNN_INSTALL/lib/libMNN.so"      "$OUTPUT_DIR/libMNN.so"
+cp -f "$JNI_BUILD/libmnn_jni.so"        "$OUTPUT_DIR/libmnn_jni.so"
+cp -f "$JNI_BUILD/libcpu_sys_jni.so"    "$OUTPUT_DIR/libcpu_sys_jni.so"
 
 # Matching 26.1.10909125 (r26b) libc++_shared.so (same toolchain as libMNN/JNI — ABI consistency).
 LIBCPP_SRC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
 [[ -f "$LIBCPP_SRC" ]] || LIBCPP_SRC="$ANDROID_NDK_HOME/sources/cxx-stl/llvm-libc++/libs/$ANDROID_ABI/libc++_shared.so"
 [[ -f "$LIBCPP_SRC" ]] || die "libc++_shared.so not found in NDK"
-cp -f "$LIBCPP_SRC" "$JNI_LIBS_DIR/libc++_shared.so"
+cp -f "$LIBCPP_SRC" "$OUTPUT_DIR/libc++_shared.so"
 
 # Remove any stale QNN libraries from the standard bundle (Task 11).
-rm -f "$JNI_LIBS_DIR"/libQnn*.so
+rm -f "$OUTPUT_DIR"/libQnn*.so
 
 # ---------------------------------------------------------------------------
 # 5. Generate manifest from the actual built binaries, then verify
+#    Task 4：verifier 校验 manifest.mnnCommit == 本次实际构建的 commit（候选归属防混淆）。
 # ---------------------------------------------------------------------------
-log "generating $MANIFEST"
+log "generating $MANIFEST_OUT"
 python3 "$VERIFIER" --generate \
-    --dir "$JNI_LIBS_DIR" --manifest "$MANIFEST" \
+    --dir "$OUTPUT_DIR" --manifest "$MANIFEST_OUT" \
     --mnn-commit "$MNN_COMMIT" --ndk-version "$NDK_VERSION" \
     --android-api "$ANDROID_API" --abi "$ANDROID_ABI"
 
 log "verifying native bundle"
-python3 "$VERIFIER" --dir "$JNI_LIBS_DIR" --manifest "$MANIFEST"
+python3 "$VERIFIER" --dir "$OUTPUT_DIR" --manifest "$MANIFEST_OUT" \
+    --expected-commit "$MNN_COMMIT"
 
-log "done. standard .so in $JNI_LIBS_DIR"
-ls -la "$JNI_LIBS_DIR"
+log "done. standard .so in $OUTPUT_DIR"
+ls -la "$OUTPUT_DIR"

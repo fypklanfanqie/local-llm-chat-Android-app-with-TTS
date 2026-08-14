@@ -105,6 +105,14 @@ class DownloadManager(private val context: Context) {
             }
         }
         jobs[model.id] = job
+        // 下载结束（成功/失败/取消）后清理任务句柄与暂停标志，避免进程生命周期内 map 无界增长
+        // （固定 13 模型目录内无害，但自定义/动态 ID 时结构性累积）。用 invokeOnCompletion 而非
+        // 在 coroutine 内 finally：处理「协程先于 jobs 赋值完成」的竞态——已在完成时立即执行。
+        job.invokeOnCompletion {
+            jobs.remove(model.id)
+            pauseFlags.remove(model.id)
+            calls.remove(model.id)
+        }
     }
 
     // ===== MNN 多文件目录下载 =====

@@ -4,6 +4,11 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Seedance contents/generations/tasks 远端任务状态（官方取值）。
@@ -202,3 +207,113 @@ private val MODEL_NOT_OPEN_MARKERS = listOf(
 
 private fun containsAny(lowercased: String, markers: List<String>): Boolean =
     markers.any { lowercased.contains(it) }
+
+// =============================================================================================
+// 中转站「媒体协议」DTO（POST /v1/media/generate + GET /v1/media/status）
+// 协议出处：dm1124/灵科中转站 Seedance 2.0（kwvideo-v2-ref）接入文档。与上方方舟 DTO 互不影响。
+// =============================================================================================
+
+/** 中转站媒体协议创建任务请求体：固定三字段 model · prompt · params。 */
+@Serializable
+internal data class MediaGenerateRequest(
+    val model: String,
+    val prompt: String,
+    val params: MediaGenerateParams,
+)
+
+/** 中转站媒体协议 params：可选项因模型而异；空字段由 Json(explicitNulls=false) 省略。 */
+@Serializable
+internal data class MediaGenerateParams(
+    /** 参考图片 URL / data URL 列表（kwvideo-v2-ref：1~9 张，必填）。 */
+    val images: List<String>,
+    /** 速度版本（kwvideo-v2-ref：Mini / 快速 / 标准，必填）。 */
+    val version: String,
+    /** 视频时长字符串（kwvideo-v2-ref：auto / 4~15，必填）。 */
+    val duration: String,
+    /** 宽高比（adaptive / 9:16 / 16:9 / 1:1 / 3:4 / 4:3 / 21:9）。 */
+    @SerialName("aspect_ratio") val aspectRatio: String? = null,
+    /** 分辨率（480p / 720p / 1080p / 4K）。 */
+    val resolution: String? = null,
+)
+
+/**
+ * 中转站媒体协议创建任务响应：`{code, msg, data:{task_id}}` 包装。
+ *
+ * 字段全部可空：`code` 可能为数字或字符串；`data` 保留原样由 [MediaCreateResponse.taskId]
+ * 提取 `task_id`（兼容数字/字符串两种 JSON 类型，也兼容无包装直接平铺 `task_id` 的渠道）。
+ */
+@Serializable
+internal data class MediaCreateResponse(
+    val code: JsonPrimitive? = null,
+    val msg: String? = null,
+    val message: String? = null,
+    val data: JsonObject? = null,
+    @SerialName("task_id") val flatTaskId: JsonPrimitive? = null,
+) {
+    /** 从 data.task_id（或顶层 task_id）提取任务 ID 文本；缺失返回 null。 */
+    val taskId: String?
+        get() = (data?.get("task_id")?.jsonPrimitive?.contentOrNull) ?: flatTaskId?.contentOrNull
+
+    /** 业务码数字形式（`code` 缺失或非数值返回 null）。 */
+    val numericCode: Int? get() = code?.contentOrNull?.trim()?.toIntOrNull()
+
+    /** 错误文案：msg 优先，回落 message。 */
+    val errorText: String? get() = msg?.takeIf { it.isNotBlank() } ?: message?.takeIf { it.isNotBlank() }
+}
+
+/**
+ * 中转站媒体协议任务状态（GET /v1/media/status 响应）。
+ *
+ * 判定规则（文档原文）：终态用 `is_final === true`；成功/失败用 `state`（pending / running /
+ * success / failed）；`status` / `status_group` 是中文展示字段，不参与逻辑判定。
+ */
+@Serializable
+internal data class MediaTaskStatus(
+    @SerialName("task_id") val taskId: JsonPrimitive? = null,
+    val state: String? = null,
+    @SerialName("is_final") val isFinal: Boolean? = null,
+    val progress: String? = null,
+    @SerialName("result_url") val resultUrl: String? = null,
+    @SerialName("result_type") val resultType: String? = null,
+    val error: String? = null,
+    /** 中文展示字段，仅给人看，不用于逻辑判定。 */
+    val status: String? = null,
+    /** 中文展示字段，仅给人看，不用于逻辑判定。 */
+    @SerialName("status_group") val statusGroup: String? = null,
+)
+
+/**
+ * 把中转站任务状态映射为方舟形状的 [SeedanceTaskResponse]，供协调器复用同一套状态机。
+ *
+ * 映射规则（保守，绝不错判）：
+ * - `success` 且 `result_url` 非空 → SUCCEEDED（可下载）；
+ * - `success` 但 URL 未就绪 → RUNNING（继续轮询，避免进入「成功无产物」分支）；
+ * - `failed` → FAILED（携带 [MediaTaskStatus.error] 文案）；
+ * - `pending` → QUEUED，`running` → RUNNING；
+ * - 未知状态：`is_final == true` 且非 success → 保守 FAILED；否则 RUNNING（继续轮询）。
+ */
+internal fun mapMediaStatusToTaskResponse(
+    status: MediaTaskStatus,
+    requestId: String?,
+): SeedanceTaskResponse {
+    val state = status.state?.trim()?.lowercase()
+    val url = status.resultUrl?.takeIf { it.isNotBlank() }
+    val remote = when {
+        state == "success" && url != null -> SeedanceRemoteStatus.SUCCEEDED
+        state == "success" -> SeedanceRemoteStatus.RUNNING
+        state == "failed" -> SeedanceRemoteStatus.FAILED
+        state == "pending" -> SeedanceRemoteStatus.QUEUED
+        state == "running" -> SeedanceRemoteStatus.RUNNING
+        status.isFinal == true -> SeedanceRemoteStatus.FAILED
+        else -> SeedanceRemoteStatus.RUNNING
+    }
+    return SeedanceTaskResponse(
+        id = status.taskId?.contentOrNull,
+        status = remote.storageKey,
+        output = if (remote == SeedanceRemoteStatus.SUCCEEDED) SeedanceTaskOutput(videoUrl = url) else null,
+        error = if (remote == SeedanceRemoteStatus.FAILED) {
+            SeedanceTaskError(code = "REMOTE_FAILED", message = status.error?.takeIf { it.isNotBlank() })
+        } else null,
+        requestId = requestId,
+    )
+}

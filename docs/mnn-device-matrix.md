@@ -34,3 +34,11 @@
 - runtime-info manifest 哈希与打包一致；
 - 无真实模型 fixture 的模拟器测试以明确原因跳过（不静默通过）；
 - 16 KiB 设备能加载全部 native 库。
+- GPU 候选的 decoded 样本必须全部实际跑在 `MNN_GPU`；全回退候选不得作为 GPU 收益证据晋级。
+
+## 单阶段思考验收
+- 同一请求日志只有一个 generationId/一次 model load attempt chain；不得出现“阶段 2”。
+- maxTokens=128/512/2048 时 generatedTokens 不超过总上限。
+- 思考自然闭合时 `reasoningEndUs <= firstBodyDeltaUs`；未闭合时 completionReason 必须如实为 MAX_TOKENS/USER_CANCEL/THERMAL_STOP。
+- 原始 modelContent 不含应用合成的 `</think>`。
+- 用户点击停止后不触发第二次直接作答。

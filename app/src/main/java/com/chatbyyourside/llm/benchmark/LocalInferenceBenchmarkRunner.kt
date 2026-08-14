@@ -130,6 +130,20 @@ data class CandidateOverrides(
     val decodeStepTokens: Int = 1,
 )
 
+/**
+ * 基准后端目标（Task 15/16）：显式指定被测后端，**不依赖也不修改持久化设置**。
+ *
+ * 用途：CPU vs GPU prefill 对比（高级诊断入口）、GPU prefill 优化实验等「同设置下强制测某个
+ * 后端」的场景——只影响本次 run 的 plan/quadrant，绝不写 DataStore。
+ */
+enum class BenchmarkTarget {
+    /** CPU_OPTIMIZED 变体（MNN_CPU 偏好）。 */
+    CPU_OPTIMIZED,
+
+    /** OPENCL 变体（MNN_GPU 偏好；OpenCL 健康按可用入链，实际加载/生成失败仍会回退并如实记录）。 */
+    OPENCL_GPU,
+}
+
 interface LocalInferenceBenchmarkRunner {
 
     /**
@@ -152,6 +166,8 @@ interface LocalInferenceBenchmarkRunner {
      * @param candidateOverrides 候选配置旁路（Task 7 M-4，[CandidateOverrides]）：非 null 时按
      *        候选 lookahead/步长构造合成认证记录测量该配置，并强制 CPU 象限（lookahead/步进仅
      *        CPU 变体有意义）；**仅供认证基准流程使用**。null=按既有门禁语义（默认）。
+     * @param target 显式基准后端目标（Task 15/16）：非 null 时强制该后端象限（覆盖设置快照
+     *        推导），不修改持久化设置；null=按设置快照推导（默认）。
      */
     suspend fun run(
         scenario: InferenceBenchmarkScenario,
@@ -160,6 +176,7 @@ interface LocalInferenceBenchmarkRunner {
         warmupRounds: Int = 1,
         recordedRounds: Int = 5,
         candidateOverrides: CandidateOverrides? = null,
+        target: BenchmarkTarget? = null,
     ): BenchmarkScenarioResult
 
     /**

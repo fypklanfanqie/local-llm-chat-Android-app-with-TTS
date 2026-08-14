@@ -84,6 +84,16 @@ enum class DowngradeReason {
     // （InferenceCertificationStore 无记录 / 记录无 lookahead 证据 / 变体不匹配）——native
     // config 回落 lookahead=false，仅在基准证明收益的认证存在时才启用。
     LOOKAHEAD_UNCERTIFIED,
+    // ===== 模型大小策略（AUTO 仅对总参数量 >7B 使用 GPU）=====
+    /** AUTO 下模型总参数量 <= 7B：跳过 GPU，直接 CPU。 */
+    AUTO_MODEL_AT_OR_BELOW_7B_CPU,
+    /** AUTO 下模型参数元数据未知：安全默认 CPU。 */
+    AUTO_MODEL_PARAMETERS_UNKNOWN_CPU,
+    // ===== GPU 尝试失败后回退 CPU 的可见原因（BackendManager 并入后续 CPU attempt 遥测）=====
+    /** GPU（OpenCL）模型加载失败后回退 CPU。 */
+    GPU_LOAD_FALLBACK,
+    /** GPU（OpenCL）生成异常回退 CPU（首 delta 前）。 */
+    GPU_GENERATION_FALLBACK,
 }
 
 /**
@@ -96,6 +106,9 @@ data class ResolvedInferencePlan(
     val requestedMode: InferencePerformanceMode,
     val effectiveMode: InferencePerformanceMode,
     val contextTokens: Int,
+    /** 用户配置的上下文长度（Task 15：内存准入降级前）；null = 与 [contextTokens] 相同（未降级）。
+     *  仅 Provider 在准入降级时设置；resolver 本身不产此字段。 */
+    val configuredContextTokens: Int? = null,
     val maxOutputTokens: Int,
     val streamPolicy: StreamPolicy,
     val powerPolicy: PowerPolicy,

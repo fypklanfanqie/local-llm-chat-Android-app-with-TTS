@@ -13,8 +13,10 @@ import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.SeedanceModelVariant
 import com.chatbyyourside.data.model.SeedanceRatio
 import com.chatbyyourside.data.model.SeedanceResolution
+import com.chatbyyourside.data.model.SystemVoiceTemplate
 import com.chatbyyourside.data.model.ThemeMode
 import com.chatbyyourside.data.model.TtsConfig
+import com.chatbyyourside.data.model.TtsEngine
 import com.chatbyyourside.data.model.TtsLanguage
 import com.chatbyyourside.data.model.VoicePair
 import com.chatbyyourside.data.repository.BgmTrack
@@ -56,6 +58,8 @@ class SettingsStore(
         val TTS_LANGUAGE = stringPreferencesKey("tts_language")
         val TTS_VOLUME = intPreferencesKey("tts_volume")
         val TTS_VOICE_MAP = stringPreferencesKey("tts_voice_map")  // JSON: Map<characterId, VoicePair>
+        val TTS_ENGINE = stringPreferencesKey("tts_engine")        // system（默认，手机自带）/ cloud（火山豆包）
+        val TTS_SYSTEM_TEMPLATE = stringPreferencesKey("tts_system_template")  // 系统引擎声音模板
 
         // 角色
         val ACTIVE_CHARACTER = stringPreferencesKey("active_character")
@@ -104,6 +108,7 @@ class SettingsStore(
         // fps/seed/camera 不支持故无键。API Key 仅落 DataStore，绝不写入 Room/日志/WorkData。
         val SEEDANCE_BASE_URL = stringPreferencesKey("seedance_base_url")
         val SEEDANCE_API_KEY = stringPreferencesKey("seedance_api_key")
+        val SEEDANCE_MODEL_ID = stringPreferencesKey("seedance_model_id")
         val SEEDANCE_VARIANT = stringPreferencesKey("seedance_variant")
         val SEEDANCE_RESOLUTION = stringPreferencesKey("seedance_resolution")
         val SEEDANCE_RATIO = stringPreferencesKey("seedance_ratio")
@@ -171,6 +176,7 @@ class SettingsStore(
         SeedanceConfig(
             baseUrl = p[Keys.SEEDANCE_BASE_URL] ?: SeedanceConfig().baseUrl,
             apiKey = p[Keys.SEEDANCE_API_KEY] ?: "",
+            relayModelId = p[Keys.SEEDANCE_MODEL_ID] ?: SeedanceConfig().relayModelId,
             variant = SeedanceModelVariant.fromStorageKey(p[Keys.SEEDANCE_VARIANT]),
             resolution = SeedanceResolution.fromStorageKey(p[Keys.SEEDANCE_RESOLUTION]),
             ratio = SeedanceRatio.fromStorageKey(p[Keys.SEEDANCE_RATIO]),
@@ -189,6 +195,7 @@ class SettingsStore(
         dataStore.edit { p ->
             p[Keys.SEEDANCE_BASE_URL] = config.baseUrl
             p[Keys.SEEDANCE_API_KEY] = config.apiKey
+            p[Keys.SEEDANCE_MODEL_ID] = config.relayModelId
             p[Keys.SEEDANCE_VARIANT] = config.variant.storageKey
             p[Keys.SEEDANCE_RESOLUTION] = config.resolution.storageKey
             p[Keys.SEEDANCE_RATIO] = config.ratio.storageKey
@@ -226,6 +233,24 @@ class SettingsStore(
 
     suspend fun setTtsLanguage(lang: TtsLanguage) {
         dataStore.edit { it[Keys.TTS_LANGUAGE] = lang.code }
+    }
+
+    /** 朗读引擎（system=手机自带，默认；cloud=云端火山豆包）。 */
+    val ttsEngine: Flow<TtsEngine> = dataStore.data.map { p ->
+        TtsEngine.fromStorageKey(p[Keys.TTS_ENGINE])
+    }
+
+    suspend fun setTtsEngine(engine: TtsEngine) {
+        dataStore.edit { it[Keys.TTS_ENGINE] = engine.storageKey }
+    }
+
+    /** 系统引擎声音模板。 */
+    val ttsSystemTemplate: Flow<SystemVoiceTemplate> = dataStore.data.map { p ->
+        SystemVoiceTemplate.fromStorageKey(p[Keys.TTS_SYSTEM_TEMPLATE])
+    }
+
+    suspend fun setTtsSystemTemplate(template: SystemVoiceTemplate) {
+        dataStore.edit { it[Keys.TTS_SYSTEM_TEMPLATE] = template.storageKey }
     }
 
     val ttsVolume: Flow<Int> = dataStore.data.map { p ->

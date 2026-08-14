@@ -4,6 +4,7 @@ import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
 import com.chatbyyourside.llm.template.ThinkingOutputClassifier
+import com.chatbyyourside.llm.thinking.ThinkingPolicyTelemetry
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.PowerPolicy
 
@@ -117,6 +118,11 @@ interface InferenceBackend {
         /** 思考分类器实例：实现方在生成结束 finally 内收口分类（ThinkingEffect / EmptyResponseClass），
          *  随遥测 finalize 一并写入记录（取代原 provider 侧补记路径）。 */
         thinkingClassifier: ThinkingOutputClassifier? = null,
+        // Task 5：本地思考档位策略快照（单次透传；思考关闭/云端为 null）。
+        thinkingPolicy: ThinkingPolicyTelemetry? = null,
+        // Task 15：内存准入的上下文降级（配置值 -> 实际值；未降级为 null）。
+        configuredContextTokens: Int? = null,
+        actualContextTokens: Int? = null,
     ): NativeGenerationSummary?
 
     /** 流式批处理 Balanced 默认参数（Task 6 性能模式接入前的稳定取值，与设计文档 §流式行一致）。 */

@@ -2,6 +2,7 @@ package com.chatbyyourside.llm.backend
 
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.GenerationExecutionControl
@@ -16,8 +17,11 @@ import com.chatbyyourside.llm.profile.PowerPolicy
 import com.chatbyyourside.llm.profile.ResolvedInferencePlan
 import com.chatbyyourside.llm.template.ThinkingOutputClassifier
 import com.chatbyyourside.llm.template.ThinkingTemplateCapability
+import com.chatbyyourside.llm.template.ThinkingTemplateCapabilityResolver
+import com.chatbyyourside.llm.thinking.ThinkingPolicyTelemetry
 import com.chatbyyourside.provider.local.ModelPathResolver
 import kotlinx.coroutines.runBlocking
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -113,6 +117,9 @@ class MnnRuntimeIntegrationTest {
                 executionControl = null, powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
                 requestedMode = null, effectiveMode = null, loadConfigHash = null,
                 attemptTrace = emptyList(), coldLoadMs = null, warmLoadMs = null,
+                decodeStepTokens = 1, thinkingRequested = null, templateCapability = null,
+                thinkingClassifier = null, thinkingPolicy = null,
+                configuredContextTokens = null, actualContextTokens = null,
             )
         }
         assertNotNull(summary)
@@ -134,6 +141,9 @@ class MnnRuntimeIntegrationTest {
                 powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
                 requestedMode = null, effectiveMode = null, loadConfigHash = null,
                 attemptTrace = emptyList(), coldLoadMs = null, warmLoadMs = null,
+                decodeStepTokens = 1, thinkingRequested = null, templateCapability = null,
+                thinkingClassifier = null, thinkingPolicy = null,
+                configuredContextTokens = null, actualContextTokens = null,
             )
         }
         assertNotNull(summary)
@@ -163,6 +173,9 @@ class MnnRuntimeIntegrationTest {
                 powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
                 requestedMode = null, effectiveMode = null, loadConfigHash = null,
                 attemptTrace = emptyList(), coldLoadMs = null, warmLoadMs = null,
+                decodeStepTokens = 1, thinkingRequested = null, templateCapability = null,
+                thinkingClassifier = null, thinkingPolicy = null,
+                configuredContextTokens = null, actualContextTokens = null,
             )
         }
         assertNotNull(summary)
@@ -222,6 +235,9 @@ class MnnRuntimeIntegrationTest {
                 powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
                 requestedMode = null, effectiveMode = null, loadConfigHash = null,
                 attemptTrace = emptyList(), coldLoadMs = null, warmLoadMs = null,
+                decodeStepTokens = 1, thinkingRequested = null, templateCapability = null,
+                thinkingClassifier = null, thinkingPolicy = null,
+                configuredContextTokens = null, actualContextTokens = null,
             )
         }
         assertNotNull(summary)
@@ -249,6 +265,9 @@ class MnnRuntimeIntegrationTest {
                 executionControl = null, powerPolicy = com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT,
                 requestedMode = null, effectiveMode = null, loadConfigHash = null,
                 attemptTrace = emptyList(), coldLoadMs = null, warmLoadMs = null,
+                decodeStepTokens = 1, thinkingRequested = null, templateCapability = null,
+                thinkingClassifier = null, thinkingPolicy = null,
+                configuredContextTokens = null, actualContextTokens = null,
             )
         }
         assertNotNull(summary)
@@ -263,10 +282,10 @@ class MnnRuntimeIntegrationTest {
     fun secondTurnReusesKvCache() {
         val fx = requireHandle()
         // 第一轮生成（预热 + 前缀）。
-        runBlocking { fx.backend.generateStreamMessages(messages(false), 32, 0.8f, 0.9f, 1.2f, false, { true }, 256, 16, emptyList(), null, com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT, null, null, null, emptyList(), null, null) }
+        runBlocking { fx.backend.generateStreamMessages(messages(false), 32, 0.8f, 0.9f, 1.2f, false, { true }, 256, 16, emptyList(), null, com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT, null, null, null, emptyList(), null, null, 1, null, null, null, null, null, null) }
         // 第二轮：新增 user，历史前缀应命中 KV。
         val summary = runBlocking {
-            fx.backend.generateStreamMessages(messages(true), 32, 0.8f, 0.9f, 1.2f, false, { true }, 256, 16, emptyList(), null, com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT, null, null, null, emptyList(), null, null)
+            fx.backend.generateStreamMessages(messages(true), 32, 0.8f, 0.9f, 1.2f, false, { true }, 256, 16, emptyList(), null, com.chatbyyourside.llm.profile.PowerPolicy.DEFAULT, null, null, null, emptyList(), null, null, 1, null, null, null, null, null, null)
         }
         assertNotNull(summary)
         assertEquals("第二轮应复用 KV 前缀", 1, summary!!.reuseKv)
@@ -339,6 +358,9 @@ class MnnRuntimeIntegrationTest {
             thinkingRequested: Boolean?,
             templateCapability: String?,
             thinkingClassifier: ThinkingOutputClassifier?,
+            thinkingPolicy: ThinkingPolicyTelemetry?,
+            configuredContextTokens: Int?,
+            actualContextTokens: Int?,
         ): NativeGenerationSummary? {
             generateCalls++
             stopReason?.let { executionControl?.requestStop(it) }
@@ -407,6 +429,7 @@ class MnnRuntimeIntegrationTest {
             topP = 0.9f,
             repeatPenalty = 1.2f,
             openclHealth = OpenClHealthState.MODEL_OK,
+            modelClass = AutoBackendModelClass.GPU_ELIGIBLE,
         )
     }
 
@@ -525,5 +548,95 @@ class MnnRuntimeIntegrationTest {
         assertTrue("GPU stub 应已被 release（回退前释放）", stub.released)
         assertTrue("CPU 应已加载（回退后唯一驻留）", cpuBackend.isModelLoaded)
         assertTrue("CPU 应产出可见文本", sb.isNotBlank())
+    }
+
+    // ===== Task 3：单阶段思考（思考与正文共享同一 maxTokens 上限）=====
+
+    /**
+     * 恰好一次 JNI generation：直接调用 [MnnBackend.generateStreamMessages] 收集原始 delta，
+     * 返回非空摘要；不经过 Provider helper，避免注入第二次 generate 调用。
+     */
+    private fun generateThinking(
+        backend: MnnBackend,
+        maxTokens: Int,
+        enableThinking: Boolean,
+    ): Pair<String, NativeGenerationSummary> {
+        val raw = StringBuilder()
+        val summary = runBlocking {
+            backend.generateStreamMessages(
+                messages = messages(),
+                maxTokens = maxTokens,
+                temperature = 0.8f,
+                topP = 0.9f,
+                repeatPenalty = 1.2f,
+                enableThinking = enableThinking,
+                onToken = { delta -> raw.append(delta); true },
+                batchMaxBytes = 256,
+                batchMaxMs = 16,
+                downgradeReasons = emptyList(),
+                executionControl = null,
+                powerPolicy = PowerPolicy.DEFAULT,
+                requestedMode = null,
+                effectiveMode = null,
+                loadConfigHash = null,
+                attemptTrace = emptyList(),
+                coldLoadMs = null,
+                warmLoadMs = null,
+                decodeStepTokens = 1,
+                thinkingRequested = enableThinking,
+                templateCapability = null,
+                thinkingClassifier = null,
+                thinkingPolicy = null,
+                configuredContextTokens = null,
+                actualContextTokens = null,
+            )
+        }
+        return raw.toString() to requireNotNull(summary)
+    }
+
+    /** 真机用例：思考开启时思考与正文共享同一个 maxTokens 总上限，单阶段自然结束。 */
+    @Test
+    fun thinkingAndBodyShareOneMaxTokenLimit() {
+        val fx = requireHandle()
+        val (raw, summary) = generateThinking(fx.backend, maxTokens = 128, enableThinking = true)
+        assertTrue(summary.generatedTokens <= 128)
+        assertTrue(summary.completionReason == "EOS" || summary.completionReason == "MAX_TOKENS")
+        assertTrue(raw.isNotEmpty() || summary.generatedTokens == 0)
+        // 模板能力门控：仅当 fixture 模板含 enable_thinking 分支时才要求「思考配置被 native 接受」且
+        // 思考段在正文首个 delta 之前自然闭合；模板未知/不支持时用 assumeTrue 明确跳过该子断言——
+        // 不把「模型没有 think 标签」误判成 runtime 失败。
+        val capability = ThinkingTemplateCapabilityResolver().resolve(
+            File(fx.configPath).parentFile ?: File(fx.configPath),
+        )
+        assumeTrue(
+            "fixture 模板不含 enable_thinking 分支（capability=$capability），跳过思考配置/边界子断言",
+            capability == ThinkingTemplateCapability.SUPPORTED,
+        )
+        // 模板能力守卫之外还需 native v2 能力守卫：pinned libmnn_jni.so 若为 v1（无 summary_v2），
+        // thinkingConfigAccepted 为 null（摘要解析回填默认值），此时跳过而非硬失败——与相邻
+        // reasoningEndUs/firstBodyDeltaUs 的 null 保护同风格，避免真机 CI 误红。
+        if (summary.thinkingConfigAccepted != null) {
+            assertEquals(true, summary.thinkingConfigAccepted)
+        }
+        val reasoningEnd = summary.reasoningEndUs
+        val firstBody = summary.firstBodyDeltaUs
+        if (reasoningEnd != null && firstBody != null) {
+            assertTrue(
+                "思考段应在正文首个 delta 之前闭合（reasoningEndUs=$reasoningEnd, firstBodyDeltaUs=$firstBody）",
+                reasoningEnd <= firstBody,
+            )
+        }
+    }
+
+    /** 真机用例：思考开/关走同一单阶段生成契约（同一步长、同一 maxTokens 总上限）。 */
+    @Test
+    fun thinkingToggleUsesSameGenerationContract() {
+        val fx = requireHandle()
+        val (_, off) = generateThinking(fx.backend, maxTokens = 128, enableThinking = false)
+        val (_, on) = generateThinking(fx.backend, maxTokens = 128, enableThinking = true)
+        assertEquals(1, off.decodeStepTokens)
+        assertEquals(1, on.decodeStepTokens)
+        assertTrue(off.generatedTokens <= 128)
+        assertTrue(on.generatedTokens <= 128)
     }
 }

@@ -1,5 +1,6 @@
 package com.chatbyyourside.llm.backend
 
+import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.llm.profile.DowngradeReason
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.InferenceProfileResolver
@@ -38,6 +39,7 @@ class StandardBackendPolicyTest {
         topP = 0.9f,
         repeatPenalty = 1.2f,
         openclHealth = OpenClHealthState.UNKNOWN,
+        modelClass = AutoBackendModelClass.GPU_ELIGIBLE,
     )
 
     @Test

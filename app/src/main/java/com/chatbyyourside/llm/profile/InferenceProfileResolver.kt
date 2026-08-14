@@ -1,5 +1,6 @@
 package com.chatbyyourside.llm.profile
 
+import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.benchmark.CertifiedInferenceOptions
@@ -61,6 +62,10 @@ class InferenceProfileResolver(
         topP: Float,
         repeatPenalty: Float,
         openclHealth: OpenClHealthState,
+        // 模型大小策略（Task 15）：AUTO 仅对 GPU_ELIGIBLE（总参数量 >7B）加入 GPU attempt；
+        // 显式 MNN_GPU 忽略本字段（用户显式选择优先）。调用方（Provider/基准）负责在
+        // 探测前用同一分类决定是否需要 OpenCL 健康探测。
+        modelClass: AutoBackendModelClass,
         certifiedOptions: CertifiedInferenceOptions? = null,
     ): ResolvedInferencePlan {
         val downgrades = mutableListOf<DowngradeReason>()
@@ -86,12 +91,27 @@ class InferenceProfileResolver(
         val attempts = buildList {
             val cpu = thermalAdmittedThreads.coerceAtLeast(1)
             when (backendPreference) {
-                BackendPreference.AUTO, BackendPreference.MNN_GPU -> {
+                // AUTO：仅对「总参数量严格 >7B」（[modelClass] == GPU_ELIGIBLE）在 OpenCL 健康时
+                // 加入 GPU attempt；<=7B 或参数未知一律 CPU，并记类型化原因。显式 MNN_GPU 不受门槛
+                // 限制（见下）。GPU_ELIGIBLE 但 OpenCL 不健康时静默走 CPU（与历史一致：用户未显式
+                // 请求 GPU，探测/健康由 Provider 侧负责，不额外提示）。
+                BackendPreference.AUTO -> {
+                    when {
+                        modelClass == AutoBackendModelClass.GPU_ELIGIBLE && openclEligible ->
+                            add(attempt(BackendType.MNN_GPU, RuntimeVariant.OPENCL, 68, contextTokens, lookahead = false, temperature, topP, repeatPenalty))
+                        modelClass == AutoBackendModelClass.CPU_BELOW_OR_EQUAL_THRESHOLD ->
+                            downgrades += DowngradeReason.AUTO_MODEL_AT_OR_BELOW_7B_CPU
+                        modelClass == AutoBackendModelClass.CPU_UNKNOWN_PARAMETERS ->
+                            downgrades += DowngradeReason.AUTO_MODEL_PARAMETERS_UNKNOWN_CPU
+                    }
+                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_OPTIMIZED, cpu, contextTokens, effectiveLookahead, temperature, topP, repeatPenalty))
+                    add(attempt(BackendType.MNN_CPU, RuntimeVariant.CPU_COMPATIBILITY, cpu, contextTokens, effectiveLookahead, temperature, topP, repeatPenalty))
+                }
+                // 显式 MNN_GPU：任何模型都可在 OpenCL 健康时尝试 GPU；失败由 BackendManager 回退 CPU。
+                BackendPreference.MNN_GPU -> {
                     if (openclEligible) {
                         add(attempt(BackendType.MNN_GPU, RuntimeVariant.OPENCL, 68, contextTokens, lookahead = false, temperature, topP, repeatPenalty))
-                    } else if (backendPreference == BackendPreference.MNN_GPU &&
-                        openclHealth != OpenClHealthState.UNKNOWN
-                    ) {
+                    } else if (openclHealth != OpenClHealthState.UNKNOWN) {
                         downgrades += DowngradeReason.OPENCL_UNHEALTHY
                     }
                     // Task 6：CPU 两个变体统一使用门禁后的 effectiveLookahead——认证记录于
@@ -247,6 +267,11 @@ class InferenceProfileResolver(
                         add(JsonPrimitive("temperature"))
                     },
                 )
+                // kv_max_length 仅写入 CPU 分支：OpenCL 的 KV 分配行为封装在 pinned libMNN.so 内、
+                // 未经设备矩阵验证，盲目加入可能破坏 GPU 加载或（更可能）不被 native 消费——
+                // 既不改变 loadConfigHash 也不降低实际 GPU KV 分配。故 OpenCL 分支保守地**不设**
+                // kv_max_length：内存准入的 GPU 侧不假设「降 context 即降 GPU KV 分配」，仅在 CPU
+                // 路径保证 context 生效。若未来在真机矩阵验证 native 支持，再统一接入并纳入 hash。
                 if (backendType == "cpu") {
                     // 功耗：CPU_OPTIMIZED=high（大核调度）；CPU_COMPATIBILITY=normal（保守）。
                     put("power", if (optimized) "high" else "normal")

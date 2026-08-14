@@ -9,11 +9,13 @@ import com.chatbyyourside.llm.GenerationExecutionControl
 import com.chatbyyourside.llm.backend.MnnBackend.MnnMode
 import com.chatbyyourside.llm.metrics.CompletionReason
 import com.chatbyyourside.llm.profile.BackendAttempt
+import com.chatbyyourside.llm.profile.DowngradeReason
 import com.chatbyyourside.llm.profile.ResolvedInferencePlan
 import com.chatbyyourside.llm.profile.RuntimeVariant
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
 import com.chatbyyourside.llm.template.ThinkingOutputClassifier
+import com.chatbyyourside.llm.thinking.ThinkingPolicyTelemetry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -211,6 +213,8 @@ class BackendManager(
         thinkingRequested: Boolean? = null,
         templateCapability: String? = null,
         thinkingClassifier: ThinkingOutputClassifier? = null,
+        // Task 5：本地思考档位策略快照（单次透传；思考关闭/云端为 null）。
+        thinkingPolicy: ThinkingPolicyTelemetry? = null,
         executionControl: GenerationExecutionControl? = null,
         resolvedPlan: ResolvedInferencePlan? = null,
         // Task 4：输出策略（GPU 首 delta 前空输出回退 CPU 等；带默认值，旧调用方不受影响——
@@ -286,7 +290,11 @@ class BackendManager(
                     failureReasons += "${attempt.variant.name}: $reason"
                     Log.w(TAG, "${attempt.variant.name} 初始化失败: $reason")
                     // CPU 优化失败推进到 CPU 兼容（下一变体），不黑名单 CPU；GPU/NPU 失败记会话级黑名单。
-                    if (attempt.backend == BackendType.MNN_GPU) markSessionFailed(BackendType.MNN_GPU)
+                    if (attempt.backend == BackendType.MNN_GPU) {
+                        markSessionFailed(BackendType.MNN_GPU)
+                        // Task 15：GPU 加载失败回退 CPU 的可见原因（并入后续 CPU attempt 的遥测）。
+                        attemptDowngradeReasons = (attemptDowngradeReasons + DowngradeReason.GPU_LOAD_FALLBACK.name).distinct()
+                    }
                     if (attempt.backend == BackendType.MNN_NPU) markSessionFailed(BackendType.MNN_NPU)
                     // Task 3：加载失败叠加持久 LOAD 类别健康记录（非 CPU 后端；CPU 恒兜底不记，
                     // 与 markSessionFailed 的「CPU 不黑名单」语义一致）。Task 3 review M-4：
@@ -329,8 +337,13 @@ class BackendManager(
                         thinkingRequested = thinkingRequested,
                         templateCapability = templateCapability,
                         thinkingClassifier = thinkingClassifier,
+                        // Task 5：本地思考档位策略快照单次透传。
+                        thinkingPolicy = thinkingPolicy,
                         // Task 6：透传认证门禁后的 decode 步长（未认证组合为 1；按变体守卫见上）。
                         decodeStepTokens = step,
+                        // Task 15：内存准入的上下文降级（配置值 -> 实际值；未降级时二者等值）。
+                        configuredContextTokens = plan.configuredContextTokens ?: plan.contextTokens,
+                        actualContextTokens = plan.contextTokens,
                     )
                     val completionReason = executionControl?.reason()
                         ?: (backend as? MnnBackend)?.lastTurnRecord?.completionReason
@@ -423,7 +436,11 @@ class BackendManager(
                     }
                     Log.w(TAG, "${attempt.variant.name} 生成失败，尝试下一后端: ${e.message}")
                     failureReasons += "${attempt.variant.name}: 生成失败 - ${e.message}"
-                    if (attempt.backend == BackendType.MNN_GPU) markSessionFailed(BackendType.MNN_GPU)
+                    if (attempt.backend == BackendType.MNN_GPU) {
+                        markSessionFailed(BackendType.MNN_GPU)
+                        // Task 15：GPU 生成异常回退 CPU 的可见原因（并入后续 attempt 遥测）。
+                        attemptDowngradeReasons = (attemptDowngradeReasons + DowngradeReason.GPU_GENERATION_FALLBACK.name).distinct()
+                    }
                     if (attempt.backend == BackendType.MNN_NPU) markSessionFailed(BackendType.MNN_NPU)
                     lastError = e
                     runCatching { releaseBackend(attempt.backend) }
@@ -470,6 +487,39 @@ class BackendManager(
         }
     }
 
+    /**
+     * 单阶段本地生成的 runner adapter（Task 2）：把 [LocalGenerationRequest] 原样转发到
+     * 公开 [generate] 的既有回退链 / attempt 执行语义，**不改变任何公共行为**。
+     * 生产 [LocalChatProvider] 默认使用本 adapter；测试只测编排，注入 fake runner。
+     * 用显式 object 而非 SAM lambda：接口抽象方法为 suspend，SAM 转换不可靠。
+     */
+    internal fun asLocalGenerationRunner(): LocalGenerationRunner =
+        object : LocalGenerationRunner {
+            override suspend fun generate(
+                request: LocalGenerationRequest,
+                executionControl: GenerationExecutionControl,
+                onToken: (String) -> Boolean,
+            ): GenerationResult = this@BackendManager.generate(
+                modelPath = request.modelPath,
+                messages = request.messages,
+                maxTokens = request.maxTokens,
+                temperature = request.temperature,
+                topP = request.topP,
+                repeatPenalty = request.repeatPenalty,
+                enableThinking = request.enableThinking,
+                onToken = onToken,
+                downgradeReasons = request.downgradeReasons,
+                thinkingRequested = request.thinkingRequested,
+                templateCapability = request.templateCapability,
+                thinkingClassifier = request.thinkingClassifier,
+                thinkingPolicy = request.thinkingPolicy,
+                executionControl = executionControl,
+                resolvedPlan = request.resolvedPlan,
+                outputPolicy = request.outputPolicy,
+                decodeStepTokens = request.decodeStepTokens,
+            )
+        }
+
     /** 中断当前推理（所有 MNN 后端都设置 abort 标志） */
     suspend fun stopGeneration() {
         mnnCpuBackend.stopGeneration()
@@ -494,8 +544,32 @@ class BackendManager(
     fun lastTurnRecord(): InferenceTurnRecord? =
         (backendFor(lastUsedBackend) as? MnnBackend)?.lastTurnRecord
 
+    // ===== Task 15/16：旁路操作（GPU 预热等）的「最近一次聊天」诊断保护 =====
+
+    @Volatile
+    private var stashedTurnForSideOp: Pair<BackendType, InferenceTurnRecord?>? = null
+
+    /** 旁路操作前保存「最近一次聊天」诊断记录（含所属后端）。 */
+    fun stashLastTurnForSideOp() {
+        val type = lastUsedBackend
+        stashedTurnForSideOp = type to (backendFor(type) as? MnnBackend)?.lastTurnRecord
+    }
+
+    /** 旁路操作后恢复被覆盖的「最近一次聊天」诊断记录（无 stash 时 no-op）。 */
+    fun restoreLastTurnAfterSideOp() {
+        val s = stashedTurnForSideOp ?: return
+        stashedTurnForSideOp = null
+        (backendFor(s.first) as? MnnBackend)?.restoreLastTurnRecord(s.second)
+    }
+
     /** 当前是否有推理在进行（供性能浮窗决定取 native 实时 tps 还是归零）*/
     fun isGenerating(): Boolean = generating
+
+    /** 指定模型（config.json 路径）是否已在任一后端驻留。供内存准入避免对已驻留权重重复计入。 */
+    fun isModelResident(modelPath: String): Boolean =
+        mnnCpuBackend.currentModelPath == modelPath ||
+            mnnGpuBackend.currentModelPath == modelPath ||
+            mnnNpuBackend.currentModelPath == modelPath
 
     /** 释放所有 MNN 后端资源。
      *
@@ -506,22 +580,17 @@ class BackendManager(
      * 模型——删除立即返回（文件可删，mmap 的 inode 仍在），句柄在当前回复跑完后释放。
      * 非生成态立即释放。*/
     fun release() {
-        // 与 [generate] 的 finally 互斥：要么见 generating=true 置 pending（由 generate finally 释放），
-        // 要么见 generating=false 立即释放。二者原子，避免「release 见生成中置 pending、但 generate
-        // finally 已读过 pending=false」的漏释放竞态。
-        val defer: Boolean
+        // 与 [generate] 的 finally 在同一把 lifecycleLock 内原子判定 + 释放：要么见 generating=true
+        // 置 pending（由 generate finally 释放），要么见 generating=false 立即释放。二者在锁内原子，
+        // 消除「release 见非生成态后、generate 尚未置 generating=true 前」的 check-then-act 竞态——
+        // 避免 doReleaseAll 在 generate 刚加载完新句柄后误销毁它（use-after-free / native crash）。
         synchronized(lifecycleLock) {
             if (generating) {
                 releasePending = true
-                defer = true
+                Log.i(TAG, "release: 推理进行中，延迟释放（生成结束后执行）")
             } else {
-                defer = false
+                releaseAllLocked()
             }
-        }
-        if (defer) {
-            Log.i(TAG, "release: 推理进行中，延迟释放（生成结束后执行）")
-        } else {
-            doReleaseAll()
         }
     }
 
@@ -530,14 +599,19 @@ class BackendManager(
     /** 实际释放全部后端 + 清配置。synchronized 防并发 release（如 delete + 再次 delete）双重释放。*/
     private fun doReleaseAll() {
         synchronized(lifecycleLock) {
-            mnnCpuBackend.release()
-            mnnGpuBackend.release()
-            mnnNpuBackend.release()
-            // final review M-6：释放即卸载——同路径模型被删除/替换后重下时指纹重算，
-            // 避免健康键继续绑定旧模型内容哈希。
-            fingerprintCachePath = null
-            fingerprintCacheValue = ""
+            releaseAllLocked()
         }
+    }
+
+    /** 释放全部后端 + 清配置。**调用方必须已持有 [lifecycleLock]**。 */
+    private fun releaseAllLocked() {
+        mnnCpuBackend.release()
+        mnnGpuBackend.release()
+        mnnNpuBackend.release()
+        // final review M-6：释放即卸载——同路径模型被删除/替换后重下时指纹重算，
+        // 避免健康键继续绑定旧模型内容哈希。
+        fingerprintCachePath = null
+        fingerprintCacheValue = ""
     }
 
     /** 重置会话级后端失败缓存（[mnnGpuFailed]/[mnnNpuFailed]）。

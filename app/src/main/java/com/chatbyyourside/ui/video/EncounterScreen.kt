@@ -50,6 +50,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -73,6 +74,7 @@ import com.chatbyyourside.video.VideoExportTarget
 import com.chatbyyourside.video.exportTargetForSdk
 import com.chatbyyourside.video.suggestedVideoFileName
 import kotlinx.coroutines.launch
+import java.io.File
 
 /**
  * 「邂逅」沉浸式历史流（Task 9）。
@@ -179,6 +181,10 @@ fun EncounterScreen(
                 onExport = { handleExport(it) },
                 onCancel = { viewModel.cancel(it) },
                 onRetry = { viewModel.retry(it) },
+                onTogglePlay = { video ->
+                    // 播放/暂停切换：仅 READY 且有本地归档时有效（按钮只在挂载播放器时渲染）。
+                    video.localVideoPath?.let { path -> playbackController.toggle(File(path)) }
+                },
                 bottomBarHeight = bottomBarHeight,
                 modifier = Modifier.fillMaxSize(),
             )
@@ -218,6 +224,7 @@ internal fun EncounterVideoPager(
     onRetry: (Long) -> Unit,
     bottomBarHeight: Dp = 0.dp,
     modifier: Modifier = Modifier,
+    onTogglePlay: (SeedanceVideo) -> Unit = {},
 ) {
     val pagerState = rememberPagerState(pageCount = { videos.size })
     val settledPage = pagerState.settledPage
@@ -254,18 +261,25 @@ internal fun EncounterVideoPager(
             onExport = { onExport(video) },
             onCancel = { onCancel(video.id) },
             onRetry = { onRetry(video.id) },
+            onTogglePlay = { onTogglePlay(video) },
             bottomBarHeight = bottomBarHeight,
             modifier = Modifier.fillMaxSize(),
         )
     }
 }
 
-/** 顶栏：返回 + 「邂逅」标题（沉浸覆盖，避开状态栏）。 */
+/** 顶栏：返回 + 「邂逅」标题（沉浸覆盖，避开状态栏，顶部渐变压暗保证可读）。 */
 @Composable
 private fun EncounterTopBar(onBack: () -> Unit) {
     Box(
         Modifier
             .fillMaxWidth()
+            .background(
+                Brush.verticalGradient(
+                    0f to Color.Black.copy(alpha = 0.55f),
+                    1f to Color.Transparent,
+                )
+            )
             .statusBarsPadding()
             .padding(horizontal = 12.dp, vertical = 6.dp),
     ) {
@@ -293,27 +307,39 @@ private fun EncounterTopBar(onBack: () -> Unit) {
 @Composable
 internal fun EncounterEmptyState(modifier: Modifier = Modifier) {
     Column(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(listOf(Color(0xFF22223A), Color(0xFF0C0C14)))
+            ),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Icon(
-            Icons.Outlined.Videocam,
-            contentDescription = null,
-            tint = Color.White.copy(alpha = 0.6f),
-            modifier = Modifier.size(48.dp),
-        )
-        Spacer(Modifier.height(12.dp))
+        Box(
+            modifier = Modifier
+                .size(88.dp)
+                .clip(RoundedCornerShape(28.dp))
+                .background(Color.White.copy(alpha = 0.08f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Outlined.Videocam,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = 0.75f),
+                modifier = Modifier.size(40.dp),
+            )
+        }
+        Spacer(Modifier.height(18.dp))
         Text(
             text = "还没有视频故事",
-            color = Color.White.copy(alpha = 0.9f),
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Medium,
+            color = Color.White.copy(alpha = 0.92f),
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold,
         )
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(6.dp))
         Text(
             text = "开启角色会话的自动视频后，生成的视频会出现在这里",
-            color = Color.White.copy(alpha = 0.6f),
+            color = Color.White.copy(alpha = 0.55f),
             fontSize = 13.sp,
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(horizontal = 40.dp),
@@ -321,18 +347,7 @@ internal fun EncounterEmptyState(modifier: Modifier = Modifier) {
     }
 }
 
-/** 需要通用「重试」动作的状态（继续查询/重新下载有独立动作，不在此列）。 */
-private val genericRetryStates = setOf(
-    SeedanceVideoState.FAILED_SNAPSHOT,
-    SeedanceVideoState.FAILED_PROMPT,
-    SeedanceVideoState.FAILED_PROMPT_CONFIG_CHANGED,
-    SeedanceVideoState.FAILED_SUBMISSION,
-    SeedanceVideoState.FAILED_REMOTE,
-    SeedanceVideoState.EXPIRED,
-)
-
-/**
- * 任务详情全屏弹层（Task 9）。
+/** 任务详情全屏弹层（Task 9）。
  *
  * 展示完整会话快照（用户/助手原文）、最终提示词、生成参数（模型/分辨率/画幅/时长/音频/水印）、
  * 错误阶段/错误码/错误信息，以及导出 / 取消 / 重试 / 继续查询 / 重新下载动作。

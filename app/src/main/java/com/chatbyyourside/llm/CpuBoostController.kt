@@ -32,6 +32,16 @@ class CpuBoostController(private val context: Context) {
     @Volatile
     var sustainedModeSetter: ((Boolean) -> Unit)? = null
 
+    /**
+     * 清除由指定 Activity 注入的 sustained setter。仅当当前 setter 与传入引用**相同**时清除，
+     * 避免配置变更（旋转等）重建时，旧 Activity 的 onDestroy 误清新 Activity 已注入的 setter。
+     */
+    fun clearSustainedModeSetter(setter: ((Boolean) -> Unit)?) {
+        if (setter != null && sustainedModeSetter === setter) {
+            sustainedModeSetter = null
+        }
+    }
+
     /** 当前活跃 hint 关闭回调；热回调线程安全撤销（不碰线程优先级）。 */
     @Volatile
     private var activeCloseHint: (() -> Unit)? = null

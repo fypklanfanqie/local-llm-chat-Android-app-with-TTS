@@ -2,6 +2,7 @@ package com.chatbyyourside.llm.metrics
 
 import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
+import com.chatbyyourside.llm.thinking.ThinkingPolicyTelemetry
 import kotlinx.serialization.Serializable
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.sqrt
@@ -124,6 +125,11 @@ data class InferenceTurnRecord(
     val configHash: String? = null,
     /** 降级原因列表（如 thermal、battery、admission 拒绝）。 */
     val downgradeReasons: List<String> = emptyList(),
+    // ---- Task 15：内存准入的上下文降级（本次生成）----
+    /** 用户配置的上下文长度；null = 与 [actualContextTokens] 相同（未降级）。 */
+    val configuredContextTokens: Int? = null,
+    /** 本次生成实际使用的上下文长度（内存准入降级后）。 */
+    val actualContextTokens: Int? = null,
     // ---- Task 1 v2 观测（来自 native v2 摘要；旧 native/摘要缺失为 null）----
     /** `set_config(enable_thinking)` 是否被 native 接受（true=生效，false=回退模型默认）。 */
     val thinkingConfigAccepted: Boolean? = null,
@@ -143,6 +149,9 @@ data class InferenceTurnRecord(
     val thinkingEffective: String? = null,
     /** 空响应分类枚举名（[com.chatbyyourside.llm.template.EmptyResponseClass]）。 */
     val emptyResponseClass: String? = null,
+    // ---- Task 5：本地思考档位策略快照（由 provider 解析计划后一次构造透传；思考关闭/云端为 null）----
+    /** 本地思考档位/复杂度/软目标/控制方式快照；不包含用户正文。 */
+    val thinkingPolicy: ThinkingPolicyTelemetry? = null,
 )
 
 /**
@@ -372,6 +381,11 @@ class InferenceTelemetry {
         templateCapability: String? = null,
         thinkingEffective: String? = null,
         emptyResponseClass: String? = null,
+        // Task 5：本地思考档位策略快照（单次透传；思考关闭/云端为 null）。
+        thinkingPolicy: ThinkingPolicyTelemetry? = null,
+        // Task 15：内存准入的上下文降级（配置值 -> 实际值；未降级传 null/等值）。
+        configuredContextTokens: Int? = null,
+        actualContextTokens: Int? = null,
     ): InferenceTurnRecord? {
         val g = active ?: run { snapshotRef.set(null); return null }
         val m = nativeMetrics
@@ -409,6 +423,8 @@ class InferenceTelemetry {
             attemptTrace = attemptTrace,
             configHash = configHash,
             downgradeReasons = downgradeReasons,
+            configuredContextTokens = configuredContextTokens,
+            actualContextTokens = actualContextTokens,
             thinkingConfigAccepted = thinkingConfigAccepted,
             reasoningEndUs = reasoningEndUs,
             firstBodyDeltaUs = firstBodyDeltaUs,
@@ -417,6 +433,7 @@ class InferenceTelemetry {
             templateCapability = templateCapability,
             thinkingEffective = thinkingEffective,
             emptyResponseClass = emptyResponseClass,
+            thinkingPolicy = thinkingPolicy,
         )
         active = null
         snapshotRef.set(null)

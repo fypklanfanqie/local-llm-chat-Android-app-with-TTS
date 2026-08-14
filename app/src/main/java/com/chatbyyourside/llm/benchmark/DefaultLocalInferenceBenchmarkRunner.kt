@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.data.local.LocalInferenceSettings
+import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.llm.ThermalLevel
@@ -47,9 +48,11 @@ import java.io.File
  *   GPU 象限开启 Task 4 的 CPU_BEFORE_FIRST_DELTA 回退策略，回退轮次计入
  *   [ReliabilityResult.fallbackCount]。
  *
- * 范围控制（本任务不实现）：UI 接入（Task 7）、自动调参（Task 6 认证门）、各场景专用
- * fixture（如两轮 KV 复用构造、长 prefill prompt）——本实现所有场景共用同一固定探针，
- * 场景主要决定冷启动行为与归档维度。
+ * Task 4 Step 6 范围修正：**场景专用 fixture**（[messagesFor]）——不再所有场景共用同一固定
+ * 探针。COLD_LOAD/SHORT_TTFT 用短探针，LONG_PREFILL 用确定性长 prompt，FIXED_DECODE 用
+ * 固定提示 + 总 maxTokens=256，SECOND_TURN_KV_REUSE 在同一已加载 backend 先跑第一轮并用
+ * assistant 原始文本构造第二轮（仅第二轮计数），EMPTY_RESPONSE_CHECK 用极短探针。
+ * 仍不实现：UI 接入（Task 7）、自动调参（Task 6 认证门）。
  *
  * final review I3（裁决：文档化延迟）：四象限归档（[run] 各象限 save）与 [runReliability]
  * 在**生产主源码无触发入口**——仅 Lookahead 认证基准经设置页接线。四象限/可靠性验证由
@@ -87,6 +90,7 @@ open class DefaultLocalInferenceBenchmarkRunner(
         warmupRounds: Int,
         recordedRounds: Int,
         candidateOverrides: CandidateOverrides?,
+        target: BenchmarkTarget?,
     ): BenchmarkScenarioResult {
         if (isThermallyHot()) {
             return rejectedResult(
@@ -95,7 +99,17 @@ open class DefaultLocalInferenceBenchmarkRunner(
             )
         }
         val snapshot = settings.getLocalInferenceSettingsNow()
-        var quadrant = InferenceBackendQuadrant.of(snapshot.backend, snapshot.deepThinking)
+        // Task 15/16：显式目标强制象限（不修改持久化设置）；null 按设置快照推导。
+        var quadrant = if (target != null) {
+            when (target) {
+                BenchmarkTarget.CPU_OPTIMIZED ->
+                    if (snapshot.deepThinking) InferenceBackendQuadrant.CPU_THINKING_ON else InferenceBackendQuadrant.CPU_THINKING_OFF
+                BenchmarkTarget.OPENCL_GPU ->
+                    if (snapshot.deepThinking) InferenceBackendQuadrant.GPU_THINKING_ON else InferenceBackendQuadrant.GPU_THINKING_OFF
+            }
+        } else {
+            InferenceBackendQuadrant.of(snapshot.backend, snapshot.deepThinking)
+        }
         // Task 7 M-4：候选旁路只对 CPU 变体有意义（lookahead / 多 token 步进仅 CPU 生效）——
         // 强制 CPU 象限测量，防止 GPU/AUTO 偏好下把 OPENCL 样本当作候选证据（证据错配，
         // 与 Task 6 review I-3 的「步进证据按变体守卫」同源约束）。思考开关沿用设置快照推导值。
@@ -120,6 +134,36 @@ open class DefaultLocalInferenceBenchmarkRunner(
         val plan = buildPlan(snapshot, quadrant, modelPath, candidateOverrides)
         val templateCapability = templateResolver.resolve(File(modelPath).parentFile ?: File(modelPath))
 
+        // Task 4 Step 6：场景专用 fixture。SECOND_TURN_KV_REUSE 在同一已加载 backend 上先跑
+        // 第一轮并用 assistant 原始文本构造第二轮（仅第二轮进入样本循环）；其余场景用静态 fixture。
+        // Task 15：LONG_PREFILL 必须测「完整 prefill」——每轮用确定性但**不同**的 round nonce 前缀，
+        // 使后一轮不命中上一轮的 KV 前缀缓存（否则记录的 KV 复用而非完整 prefill 吞吐）。
+        // 注意：lambda 必须经显式变量返回——若把 `{ ... }` 字面量直接放在函数调用后一行，Kotlin
+        // 会把它解析为上一行的尾随 lambda 参数（跨行尾随 lambda），导致 buildSecondTurnMessages/
+        // messagesFor 收到多余参数（"Too many arguments"）。
+        val messagesForRound: (Int) -> List<ChatMessage> = when (scenario) {
+            InferenceBenchmarkScenario.SECOND_TURN_KV_REUSE -> {
+                val secondTurn = buildSecondTurnMessages(modelPath, snapshot, plan, quadrant, templateCapability)
+                val provider: (Int) -> List<ChatMessage> = { secondTurn }
+                provider
+            }
+            InferenceBenchmarkScenario.LONG_PREFILL -> { round ->
+                longDeterministicPrompt(targetEstimatedTokens = LONG_PREFILL_TARGET_TOKENS, roundNonce = "r$round")
+            }
+            else -> {
+                val static = messagesFor(scenario)
+                val provider: (Int) -> List<ChatMessage> = { static }
+                provider
+            }
+        }
+        // FIXED_DECODE 通过总 maxTokens=FIXED_DECODE_MAX_TOKENS + 固定提示约束输出长度，
+        // 不用应用层思考 cap。
+        val maxTokensOverride = if (scenario == InferenceBenchmarkScenario.FIXED_DECODE) {
+            FIXED_DECODE_MAX_TOKENS
+        } else {
+            null
+        }
+
         val discardedReasons = mutableListOf<String>()
         val samples = mutableListOf<InferenceTurnRecord>()
         var warmupDone = 0
@@ -129,9 +173,17 @@ open class DefaultLocalInferenceBenchmarkRunner(
                 discardedReasons += REASON_THERMALLY_HOT
                 break
             }
-            val record = runOneRound(modelPath, snapshot, plan, quadrant, templateCapability)
+            val record = runOneRound(
+                modelPath, snapshot, plan, quadrant, templateCapability,
+                messages = messagesForRound(round), maxTokensOverride = maxTokensOverride,
+            )
             if (record == null) {
                 discardedReasons += "NO_RECORD_ROUND_${round + 1}"
+                continue
+            }
+            // Task 15：完整 prefill 样本不得含 KV 复用（兜底防线；正常由 round nonce 保证前缀失配）。
+            if (scenario == InferenceBenchmarkScenario.LONG_PREFILL && record.kvReuse == true) {
+                discardedReasons += "KV_REUSE_CONTAMINATION_ROUND_${round + 1}"
                 continue
             }
             if (round < warmupRounds) warmupDone++ else samples += record
@@ -183,8 +235,10 @@ open class DefaultLocalInferenceBenchmarkRunner(
             val templateCapability = templateResolver.resolve(File(modelPath).parentFile ?: File(modelPath))
             for (round in 0 until rounds) {
                 // 失败样本如实记录，绝不用重试替换（每轮只执行一次）。
+                // Task 4 Step 6：可靠性轮次固定用 EMPTY_RESPONSE_CHECK 探针。
                 val record = runOneRound(
                     modelPath, snapshot, plan, case.quadrant, templateCapability,
+                    messages = emptyResponseProbe(),
                     allowCpuFallback = true,
                 )
                 val cls = record?.emptyResponseClass ?: NO_RECORD_CLASS
@@ -207,13 +261,15 @@ open class DefaultLocalInferenceBenchmarkRunner(
     // 内部
     // ------------------------------------------------------------------
 
-    /** 一次探针生成：固定 prompt + 固定采样参数，返回本轮的最终遥测记录（异常返回 null）。 */
+    /** 一次探针生成：场景专用 prompt + 固定采样参数，返回本轮的最终遥测记录（异常返回 null）。 */
     private suspend fun runOneRound(
         modelPath: String,
         snapshot: LocalInferenceSettings,
         plan: ResolvedInferencePlan,
         quadrant: InferenceBackendQuadrant,
         templateCapability: ThinkingTemplateCapability,
+        messages: List<ChatMessage>,
+        maxTokensOverride: Int? = null,
         allowCpuFallback: Boolean = false,
     ): InferenceTurnRecord? {
         val classifier = ThinkingOutputClassifier(
@@ -229,11 +285,15 @@ open class DefaultLocalInferenceBenchmarkRunner(
                 EmptyOutputFallbackPolicy.DISABLED
             },
         )
+        // Task 4 Step 6：FIXED_DECODE 以总 maxTokens 约束输出长度（不改应用层思考 cap）；
+        // 覆盖时同步把 resolvedPlan.maxOutputTokens 对齐，避免「generate 用 256 而计划声明 2048」的错配。
+        val effectiveMax = maxTokensOverride ?: plan.maxOutputTokens
+        val effectivePlan = if (maxTokensOverride != null) plan.copy(maxOutputTokens = effectiveMax) else plan
         try {
             backendManager.generate(
                 modelPath = modelPath,
-                messages = PROBE_MESSAGES,
-                maxTokens = plan.maxOutputTokens,
+                messages = messages,
+                maxTokens = effectiveMax,
                 temperature = snapshot.temperature,
                 topP = AppConfig.LLM.DEFAULT_TOP_P,
                 repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
@@ -242,7 +302,7 @@ open class DefaultLocalInferenceBenchmarkRunner(
                 thinkingRequested = quadrant.thinkingEnabled,
                 templateCapability = templateCapability.name,
                 thinkingClassifier = classifier,
-                resolvedPlan = plan,
+                resolvedPlan = effectivePlan,
                 outputPolicy = outputPolicy,
             )
         } catch (ce: CancellationException) {
@@ -254,6 +314,128 @@ open class DefaultLocalInferenceBenchmarkRunner(
         }
         // MnnBackend 在 generateStreamMessages 的 finally 内收口遥测记录，generate 返回后必然可读。
         return backendManager.lastTurnRecord()
+    }
+
+    // ------------------------------------------------------------------
+    // Task 4 Step 6：场景专用 fixture（不再所有场景共用同一短探针）
+    // ------------------------------------------------------------------
+
+    /**
+     * 场景 → 消息 fixture。
+     *
+     * - [InferenceBenchmarkScenario.COLD_LOAD] / [InferenceBenchmarkScenario.SHORT_TTFT]：短探针；
+     * - [InferenceBenchmarkScenario.LONG_PREFILL]：确定性长 prompt（估计 ~[LONG_PREFILL_TARGET_TOKENS] token）；
+     * - [InferenceBenchmarkScenario.FIXED_DECODE]：固定提示 + 总 maxTokens=[FIXED_DECODE_MAX_TOKENS]；
+     * - [InferenceBenchmarkScenario.SECOND_TURN_KV_REUSE]：第一轮种子消息（真正的两轮由
+     *   [buildSecondTurnMessages] 在 [run] 内构造）；
+     * - [InferenceBenchmarkScenario.EMPTY_RESPONSE_CHECK]：极短探针。
+     */
+    private fun messagesFor(scenario: InferenceBenchmarkScenario): List<ChatMessage> = when (scenario) {
+        InferenceBenchmarkScenario.COLD_LOAD,
+        InferenceBenchmarkScenario.SHORT_TTFT -> shortPrompt()
+        InferenceBenchmarkScenario.LONG_PREFILL -> longDeterministicPrompt(targetEstimatedTokens = LONG_PREFILL_TARGET_TOKENS)
+        InferenceBenchmarkScenario.FIXED_DECODE -> fixedDecodePrompt(targetOutputTokens = FIXED_DECODE_MAX_TOKENS)
+        InferenceBenchmarkScenario.SECOND_TURN_KV_REUSE -> firstTurnMessages()
+        InferenceBenchmarkScenario.EMPTY_RESPONSE_CHECK -> emptyResponseProbe()
+    }
+
+    /** 短探针：COLD_LOAD / SHORT_TTFT 共用（与 MnnStreamingIntegrationTest.probeMessages 同源）。 */
+    private fun shortPrompt(): List<ChatMessage> = PROBE_MESSAGES
+
+    /** SECOND_TURN_KV_REUSE 的第一轮种子（第二轮由 [buildSecondTurnMessages] 基于真实输出构造）。 */
+    private fun firstTurnMessages(): List<ChatMessage> = PROBE_MESSAGES
+
+    /**
+     * 长 prefill 探针：确定性（无随机）长中文文本，估计约 [targetEstimatedTokens] token。
+     * 中文在常见 tokenizer 下约 1~2 字符/token，此处按 2 字符/token 估计并固定文本（每次完全一致），
+     * 仅用于测量 prefill 吞吐，不要求 token 数精确。
+     *
+     * @param roundNonce 轮次标记（Task 15）：置于 user 内容**最前**，改变整个前缀使本轮不命中
+     *   上一轮的 KV 前缀缓存——保证记录到的是完整 prefill 而非 KV 复用。确定性（round 序号），
+     *   不引入随机性。
+     */
+    private fun longDeterministicPrompt(targetEstimatedTokens: Int, roundNonce: String = ""): List<ChatMessage> {
+        val block = "这是用于评估长前缀填充吞吐的固定文本。它不包含随机内容，因此每次基准的 prompt 完全一致。" +
+            "请忽略这段内容的含义，只需完整复述其中的事实要点。"
+        val repeatCount = (targetEstimatedTokens * 2) / block.length + 1
+        val body = buildString {
+            if (roundNonce.isNotEmpty()) append("基准轮次标记 $roundNonce。")
+            repeat(repeatCount) { append(block) }
+        }
+        return listOf(
+            ChatMessage(role = "system", content = "你是中文测试助手。"),
+            ChatMessage(role = "user", content = body),
+        )
+    }
+
+    /**
+     * 固定解码探针：短固定提示；输出长度由总 maxTokens（[FIXED_DECODE_MAX_TOKENS]，经
+     * [runOneRound] 的 maxTokensOverride 传入）与提示共同约束，不用应用层思考 cap。
+     */
+    private fun fixedDecodePrompt(targetOutputTokens: Int): List<ChatMessage> {
+        val instruction = "请连续列出 $targetOutputTokens 个不同的中文词汇，每个一行，不要额外解释。"
+        return listOf(
+            ChatMessage(role = "system", content = "你是中文测试助手。"),
+            ChatMessage(role = "user", content = instruction),
+        )
+    }
+
+    /** EMPTY_RESPONSE_CHECK 探针：极短 prompt，最大化空输出可观测性（可靠性维度，不做吞吐）。 */
+    private fun emptyResponseProbe(): List<ChatMessage> = listOf(
+        ChatMessage(role = "system", content = "你是中文测试助手。"),
+        ChatMessage(role = "user", content = "你好。"),
+    )
+
+    /**
+     * SECOND_TURN_KV_REUSE：在同一已加载 backend 上先跑第一轮（短探针），捕获 assistant 原始
+     * 流式文本（onToken 逐段拼接 = modelContent 等价物），用其构造第二轮消息
+     * [system, user, assistant(raw), user("请针对以上内容继续补充。")]。
+     * 第一轮只构造第二轮，**不计数**；随后 [run] 的预热/记录轮全部使用第二轮——真实两轮前缀，
+     * 而非静态的伪多轮消息。
+     */
+    private suspend fun buildSecondTurnMessages(
+        modelPath: String,
+        snapshot: LocalInferenceSettings,
+        plan: ResolvedInferencePlan,
+        quadrant: InferenceBackendQuadrant,
+        templateCapability: ThinkingTemplateCapability,
+    ): List<ChatMessage> {
+        val classifier = ThinkingOutputClassifier(
+            thinkingRequested = quadrant.thinkingEnabled,
+            templateCapability = templateCapability,
+        )
+        val firstTurn = firstTurnMessages()
+        val raw = StringBuilder()
+        val firstOutputPolicy = GenerationOutputPolicy(emptyOutputFallback = EmptyOutputFallbackPolicy.DISABLED)
+        try {
+            backendManager.generate(
+                modelPath = modelPath,
+                messages = firstTurn,
+                maxTokens = plan.maxOutputTokens,
+                temperature = snapshot.temperature,
+                topP = AppConfig.LLM.DEFAULT_TOP_P,
+                repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
+                enableThinking = quadrant.thinkingEnabled,
+                onToken = { delta -> raw.append(delta); true }, // 只构造第二轮，不截断
+                thinkingRequested = quadrant.thinkingEnabled,
+                templateCapability = templateCapability.name,
+                thinkingClassifier = classifier,
+                resolvedPlan = plan,
+                outputPolicy = firstOutputPolicy,
+            )
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: Exception) {
+            Log.w(TAG, "SECOND_TURN_KV_REUSE 第一轮构造失败（本轮不计数）: ${e.message}")
+        }
+        val assistantRaw = raw.toString()
+        if (assistantRaw.isBlank()) {
+            Log.w(TAG, "SECOND_TURN_KV_REUSE 第一轮未产出文本，以空 assistant 消息构造第二轮")
+        }
+        // content 与 modelContent 同时写入原始文本：后端渲染按任一字段都不会丢 KV 前缀文本。
+        return firstTurn +
+            ChatMessage(role = "assistant", content = assistantRaw, modelContent = assistantRaw) +
+            ChatMessage(role = "user", content = "请针对以上内容继续补充。")
     }
 
     /**
@@ -287,6 +469,9 @@ open class DefaultLocalInferenceBenchmarkRunner(
         topP = AppConfig.LLM.DEFAULT_TOP_P,
         repeatPenalty = AppConfig.LLM.DEFAULT_REPEAT_PENALTY,
         openclHealth = if (quadrant.usesGpu) OpenClHealthState.PROBE_OK else OpenClHealthState.UNKNOWN,
+        // 基准用显式 MNN_GPU/MNN_CPU 偏好（见上），模型大小门槛对显式选择不生效；按 GPU 目标传
+        // GPU_ELIGIBLE，避免 AUTO 语义干扰基准象限。
+        modelClass = AutoBackendModelClass.GPU_ELIGIBLE,
         certifiedOptions = candidateOverrides?.let { overrides ->
             CertifiedInferenceOptions(
                 deviceFingerprint = "",
@@ -342,6 +527,13 @@ open class DefaultLocalInferenceBenchmarkRunner(
                 content = "请用三句话介绍你自己，必须包含中文，并带上一个 emoji。",
             ),
         )
+
+        // ---- Task 4 Step 6：场景 fixture 常量 ----
+        /** LONG_PREFILL 长 prompt 的目标估计 token 数（按 2 字符/token 估计，仅用于吞吐测量）。 */
+        private const val LONG_PREFILL_TARGET_TOKENS = 1024
+
+        /** FIXED_DECODE 总 maxTokens（固定解码场景通过它约束输出长度，不用应用层思考 cap）。 */
+        private const val FIXED_DECODE_MAX_TOKENS = 256
 
         /** 热态拒绝原因（isThermallyHot 命中时写入 discardedReasons）。 */
         private const val REASON_THERMALLY_HOT = "THERMALLY_HOT"

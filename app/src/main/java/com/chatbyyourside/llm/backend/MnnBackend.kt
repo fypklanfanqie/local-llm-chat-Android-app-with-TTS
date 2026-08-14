@@ -6,6 +6,7 @@ import android.util.Log
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.GenerationExecutionControl
+import com.chatbyyourside.llm.ProcessMemorySampler
 import com.chatbyyourside.llm.metrics.CompletionReason
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.PowerPolicy
@@ -13,6 +14,7 @@ import com.chatbyyourside.llm.metrics.InferenceTelemetry
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
 import com.chatbyyourside.llm.metrics.NativeGenerationSummary
 import com.chatbyyourside.llm.template.ThinkingOutputClassifier
+import com.chatbyyourside.llm.thinking.ThinkingPolicyTelemetry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -83,6 +85,11 @@ class MnnBackend(
     @Volatile
     var lastTurnRecord: InferenceTurnRecord? = null
         private set
+
+    /** Task 15/16：旁路操作（GPU 预热等）后恢复被覆盖的「最近一次聊天」记录。 */
+    internal fun restoreLastTurnRecord(record: InferenceTurnRecord?) {
+        lastTurnRecord = record
+    }
 
     override val backendType: BackendType = when (mode) {
         MnnMode.CPU -> BackendType.MNN_CPU
@@ -198,9 +205,18 @@ class MnnBackend(
         thinkingRequested: Boolean?,
         templateCapability: String?,
         thinkingClassifier: ThinkingOutputClassifier?,
+        // Task 5：本地思考档位策略快照（单次透传；思考关闭/云端为 null）。
+        thinkingPolicy: ThinkingPolicyTelemetry?,
+        // Task 15：内存准入的上下文降级（配置值 -> 实际值；未降级为 null）。
+        configuredContextTokens: Int?,
+        actualContextTokens: Int?,
     ): NativeGenerationSummary? = mutex.withLock {
         if (handle == 0L) throw IllegalStateException("MNN 后端未加载模型")
         currentCoroutineContext().ensureActive()
+        // Task 16：阶段边界 PSS 采样（入口 = 模型已加载后基线；首 delta = prefill 完成后峰值近似；
+        // finally = 生成后）。不逐 token 采样（getProcessMemoryInfo 数十 ms 级开销会拖慢推理）。
+        val pssStartBytes = ProcessMemorySampler.currentProcessPssBytes(context)
+        var pssPrefillBytes: Long? = null
 
         val messagesJson = MnnBridge.toMessagesJson(messages)
         tokenCount = 0
@@ -230,6 +246,10 @@ class MnnBackend(
         // abort/stop reason 由整次 BackendManager 请求的 control 管理；本后端绝不在 fallback 时复位。
         MnnBridge.onToken = { token, generatedTokens ->
             callbackCount++
+            // prefill 峰值近似：首个可见 delta 采样一次（prefill 完成 + KV 全量分配后，非逐 token）。
+            if (callbackCount == 1) {
+                pssPrefillBytes = ProcessMemorySampler.currentProcessPssBytes(context)
+            }
             callbackBytes += token.toByteArray(Charsets.UTF_8).size.toLong()
             tokenCount = generatedTokens   // native 实时 gen_len（绝对累计，非增量）
             val now = System.nanoTime()
@@ -349,6 +369,18 @@ class MnnBackend(
                 templateCapability = templateCapability,
                 thinkingEffective = thinkingObs?.thinkingEffect?.name,
                 emptyResponseClass = thinkingObs?.emptyResponseClass?.name,
+                // Task 5：本地思考档位策略快照随本轮记录一并收口。
+                thinkingPolicy = thinkingPolicy,
+                // Task 15：内存准入的上下文降级（配置值 -> 实际值）。
+                configuredContextTokens = configuredContextTokens,
+                actualContextTokens = actualContextTokens,
+                // Task 16：阶段边界 PSS 峰值（MB）= max(加载后基线, prefill 首 delta, 生成后)；
+                // 采样失败为 null（既有 PSS 门禁按无证据处理）。
+                peakPssMb = maxOf(
+                    pssStartBytes ?: 0L,
+                    pssPrefillBytes ?: 0L,
+                    ProcessMemorySampler.currentProcessPssBytes(context) ?: 0L,
+                ).takeIf { it > 0L }?.div(1024L * 1024),
             )
             // 汇总日志：tps + 摘要实测复用/前缀/批处理指标，便于核对多轮前缀复用与回调削减是否生效。
             if (parsed != null) {
@@ -389,6 +421,13 @@ class MnnBackend(
         attemptTrace = emptyList(),
         coldLoadMs = null,
         warmLoadMs = null,
+        decodeStepTokens = 1,
+        thinkingRequested = null,
+        templateCapability = null,
+        thinkingClassifier = null,
+        thinkingPolicy = null,
+        configuredContextTokens = null,
+        actualContextTokens = null,
     )
 
     override suspend fun stopGeneration() {

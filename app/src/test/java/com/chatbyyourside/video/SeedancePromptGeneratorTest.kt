@@ -48,6 +48,8 @@ class SeedancePromptGeneratorTest {
         ratio: SeedanceRatio = SeedanceRatio.PORTRAIT,
         durationSeconds: Int = 5,
         sceneDescription: String = "海边日落",
+        recentContext: String = "",
+        hasBackgroundReference: Boolean = false,
     ) = SeedancePromptInput(
         characterName = "小明",
         characterRole = "邻家少年",
@@ -55,6 +57,8 @@ class SeedancePromptGeneratorTest {
         userText = "你好呀，今天天气不错。",
         assistantText = "（小明抬头看向远方，微笑着说）是啊，适合散步。",
         sceneDescription = sceneDescription,
+        hasBackgroundReference = hasBackgroundReference,
+        recentContext = recentContext,
         variant = variant,
         resolution = resolution,
         ratio = ratio,
@@ -63,13 +67,14 @@ class SeedancePromptGeneratorTest {
 
     private fun fullDocumentJson(): String = """
         {
-          "subject": "小明，一个身穿白衬衫的邻家少年",
-          "action": "缓步走向海边，转头微笑",
-          "environment": "黄昏海边，浪花轻拍",
-          "camera": "中景跟拍，缓慢推近",
-          "lighting": "暖金色夕阳",
-          "audio": "海浪声与轻柔脚步声",
-          "continuity": "白衬衫与发型全程一致",
+          "subject": "小明，一个身穿白衬衫的邻家少年，面容温和，短发被海风轻轻吹起",
+          "appearance": "黑色短发，棕色眼睛，白色衬衫配浅蓝色牛仔裤，脚穿帆布鞋，气质温和内敛，笑起来眼睛弯弯",
+          "action": "他缓步走向海边，停下脚步抬头望向远方，随后转头对镜头露出微笑，轻轻挥手示意",
+          "environment": "黄昏时分的海边，金色夕阳悬在海平面上，浪花轻轻拍打沙滩，远处几只海鸥缓缓飞过",
+          "camera": "中景起幅，镜头缓慢推近至近景，跟随他转头的动作轻微横移",
+          "lighting": "暖金色夕阳逆光，皮肤边缘泛起柔和的轮廓光，整体色调温暖明亮",
+          "audio": "轻柔的海浪声、海鸥鸣叫与他的脚步声，语气轻快地说着话",
+          "continuity": "白衬衫、黑色短发与微笑的神态全程保持一致",
           "technical": "占位",
           "finalPrompt": "占位"
         }
@@ -138,6 +143,32 @@ class SeedancePromptGeneratorTest {
         assertTrue("非空场景应透传", singleUserMessage(fake).contains("雨夜街头"))
     }
 
+    // ---- 参考图角色映射 ----
+
+    @Test
+    fun backgroundReferenceMapsImagesToRoles() = runBlocking {
+        val fake = FakeLlm(fullDocumentJson())
+        val doc = SeedancePromptGenerator(fake).generate(apiConfig(), input(hasBackgroundReference = true))
+
+        val user = singleUserMessage(fake)
+        assertTrue("用户消息应写明第 1 张参考图 = 角色", user.contains("第 1 张参考图 = 角色形象图"))
+        assertTrue("用户消息应写明第 2 张参考图 = 背景", user.contains("第 2 张参考图 = 背景场景图"))
+        assertTrue("最终提示词应映射第 1 张为角色", doc.finalPrompt.contains("角色形象以第 1 张参考图为准"))
+        assertTrue("最终提示词应映射第 2 张为背景", doc.finalPrompt.contains("背景场景以第 2 张参考图为准"))
+    }
+
+    @Test
+    fun noBackgroundReferenceOmitsBackgroundMapping() = runBlocking {
+        val fake = FakeLlm(fullDocumentJson())
+        val doc = SeedancePromptGenerator(fake).generate(apiConfig(), input(hasBackgroundReference = false))
+
+        val user = singleUserMessage(fake)
+        assertTrue("用户消息仍应写明第 1 张参考图 = 角色", user.contains("第 1 张参考图 = 角色形象图"))
+        assertFalse("无背景参考图时不应出现第 2 张参考图映射", user.contains("第 2 张参考图"))
+        assertTrue("最终提示词应以单图角色映射", doc.finalPrompt.contains("角色形象以参考图为准"))
+        assertFalse("无背景参考图时最终提示词不应出现第 2 张", doc.finalPrompt.contains("第 2 张参考图"))
+    }
+
     // ---- technical / finalPrompt 技术参数 ----
 
     @Test
@@ -152,17 +183,66 @@ class SeedancePromptGeneratorTest {
                 durationSeconds = 8,
             ),
         )
-        val bits = listOf(
-            SeedanceModelVariant.FAST.modelId,
-            "P720",
-            "16:9",
-            "8秒",
-            "音频：开启",
-        )
+        val bits = listOf("快速版", "720p", "16:9", "8秒", "音频：开启")
         for (bit in bits) {
             assertTrue("technical 应包含「$bit」", doc.technical.contains(bit))
             assertTrue("finalPrompt 应包含「$bit」", doc.finalPrompt.contains(bit))
         }
+    }
+
+    // ---- 外貌字段与前情对话 ----
+
+    @Test
+    fun appearanceIsIncludedInFinalPrompt() = runBlocking {
+        val fake = FakeLlm(fullDocumentJson())
+        val doc = SeedancePromptGenerator(fake).generate(apiConfig(), input())
+        assertTrue("finalPrompt 应包含外貌描述", doc.finalPrompt.contains("白色衬衫"))
+        assertTrue("appearance 字段应保留", doc.appearance.contains("黑色短发"))
+    }
+
+    @Test
+    fun recentContextIsPassedThroughToUserMessage() = runBlocking {
+        val fake = FakeLlm(fullDocumentJson())
+        val context = "用户：昨天我们聊了什么？\n角色：聊了夏天的海边。"
+        SeedancePromptGenerator(fake).generate(apiConfig(), input(recentContext = context))
+        assertTrue("前情对话应透传给 LLM", singleUserMessage(fake).contains(context))
+    }
+
+    @Test
+    fun blankRecentContextOmitsSection() = runBlocking {
+        val fake = FakeLlm(fullDocumentJson())
+        SeedancePromptGenerator(fake).generate(apiConfig(), input(recentContext = ""))
+        assertFalse("空白前情不应出现该小节", singleUserMessage(fake).contains("前情对话"))
+    }
+
+    // ---- 系统指令：对话驱动 ----
+
+    @Test
+    fun systemPromptRequiresDialogueDrivenVideo() = runBlocking {
+        val fake = FakeLlm(fullDocumentJson())
+        SeedancePromptGenerator(fake).generate(apiConfig(), input())
+        val system = (fake.calls.single().messages[0].content as JsonPrimitive).content
+        assertTrue("系统指令应要求演绎角色回复", system.contains("角色回复"))
+        assertTrue("系统指令应要求与回复逐句对应", system.contains("逐句对应"))
+        assertTrue("系统指令应要求外貌与参考人设图一致", system.contains("参考人设图"))
+        assertTrue("系统指令应要求 environment 以场景补充为依据", system.contains("场景补充"))
+    }
+
+    // ---- 质量红线：过短拒绝 ----
+
+    @Test
+    fun tooShortDescriptionIsRejected() = runBlocking {
+        val fake = FakeLlm(
+            """{"subject":"小明","action":"笑","environment":"海边","technical":"x","finalPrompt":"x"}"""
+        )
+        val generator = SeedancePromptGenerator(fake)
+        try {
+            generator.generate(apiConfig(), input())
+            fail("过短提示词应抛出 SeedancePromptParseException")
+        } catch (e: SeedancePromptParseException) {
+            assertTrue("失败原因应提示过短", e.message.orEmpty().contains("过短"))
+        }
+        assertEquals(1, fake.calls.size)
     }
 
     // ---- JSON 解析形态 ----

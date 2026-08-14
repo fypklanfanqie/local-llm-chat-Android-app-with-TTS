@@ -6,8 +6,10 @@ import com.chatbyyourside.data.model.ApiConfig
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.SeedanceConfig
+import com.chatbyyourside.data.model.SystemVoiceTemplate
 import com.chatbyyourside.data.model.ThemeMode
 import com.chatbyyourside.data.model.TtsConfig
+import com.chatbyyourside.data.model.TtsEngine
 import com.chatbyyourside.data.model.TtsLanguage
 import com.chatbyyourside.data.model.VoicePair
 import com.chatbyyourside.config.AppConfig
@@ -35,6 +37,10 @@ class SettingsRepository(private val store: SettingsStore) {
     val ttsLanguage: Flow<TtsLanguage> = store.ttsLanguage
     val ttsVolume: Flow<Int> = store.ttsVolume
     val ttsVoiceMap: Flow<Map<String, VoicePair>> = store.ttsVoiceMap
+    /** 朗读引擎（system=手机自带，默认；cloud=云端火山豆包）。 */
+    val ttsEngine: Flow<TtsEngine> = store.ttsEngine
+    /** 系统引擎声音模板。 */
+    val ttsSystemTemplate: Flow<SystemVoiceTemplate> = store.ttsSystemTemplate
     val activeCharacter: Flow<String> = store.activeCharacter
     val customCharacters: Flow<List<Character>> = store.customCharacters
     val volume: Flow<Int> = store.volume
@@ -84,6 +90,8 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun setTtsLanguage(lang: TtsLanguage) = store.setTtsLanguage(lang)
     suspend fun setTtsVolume(vol: Int) = store.setTtsVolume(vol)
     suspend fun setTtsVoiceMap(map: Map<String, VoicePair>) = store.setTtsVoiceMap(map)
+    suspend fun setTtsEngine(engine: TtsEngine) = store.setTtsEngine(engine)
+    suspend fun setTtsSystemTemplate(template: SystemVoiceTemplate) = store.setTtsSystemTemplate(template)
     suspend fun setActiveCharacter(id: String) = store.setActiveCharacter(id)
     val activeConversations: Flow<Map<String, Long>> = store.activeConversations
     suspend fun setActiveConversation(characterId: String, conversationId: Long) =
@@ -160,6 +168,14 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun getTtsLanguageNow(): TtsLanguage = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         ttsLanguage.first()
     } ?: TtsLanguage.ZH
+
+    suspend fun getTtsEngineNow(): TtsEngine = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        ttsEngine.first()
+    } ?: TtsEngine.DEFAULT
+
+    suspend fun getTtsSystemTemplateNow(): SystemVoiceTemplate = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        ttsSystemTemplate.first()
+    } ?: SystemVoiceTemplate.DEFAULT_TEMPLATE
 
     suspend fun getTtsVoiceMapNow(): Map<String, VoicePair> = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         ttsVoiceMap.first()

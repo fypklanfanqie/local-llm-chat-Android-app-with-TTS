@@ -1,6 +1,7 @@
 package com.chatbyyourside.llm.backend
 
 import android.test.mock.MockContext
+import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.backend.MnnBackend.MnnMode
@@ -15,6 +16,7 @@ import com.chatbyyourside.llm.profile.PowerPolicy
 import com.chatbyyourside.llm.profile.ResolvedInferencePlan
 import com.chatbyyourside.llm.profile.RuntimeVariant
 import com.chatbyyourside.llm.template.ThinkingOutputClassifier
+import com.chatbyyourside.llm.thinking.ThinkingPolicyTelemetry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -125,6 +127,9 @@ class BackendManagerHealthWiringTest {
             thinkingRequested: Boolean?,
             templateCapability: String?,
             thinkingClassifier: ThinkingOutputClassifier?,
+            thinkingPolicy: ThinkingPolicyTelemetry?,
+            configuredContextTokens: Int?,
+            actualContextTokens: Int?,
         ): NativeGenerationSummary? {
             generateCalls++
             if (tokensBeforeFailure > 0) {
@@ -205,6 +210,7 @@ class BackendManagerHealthWiringTest {
         topP = 0.9f,
         repeatPenalty = 1.2f,
         openclHealth = OpenClHealthState.MODEL_OK,
+        modelClass = AutoBackendModelClass.GPU_ELIGIBLE,
     )
 
     /** 显式 CPU -> [CPU_OPTIMIZED, CPU_COMPATIBILITY]（均 MNN_CPU）。 */
@@ -219,6 +225,7 @@ class BackendManagerHealthWiringTest {
         topP = 0.9f,
         repeatPenalty = 1.2f,
         openclHealth = OpenClHealthState.UNKNOWN,
+        modelClass = AutoBackendModelClass.GPU_ELIGIBLE,
     )
 
     /** BackendManager.generate 期望健康记录键（与生产 BackendManager 内部计算一致）。 */

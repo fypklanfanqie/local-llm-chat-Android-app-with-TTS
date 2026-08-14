@@ -136,6 +136,7 @@ class SeedanceRequestValidatorTest {
         val config = SeedanceConfig()
         assertEquals(DEFAULT_BASE_URL, config.baseUrl)
         assertEquals("", config.apiKey)
+        assertEquals("kwvideo-v2-ref", config.relayModelId)
         assertEquals(SeedanceModelVariant.STANDARD, config.variant)
         assertEquals(SeedanceResolution.P720, config.resolution)
         assertEquals(SeedanceRatio.PORTRAIT, config.ratio)
@@ -149,6 +150,27 @@ class SeedanceRequestValidatorTest {
     fun modelVariantIdsMatchOfficialContract() {
         assertEquals("doubao-seedance-2-0-260128", SeedanceModelVariant.STANDARD.modelId)
         assertEquals("doubao-seedance-2-0-fast-260128", SeedanceModelVariant.FAST.modelId)
+    }
+
+    // ---- 中转站媒体协议 ----
+
+    @Test
+    fun mediaRelay_blankModelId_isInvalid() {
+        val media = config(baseUrl = "https://api.lk888.ai/v1/media/generate").copy(relayModelId = "   ")
+        assertInvalid(validateSeedanceRequest(media, CHARACTER_PATH))
+    }
+
+    @Test
+    fun mediaRelay_configuredModelId_isValid() {
+        val media = config(baseUrl = "https://api.lk888.ai/v1/media/generate").copy(relayModelId = "kwvideo-v2-ref")
+        assertEquals(SeedanceValidationResult.Valid, validateSeedanceRequest(media, CHARACTER_PATH))
+    }
+
+    @Test
+    fun arkProtocol_blankRelayModelId_stillValid() {
+        // 官方方舟不使用 relayModelId，留空不影响校验。
+        val ark = config().copy(relayModelId = "")
+        assertEquals(SeedanceValidationResult.Valid, validateSeedanceRequest(ark, CHARACTER_PATH))
     }
 
     // ---- 组合场景与错误文案 ----

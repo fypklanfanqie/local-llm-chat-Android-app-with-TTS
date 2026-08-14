@@ -43,6 +43,10 @@ object LlmMemoryEstimator {
     /** K + V 两个向量 */
     private const val KV_FACTOR = 2L
 
+    /** 未知维度模型的保守 KV 密度（bytes/token）：约 1.3× 内置 9B full-hidden 上限，稳定优先，
+     *  避免把「无法解析维度」误当成「零 KV 成本」——零成本会让大模型在无证据时被乐观放行。 */
+    const val UNKNOWN_KV_BYTES_PER_TOKEN = 512L * 1024
+
     /**
      * KV cache 内存（Task 13 Step 1 公式）：
      * `context × layers × 2(K/V) × num_key_value_heads × head_dim × bytes_per_element`
@@ -112,17 +116,17 @@ object LlmMemoryEstimator {
 
     /**
      * 读取模型维度：优先从模型目录的 llm_config.json 解析 hidden_size + layer_nums/num_hidden_layers，
-     * 解析不到 layer 时回退 [KNOWN_MODEL_DIMS]。
+     * 文件缺失/解析失败时回退 [KNOWN_MODEL_DIMS]（内置模型维度表，无 llm_config.json 也能估算 KV）。
      */
     fun readModelDims(context: Context, modelId: String): ModelDims? {
         val configPath = ModelPathResolver.getLoadPath(context, modelId) ?: return null
         val modelDir = File(configPath).parentFile ?: return null
         val llmConfigFile = File(modelDir, "llm_config.json")
-        if (!llmConfigFile.exists()) return null
+        val fallback = KNOWN_MODEL_DIMS[modelId]
+        if (!llmConfigFile.exists()) return fallback
 
         return try {
             val json = JSONObject(llmConfigFile.readText())
-            val fallback = KNOWN_MODEL_DIMS[modelId]
 
             val hiddenSize = json.optInt("hidden_size", 0)
                 .takeIf { it > 0 }
@@ -152,7 +156,8 @@ object LlmMemoryEstimator {
                 headDim = headDim,
             )
         } catch (e: Exception) {
-            null
+            // llm_config.json 损坏/解析失败：回退内置维度表（仍无则 null）。
+            fallback
         }
     }
 

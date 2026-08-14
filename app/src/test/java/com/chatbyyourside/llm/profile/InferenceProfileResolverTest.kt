@@ -1,5 +1,6 @@
 package com.chatbyyourside.llm.profile
 
+import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.benchmark.CertifiedInferenceOptions
@@ -43,6 +44,9 @@ class InferenceProfileResolverTest {
         openclHealth: OpenClHealthState = OpenClHealthState.UNKNOWN,
         lookahead: Boolean = false,
         certifiedOptions: CertifiedInferenceOptions? = null,
+        // 默认 GPU_ELIGIBLE：既有 AUTO 用例语义为「GPU 可用的模型在 AUTO 下」，保持原意；
+        // 模型大小门禁的专属用例显式传 CPU 分类。
+        modelClass: AutoBackendModelClass = AutoBackendModelClass.GPU_ELIGIBLE,
     ): ResolvedInferencePlan = resolver.resolve(
         mode = mode,
         backendPreference = preference,
@@ -54,6 +58,7 @@ class InferenceProfileResolverTest {
         topP = 0.9f,
         repeatPenalty = 1.2f,
         openclHealth = openclHealth,
+        modelClass = modelClass,
         certifiedOptions = certifiedOptions,
     )
 
@@ -406,5 +411,62 @@ class InferenceProfileResolverTest {
         assertFalse("基线旁路应保持 lookahead=false", p.powerPolicy.lookahead)
         assertFalse(cpuOptimizedJson(p).contains("speculative_type"))
         assertFalse("覆盖值语义下不应有未认证降级噪音", p.downgradeReasons.contains(DowngradeReason.LOOKAHEAD_UNCERTIFIED))
+    }
+
+    // ===== Task 15：模型大小门禁（AUTO 仅 >7B 用 GPU）=====
+
+    @Test
+    fun autoSmallModelSkipsGpuEvenWhenOpenclHealthy() {
+        val p = plan(
+            BackendPreference.AUTO,
+            openclHealth = OpenClHealthState.MODEL_OK,
+            modelClass = AutoBackendModelClass.CPU_BELOW_OR_EQUAL_THRESHOLD,
+        )
+
+        assertTrue(p.attempts.none { it.backend == BackendType.MNN_GPU })
+        assertEquals(
+            listOf(RuntimeVariant.CPU_OPTIMIZED, RuntimeVariant.CPU_COMPATIBILITY),
+            variants(p),
+        )
+        assertTrue(p.downgradeReasons.contains(DowngradeReason.AUTO_MODEL_AT_OR_BELOW_7B_CPU))
+    }
+
+    @Test
+    fun autoUnknownModelSkipsGpuAndRecordsUnknownReason() {
+        val p = plan(
+            BackendPreference.AUTO,
+            openclHealth = OpenClHealthState.MODEL_OK,
+            modelClass = AutoBackendModelClass.CPU_UNKNOWN_PARAMETERS,
+        )
+
+        assertTrue(p.attempts.none { it.backend == BackendType.MNN_GPU })
+        assertTrue(p.downgradeReasons.contains(DowngradeReason.AUTO_MODEL_PARAMETERS_UNKNOWN_CPU))
+        assertEquals(RuntimeVariant.CPU_OPTIMIZED, p.attempts.first().variant)
+    }
+
+    @Test
+    fun autoGpuEligibleModelKeepsOpenclFirstWhenHealthy() {
+        val p = plan(
+            BackendPreference.AUTO,
+            openclHealth = OpenClHealthState.MODEL_OK,
+            modelClass = AutoBackendModelClass.GPU_ELIGIBLE,
+        )
+
+        assertEquals(BackendType.MNN_GPU, p.attempts.first().backend)
+        assertFalse(p.downgradeReasons.contains(DowngradeReason.AUTO_MODEL_AT_OR_BELOW_7B_CPU))
+        assertFalse(p.downgradeReasons.contains(DowngradeReason.AUTO_MODEL_PARAMETERS_UNKNOWN_CPU))
+    }
+
+    @Test
+    fun explicitGpuHonoredEvenForSmallModel() {
+        // 显式 MNN_GPU：模型大小门槛不生效（用户显式选择优先）。
+        val p = plan(
+            BackendPreference.MNN_GPU,
+            openclHealth = OpenClHealthState.MODEL_OK,
+            modelClass = AutoBackendModelClass.CPU_BELOW_OR_EQUAL_THRESHOLD,
+        )
+
+        assertEquals(BackendType.MNN_GPU, p.attempts.first().backend)
+        assertFalse(p.downgradeReasons.contains(DowngradeReason.AUTO_MODEL_AT_OR_BELOW_7B_CPU))
     }
 }

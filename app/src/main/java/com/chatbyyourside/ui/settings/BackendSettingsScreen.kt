@@ -24,15 +24,19 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.app.ActivityManager
 import android.content.Context
 import android.os.SystemClock
 import android.widget.Toast
 import com.chatbyyourside.AppContainer
 import com.chatbyyourside.config.AppConfig
+import com.chatbyyourside.data.model.AutoBackendModelClass
+import com.chatbyyourside.data.model.DEFAULT_MNN_MODELS
 import com.chatbyyourside.llm.LlmMemoryEstimator
 import com.chatbyyourside.llm.backend.BackendHealthCoordinator
 import com.chatbyyourside.llm.backend.BackendManager
 import com.chatbyyourside.llm.backend.BackendPreference
+import com.chatbyyourside.llm.backend.GpuPreheatCoordinator
 import com.chatbyyourside.llm.backend.BackendSelector
 import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.backend.MnnBridge
@@ -40,6 +44,7 @@ import com.chatbyyourside.llm.backend.NpuSupportDetector
 import com.chatbyyourside.llm.backend.modelConfigFingerprint
 import com.chatbyyourside.llm.benchmark.BenchmarkSample
 import com.chatbyyourside.llm.benchmark.BenchmarkScenarioResult
+import com.chatbyyourside.llm.benchmark.BenchmarkTarget
 import com.chatbyyourside.llm.benchmark.CandidateOverrides
 import com.chatbyyourside.llm.benchmark.CertifiedInferenceOptions
 import com.chatbyyourside.llm.benchmark.ExperimentalPromotionPolicy
@@ -57,6 +62,9 @@ import com.chatbyyourside.llm.profile.RuntimeVariant
 import com.chatbyyourside.llm.template.ThinkingEffect
 import com.chatbyyourside.llm.template.ThinkingTemplateCapability
 import com.chatbyyourside.llm.template.ThinkingTemplateCapabilityResolver
+import com.chatbyyourside.llm.thinking.LocalThinkingLevel
+import com.chatbyyourside.llm.thinking.ThinkingPolicyTelemetry
+import com.chatbyyourside.provider.local.LocalChatProvider
 import com.chatbyyourside.provider.local.ModelPathResolver
 import com.chatbyyourside.ui.glass.GlassListRow
 import com.chatbyyourside.ui.glass.GlassListSection
@@ -81,6 +89,10 @@ fun BackendSettingsScreen(
     val pref by container.settingsRepository.llmBackend.collectAsState(initial = BackendPreference.AUTO)
     val performanceMode by container.settingsRepository.llmPerformanceMode
         .collectAsState(initial = InferencePerformanceMode.DEFAULT)
+    // 思考档位（仅本地，默认 AUTO）：开启深度思考后决定思考强度；与全局 deepThinking 开关相互独立。
+    val thinkingLevel by container.settingsRepository.localThinkingLevel
+        .collectAsState(initial = LocalThinkingLevel.DEFAULT)
+    val deepThinking by container.settingsRepository.deepThinking.collectAsState(initial = false)
 
     val deviceCap by produceState(initialValue = null as BackendSelector.DeviceCapability?) {
         value = withContext(Dispatchers.IO) { container.backendManager.deviceCapability }
@@ -94,11 +106,17 @@ fun BackendSettingsScreen(
     val mnnNpuReady by produceState(initialValue = false) {
         value = withContext(Dispatchers.IO) { container.backendManager.mnnNpuSupported }
     }
+    val activeModelId by container.settingsRepository.activeLocalModelId.collectAsState(initial = null)
+    // Task 15：AUTO 的默认链与文案按当前模型大小分类（严格 >7B 才默认 GPU；未知/小模型默认 CPU）。
+    val activeModelClass = remember(activeModelId) {
+        DEFAULT_MNN_MODELS.firstOrNull { it.id == activeModelId }?.autoBackendModelClass
+            ?: AutoBackendModelClass.CPU_UNKNOWN_PARAMETERS
+    }
     val fallbackChain by produceState(
         initialValue = emptyList<BackendType>(),
-        pref, mnnCpuReady, mnnGpuReady, mnnNpuReady,
+        pref, mnnCpuReady, mnnGpuReady, mnnNpuReady, activeModelClass,
     ) {
-        value = withContext(Dispatchers.IO) { container.backendManager.backendOrder(pref) }
+        value = previewFallbackChain(pref, activeModelClass, mnnGpuReady)
     }
     val activeBackend = container.backendManager.lastUsedBackend
 
@@ -108,7 +126,6 @@ fun BackendSettingsScreen(
     val configChanged by container.settingsRepository.llmConfigChanged.collectAsState(initial = false)
 
     val context = LocalContext.current
-    val activeModelId by container.settingsRepository.activeLocalModelId.collectAsState(initial = null)
     val memoryEstimate by produceState<LlmMemoryEstimator.MemoryEstimate>(
         initialValue = LlmMemoryEstimator.MemoryEstimate.Unavailable,
         activeModelId, contextLen,
@@ -173,6 +190,13 @@ fun BackendSettingsScreen(
     // 基准认证入口状态（运行中禁用按钮；完成后在诊断区展示最近一次判定原因）。
     var benchmarkRunning by remember { mutableStateOf(false) }
     var benchmarkOutcome by remember { mutableStateOf<LookaheadCertificationDecision?>(null) }
+    // Task 15/16：CPU vs GPU prefill 对比基准状态（确认框 + 运行中 + 结果）。
+    var prefillBenchConfirm by remember { mutableStateOf(false) }
+    var prefillBenchRunning by remember { mutableStateOf(false) }
+    var prefillBenchOutcome by remember { mutableStateOf<PrefillBenchmarkOutcome?>(null) }
+    // Task 15/16：GPU 完整预热状态（运行中 + 结果）。
+    var preheatRunning by remember { mutableStateOf(false) }
+    var preheatOutcome by remember { mutableStateOf<GpuPreheatCoordinator.PreheatResult?>(null) }
     // 两个重置动作的确认对话框开关。
     var confirmResetHealth by remember { mutableStateOf(false) }
     var confirmResetCert by remember { mutableStateOf(false) }
@@ -214,6 +238,13 @@ fun BackendSettingsScreen(
         }
 
         // ===== 设备能力 =====
+        // Task 16：运行时 managed heap 类别（largeHeap 已启用；仅反映 ART 堆上限，native 权重/KV 不受其约束）。
+        val heapClasses by produceState(initialValue = null as Pair<Int, Int>?) {
+            value = withContext(Dispatchers.IO) {
+                val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                if (am == null) null else am.memoryClass to am.largeMemoryClass
+            }
+        }
         GlassListSection(title = "设备能力") {
             val cap = deviceCap
             if (cap == null) {
@@ -221,6 +252,13 @@ fun BackendSettingsScreen(
             } else {
                 GlassListRow(title = "CPU 核心数", trailing = { ValueText("${cap.cpuCoreCount}") })
                 GlassListRow(title = "总内存", trailing = { ValueText("${cap.totalRAMMB} MB") })
+                heapClasses?.let { (small, large) ->
+                    GlassListRow(
+                        title = "应用堆上限（已启用大堆）",
+                        subtitle = "managed heap $small MB / 大堆 $large MB；模型权重与 KV 走 native/mmap，不占用该上限",
+                        showDivider = false,
+                    )
+                }
                 GlassListRow(
                     title = "NPU (Hexagon)",
                     subtitle = if (cap.npuInfo.supported)
@@ -250,6 +288,32 @@ fun BackendSettingsScreen(
             }
         }
 
+        // ===== 思考档位（仅本地）=====
+        // 全局「深度思考模式」开关决定是否请求思考；本档位只在开启后生效，云端不读取。
+        GlassListSection(title = "思考档位（仅本地）") {
+            LocalThinkingLevel.entries.forEachIndexed { idx, level ->
+                BackendOptionRow(
+                    title = thinkingLevelTitle(level),
+                    desc = thinkingLevelDesc(level),
+                    selected = thinkingLevel == level,
+                    enabled = true,
+                    isActive = false,
+                    onClick = { scope.launch { container.settingsRepository.setLocalThinkingLevel(level) } },
+                    showDivider = idx == LocalThinkingLevel.entries.size - 1,
+                )
+            }
+            Text(
+                if (deepThinking) {
+                    "仅在「深度思考模式」开启且使用本地模型时生效；自动档会按问题复杂度调整。"
+                } else {
+                    "仅在「深度思考模式」开启且使用本地模型时生效；当前未开启，可先选择留待启用时使用。"
+                },
+                color = scheme.onSurfaceVariant,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            )
+        }
+
         // ===== 后端选项 =====
         GlassListSection(title = "选择推理后端") {
             BackendPreference.entries.forEachIndexed { idx, entry ->
@@ -260,10 +324,7 @@ fun BackendSettingsScreen(
                 }
                 val selected = pref == entry
                 val desc = when (entry) {
-                    BackendPreference.AUTO -> when {
-                        mnnGpuReady -> "自动选择（GPU 优先，回退 CPU）"
-                        else -> "自动选择（回退 CPU）"
-                    }
+                    BackendPreference.AUTO -> autoSubtitle(activeModelClass, mnnGpuReady)
                     BackendPreference.MNN_CPU -> "兼容性最好，速度最慢"
                     BackendPreference.MNN_GPU -> if (mnnGpuReady) "MNN OpenCL GPU（.mnn 模型）" else "需 libMNN.so + OpenCL 运行时"
                     BackendPreference.MNN_NPU -> com.chatbyyourside.llm.backend.MnnSupportDetector.QNN_STANDARD_BUILD_UNAVAILABLE
@@ -383,7 +444,7 @@ fun BackendSettingsScreen(
                         }
                     }
                 }
-                Text("单次回复的 token 上限（约 1 token ≈ 0.6 汉字）。选「不限」则生成到模型自然结束（EOS）。改后下条消息即生效，无需重载。", color = scheme.onSurfaceVariant, fontSize = 10.sp)
+                Text("单次回复的总 token 上限；开启深度思考时，思考与最终答案共同使用该上限。选「不限」则生成到模型自然结束（EOS）。改后下条消息即生效，无需重载。", color = scheme.onSurfaceVariant, fontSize = 10.sp)
             }
         }
 
@@ -507,6 +568,90 @@ fun BackendSettingsScreen(
                 },
                 showDivider = true,
             )
+            // Task 15/16：CPU vs GPU prefill 对比基准（正式版高级诊断；确认后运行，不改设置）。
+            GlassListRow(
+                title = "CPU vs GPU prefill 基准",
+                subtitle = "同模型同参数分别测 CPU 与 GPU 的 LONG_PREFILL（各 1 预热 + 5 记录轮）：对照 prefill 吞吐与首字延迟（约数分钟，明显发热耗电，请保持前台；不改动已保存的后端设置）",
+                onClick = {
+                    if (prefillBenchRunning) return@GlassListRow
+                    prefillBenchConfirm = true
+                },
+                trailing = {
+                    if (prefillBenchRunning) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("运行", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                    }
+                },
+                showDivider = true,
+            )
+            prefillBenchOutcome?.let { outcome ->
+                GlassListRow(
+                    title = "最近一次 CPU/GPU prefill 对比",
+                    subtitle = when (outcome) {
+                        is PrefillBenchmarkOutcome.Done -> outcome.text
+                        is PrefillBenchmarkOutcome.Skipped -> outcome.reason
+                    },
+                    showDivider = true,
+                )
+            }
+            // Task 15/16：GPU 完整预热（仅当前模型 >7B 时可用；手动触发，加载模型 + 极短生成）。
+            val preheatEligible = activeModelClass == AutoBackendModelClass.GPU_ELIGIBLE
+            GlassListRow(
+                title = "GPU 完整预热",
+                subtitle = when {
+                    !mnnGpuReady -> "设备不支持 OpenCL GPU"
+                    !preheatEligible -> "仅对总参数量 >7B 的模型生效（当前模型默认 CPU，无需预热）"
+                    else -> "加载当前模型并执行一次极短 GPU 生成，预热 OpenCL 图/内核/缓存，降低首次出字延迟（不影响聊天记录与设置）"
+                },
+                onClick = {
+                    if (!preheatEligible || !mnnGpuReady || preheatRunning) return@GlassListRow
+                    preheatRunning = true
+                    scope.launch {
+                        val outcome = withContext(Dispatchers.IO) {
+                            try {
+                                runGpuPreheat(context, container, container.gpuPreheatCoordinator)
+                            } catch (ce: CancellationException) {
+                                throw ce
+                            } catch (e: Exception) {
+                                GpuPreheatCoordinator.PreheatResult.Skipped("预热异常：${e.message}")
+                            }
+                        }
+                        preheatOutcome = outcome
+                        preheatRunning = false
+                        when (outcome) {
+                            is GpuPreheatCoordinator.PreheatResult.Done ->
+                                Toast.makeText(context, "GPU 预热完成（${outcome.backend.displayName}）", Toast.LENGTH_SHORT).show()
+                            is GpuPreheatCoordinator.PreheatResult.Skipped ->
+                                Toast.makeText(context, outcome.reason, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                },
+                trailing = {
+                    if (preheatRunning) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else if (preheatEligible && mnnGpuReady) {
+                        Text("预热", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                    } else {
+                        Text("不可用", color = MaterialTheme.colorScheme.error, fontSize = 10.sp)
+                    }
+                },
+                showDivider = true,
+            )
+            preheatOutcome?.let { outcome ->
+                GlassListRow(
+                    title = "最近一次 GPU 预热",
+                    subtitle = when (outcome) {
+                        is GpuPreheatCoordinator.PreheatResult.Done ->
+                            "完成：实际后端 ${outcome.backend.displayName}" +
+                                (outcome.ttftMs?.let { "，TTFT ${it}ms" } ?: "") +
+                                (outcome.prefillMs?.let { "，prefill ${it}ms" } ?: "") +
+                                (outcome.loadMs?.let { "，加载 ${it}ms" } ?: "")
+                        is GpuPreheatCoordinator.PreheatResult.Skipped -> outcome.reason
+                    },
+                    showDivider = true,
+                )
+            }
             // final review I3（裁决：文档化延迟）：四象限归档与空回答可靠性验证无生产 UI 入口——
             // 由 CI/真机验收执行（本版本仅提供 Lookahead 认证基准入口）。此处仅说明，不新增入口。
             GlassListRow(
@@ -571,6 +716,49 @@ fun BackendSettingsScreen(
                 },
                 dismissButton = {
                     TextButton(onClick = { confirmResetCert = false }) { Text("取消") }
+                },
+            )
+        }
+
+        // CPU vs GPU prefill 基准确认框（Task 15/16）：耗时/发热/不改设置。
+        if (prefillBenchConfirm) {
+            AlertDialog(
+                onDismissRequest = { prefillBenchConfirm = false },
+                title = { Text("运行 CPU/GPU prefill 基准？") },
+                text = {
+                    Text(
+                        "将分别用 CPU 与 GPU 各测一轮长前缀填充基准（各 1 预热 + 5 记录轮），约需数分钟，期间设备会明显发热耗电。" +
+                            "请保持应用前台并先让设备降温。本操作不会修改已保存的后端设置。确定运行？",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        prefillBenchConfirm = false
+                        if (prefillBenchRunning) return@TextButton
+                        prefillBenchRunning = true
+                        scope.launch {
+                            val outcome = withContext(Dispatchers.IO) {
+                                try {
+                                    runPrefillCpuVsGpu(context, container, container.benchmarkRunner)
+                                } catch (ce: CancellationException) {
+                                    throw ce
+                                } catch (e: Exception) {
+                                    PrefillBenchmarkOutcome.Skipped("基准异常：${e.message}")
+                                }
+                            }
+                            prefillBenchOutcome = outcome
+                            prefillBenchRunning = false
+                            when (outcome) {
+                                is PrefillBenchmarkOutcome.Done ->
+                                    Toast.makeText(context, "CPU/GPU prefill 基准完成", Toast.LENGTH_SHORT).show()
+                                is PrefillBenchmarkOutcome.Skipped ->
+                                    Toast.makeText(context, outcome.reason, Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }) { Text("运行") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { prefillBenchConfirm = false }) { Text("取消") }
                 },
             )
         }
@@ -688,6 +876,68 @@ data class TurnDiagnosticRow(val label: String, val value: String)
  * 解析失败），开关可能仍然有效也可能无效；UNSUPPORTED 是「开关必然被忽略」，但也不等于模型不
  * 支持思考（可能无条件思考）。两者文案都只陈述能力事实。
  */
+/** 思考档位选项标题（纯函数，JVM 可测）。AUTO 明确标注为推荐默认。 */
+fun thinkingLevelTitle(level: LocalThinkingLevel): String = when (level) {
+    LocalThinkingLevel.AUTO -> "自动（推荐）"
+    LocalThinkingLevel.SHORT -> "短"
+    LocalThinkingLevel.MEDIUM -> "中"
+    LocalThinkingLevel.LONG -> "长"
+}
+
+/**
+ * 思考档位说明文案（纯函数，JVM 可测）。
+ *
+ * 描述档位的「软目标 + 硬预算」语义（Task 17）：软提示引导模型尽早收束；硬预算保证
+ * 思考段（`<think>` 起至 `</think>` 止）超过档位上限时自动截断并直接作答——「思考长度
+ * 设置」由此真正生效。token 数为估算（按 UTF-8 字节 ×4 换算中文 token）。
+ */
+fun thinkingLevelDesc(level: LocalThinkingLevel): String = when (level) {
+    LocalThinkingLevel.AUTO -> "按问题复杂度选择思考深度；思考超档位预算自动截断并直接作答"
+    LocalThinkingLevel.SHORT -> "只做必要核验；思考约 384 token 上限，超预算自动截断并直接作答"
+    LocalThinkingLevel.MEDIUM -> "平衡分析深度与响应速度；思考约 768 token 上限，超预算自动截断并直接作答"
+    LocalThinkingLevel.LONG -> "覆盖更多方案、边界与自检；思考约 1536 token 上限，超预算自动截断并直接作答"
+}
+
+/** 档位存储键 -> 中文标签（纯函数，JVM 可测）。 */
+fun thinkingLevelLabel(storageKey: String): String = when (storageKey) {
+    LocalThinkingLevel.AUTO.storageKey -> "自动"
+    LocalThinkingLevel.SHORT.storageKey -> "短"
+    LocalThinkingLevel.MEDIUM.storageKey -> "中"
+    LocalThinkingLevel.LONG.storageKey -> "长"
+    else -> storageKey
+}
+
+/** 复杂度枚举名 -> 中文标签（纯函数，JVM 可测）；未知原样保留。 */
+fun thinkingComplexityLabel(name: String?): String? = when (name) {
+    "SIMPLE" -> "简单"
+    "STANDARD" -> "标准"
+    "COMPLEX" -> "复杂"
+    else -> name
+}
+
+/**
+ * 思考档位策略行文案（纯函数，JVM 可测）。
+ * @return 两级列表：档位行 + 思考策略行；policy 为 null 时返回空列表。
+ */
+fun thinkingPolicyRows(policy: ThinkingPolicyTelemetry?): List<TurnDiagnosticRow> {
+    if (policy == null) return emptyList()
+    val levelText = if (policy.requestedLevel != policy.effectiveLevel) {
+        "${thinkingLevelLabel(policy.requestedLevel)} → ${thinkingLevelLabel(policy.effectiveLevel)}" +
+            (policy.complexity?.let { "（${thinkingComplexityLabel(it)}）" } ?: "")
+    } else {
+        thinkingLevelLabel(policy.effectiveLevel)
+    }
+    val control = if (policy.controlMode == "NATIVE_BUDGET") "原生预算" else "提示策略（未发现经验证的原生预算能力）"
+    return listOf(
+        TurnDiagnosticRow(label = "思考档位", value = levelText),
+        TurnDiagnosticRow(
+            label = "思考策略",
+            value = "约 ${policy.targetMinMs / 1000}–${policy.targetMaxMs / 1000} 秒软目标 · " +
+                "${policy.checkpointBudget} 个核验点 · $control · 单次生成，共享最大生成长度",
+        ),
+    )
+}
+
 fun templateCapabilityText(cap: ThinkingTemplateCapability?): String = when (cap) {
     ThinkingTemplateCapability.SUPPORTED -> "模板含思考分支（开关可生效）"
     ThinkingTemplateCapability.UNSUPPORTED -> "模板不含思考分支（开关无效）"
@@ -738,7 +988,47 @@ fun downgradeReasonText(reason: String): String = when (reason) {
     DowngradeReason.MEMORY.name -> "内存受限"
     DowngradeReason.BACKEND_UNAVAILABLE.name -> "后端不可用"
     DowngradeReason.UNSUPPORTED_SETTING.name -> "设置不再支持"
+    DowngradeReason.AUTO_MODEL_AT_OR_BELOW_7B_CPU.name -> "当前模型 ≤7B，AUTO 用 CPU（GPU 仅 >7B 启用）"
+    DowngradeReason.AUTO_MODEL_PARAMETERS_UNKNOWN_CPU.name -> "模型参数未知，AUTO 默认 CPU"
+    DowngradeReason.GPU_LOAD_FALLBACK.name -> "GPU 加载失败，回退 CPU"
+    DowngradeReason.GPU_GENERATION_FALLBACK.name -> "GPU 生成异常，回退 CPU"
+    LocalChatProvider.THINKING_BUDGET_TRUNCATED -> "思考超过档位预算，已截断并直接作答"
     else -> reason
+}
+
+/**
+ * AUTO 后端子标题（Task 15）：按当前模型大小分类展示是否默认 GPU。
+ * 纯函数，JVM 可测；与 [previewFallbackChain]、生产 resolver 的模型大小门禁同源。
+ */
+fun autoSubtitle(modelClass: AutoBackendModelClass, gpuReady: Boolean): String = when (modelClass) {
+    AutoBackendModelClass.GPU_ELIGIBLE -> if (gpuReady) {
+        "自动选择（GPU 优先，回退 CPU）"
+    } else {
+        "自动选择（GPU 未就绪，回退 CPU）"
+    }
+    AutoBackendModelClass.CPU_BELOW_OR_EQUAL_THRESHOLD -> "自动选择（当前模型 ≤7B，用 CPU）"
+    AutoBackendModelClass.CPU_UNKNOWN_PARAMETERS -> "自动选择（模型参数未知，默认 CPU）"
+}
+
+/**
+ * AUTO 的模型感知默认回退链预览（Task 15）。与 resolver 的模型大小门禁一致：
+ * AUTO 仅对严格 >7B 且 GPU 就绪时呈 GPU→CPU；小模型/未知模型恒 CPU。显式偏好不受门槛限制。
+ * 纯函数，JVM 可测。
+ */
+fun previewFallbackChain(
+    preference: BackendPreference,
+    modelClass: AutoBackendModelClass,
+    gpuReady: Boolean,
+): List<BackendType> = when (preference) {
+    BackendPreference.AUTO -> if (modelClass == AutoBackendModelClass.GPU_ELIGIBLE && gpuReady) {
+        listOf(BackendType.MNN_GPU, BackendType.MNN_CPU)
+    } else {
+        listOf(BackendType.MNN_CPU)
+    }
+    BackendPreference.MNN_GPU -> if (gpuReady) listOf(BackendType.MNN_GPU, BackendType.MNN_CPU) else listOf(BackendType.MNN_CPU)
+    BackendPreference.MNN_CPU -> listOf(BackendType.MNN_CPU)
+    // 标准构建不含 QNN：显式 NPU 也解析为 CPU（与 resolver 一致）。
+    BackendPreference.MNN_NPU -> listOf(BackendType.MNN_CPU)
 }
 
 /**
@@ -770,6 +1060,8 @@ fun diagnosticRows(
         label = "深度思考",
         value = thinkingStatusText(record.thinkingRequested, record.thinkingEffective, templateCapability),
     )
+    // Task 5：本地思考档位策略行（仅本地开启深度思考且有计划时存在）。
+    rows += thinkingPolicyRows(record.thinkingPolicy)
     val backend = record.backend?.displayName ?: "未知"
     val trace = if (record.attemptTrace.isEmpty()) "" else " · 尝试: ${record.attemptTrace.joinToString(" → ")}"
     rows += TurnDiagnosticRow(label = "实际后端", value = "$backend$trace")
@@ -777,6 +1069,15 @@ fun diagnosticRows(
         rows += TurnDiagnosticRow(
             label = "回退/降级",
             value = record.downgradeReasons.joinToString("；") { downgradeReasonText(it) },
+        )
+    }
+    // Task 15：内存准入的上下文降级（配置值 -> 实际值；未降级不显示该行）。
+    val configuredCtx = record.configuredContextTokens
+    val actualCtx = record.actualContextTokens
+    if (configuredCtx != null && actualCtx != null && configuredCtx != actualCtx) {
+        rows += TurnDiagnosticRow(
+            label = "上下文",
+            value = "$configuredCtx → $actualCtx（仅本次，未修改设置）",
         )
     }
     val timings = buildList {
@@ -794,6 +1095,7 @@ fun diagnosticRows(
 fun benchmarkSampleFrom(result: BenchmarkScenarioResult): BenchmarkSample = BenchmarkSample(
     decodeTpsMedian = result.summary.medianDecodeTps ?: 0f,
     ttftMsMedian = result.summary.medianTtftMs,
+    prefillTpsMedian = result.summary.medianPrefillTps,
     peakPssMb = result.summary.peakPssMb?.toFloat(),
     sampleCount = result.recordedSampleCount,
     hotStart = !result.coolRun,
@@ -948,4 +1250,120 @@ private suspend fun runLookaheadCertification(
         container.inferenceCertificationStore.save(it.options)
     }
     return decision
+}
+
+// ==========================================================================
+// Task 15/16：CPU vs GPU prefill 对比基准（正式版高级诊断）
+// ==========================================================================
+
+/** CPU/GPU prefill 基准结果（Done=成功摘要；Skipped=前置失败原因）。 */
+sealed interface PrefillBenchmarkOutcome {
+    data class Done(val text: String) : PrefillBenchmarkOutcome
+    data class Skipped(val reason: String) : PrefillBenchmarkOutcome
+}
+
+/**
+ * CPU/GPU prefill 对比摘要（纯函数，JVM 可测）。
+ *
+ * 展示两侧的 prefill 吞吐 / TTFT / decode 与**实际后端分布**（actualBackendCounts）——
+ * GPU 目标混入 CPU fallback 样本时如实标出，不冒充 GPU 性能。
+ */
+fun prefillComparisonText(cpu: BenchmarkScenarioResult, gpu: BenchmarkScenarioResult): String {
+    fun fmt(r: BenchmarkScenarioResult): String {
+        val prefill = r.summary.medianPrefillTps
+            ?.let { "prefill ${String.format(Locale.US, "%.1f", it)} tok/s" } ?: "prefill 无数据"
+        val ttft = r.summary.medianTtftMs
+            ?.let { "TTFT ${it.toInt()}ms" } ?: "TTFT 无数据"
+        val decode = r.summary.medianDecodeTps
+            ?.let { "decode ${String.format(Locale.US, "%.1f", it)} tok/s" } ?: "decode 无数据"
+        val backend = r.actualBackendCounts?.entries?.joinToString(" ") { "${it.key}=${it.value}" }
+            ?.let { " | 实际后端: $it" }.orEmpty()
+        val kv = r.summary.kvReuseRate?.let { " | KV复用率 ${String.format(Locale.US, "%.2f", it)}" }.orEmpty()
+        return "$prefill / $ttft / $decode$backend$kv"
+    }
+    return "CPU: ${fmt(cpu)}\nGPU: ${fmt(gpu)}"
+}
+
+/**
+ * 运行 CPU vs GPU prefill 对比（Task 15/16 编排；UI 入口在 IO 线程调用）。
+ *
+ * 流程：热/生成中/模型/GPU 支持前置检查 -> 用 [BenchmarkTarget] 显式目标分别跑 CPU 与 GPU 的
+ * LONG_PREFILL（各 1 预热 + 5 记录轮，**不改动持久化后端设置**）-> 汇总为
+ * [PrefillBenchmarkOutcome.Done]；任一侧零样本（含 GPU 全回退）如实 Skipped。
+ */
+private suspend fun runPrefillCpuVsGpu(
+    context: Context,
+    container: AppContainer,
+    runner: LocalInferenceBenchmarkRunner,
+): PrefillBenchmarkOutcome {
+    if (container.backendManager.isGenerating()) {
+        return PrefillBenchmarkOutcome.Skipped("当前有生成任务进行中，请稍后再试")
+    }
+    if (runner.isThermallyHot()) {
+        return PrefillBenchmarkOutcome.Skipped("设备过热，基准未执行（请降温后重试）")
+    }
+    if (!container.backendManager.mnnGpuSupported) {
+        return PrefillBenchmarkOutcome.Skipped("设备不支持 OpenCL GPU，无法对比")
+    }
+    val settings = container.settingsRepository
+    val snapshot = settings.getLocalInferenceSettingsNow()
+    val activeModelId = settings.getActiveLocalModelIdNow()
+    val modelPath = if (activeModelId.isNullOrBlank()) null else ModelPathResolver.getLoadPath(context, activeModelId)
+    if (activeModelId.isNullOrBlank() || modelPath == null) {
+        return PrefillBenchmarkOutcome.Skipped("未选择本地模型或模型文件缺失")
+    }
+    val deviceFingerprint = BackendHealthCoordinator.deviceFingerprintOf()
+    val configHash = DeviceRuntimeFingerprint.compute(
+        buildMap {
+            put("threads", snapshot.threads.toString())
+            put("contextLen", snapshot.contextLen.toString())
+            put("maxTokens", snapshot.maxTokens.toString())
+            put("mode", snapshot.performanceMode.storageKey)
+            put("deepThinking", snapshot.deepThinking.toString())
+        },
+    )
+    val cpu = runner.run(
+        scenario = InferenceBenchmarkScenario.LONG_PREFILL,
+        configFingerprint = configHash,
+        deviceFingerprint = deviceFingerprint,
+        warmupRounds = 1,
+        recordedRounds = 5,
+        target = BenchmarkTarget.CPU_OPTIMIZED,
+    )
+    if (cpu.recordedSampleCount == 0) {
+        return PrefillBenchmarkOutcome.Skipped("CPU 基准零样本（日志见上；剔除原因：${cpu.discardedReasons.joinToString("；")}）")
+    }
+    val gpu = runner.run(
+        scenario = InferenceBenchmarkScenario.LONG_PREFILL,
+        configFingerprint = configHash,
+        deviceFingerprint = deviceFingerprint,
+        warmupRounds = 1,
+        recordedRounds = 5,
+        target = BenchmarkTarget.OPENCL_GPU,
+    )
+    if (gpu.recordedSampleCount == 0) {
+        return PrefillBenchmarkOutcome.Skipped(
+            "GPU 基准零样本（可能 OpenCL 不可用或全量回退 CPU；剔除原因：${gpu.discardedReasons.joinToString("；")}）",
+        )
+    }
+    return PrefillBenchmarkOutcome.Done(prefillComparisonText(cpu, gpu))
+}
+
+/**
+ * 运行 GPU 完整预热（Task 15/16 编排；UI 入口在 IO 线程调用）。
+ *
+ * 前置（模型已选 + 文件存在）在此检查；健康 / 生成中守卫在 [GpuPreheatCoordinator.preheat] 内。
+ */
+private suspend fun runGpuPreheat(
+    context: Context,
+    container: AppContainer,
+    coordinator: GpuPreheatCoordinator,
+): GpuPreheatCoordinator.PreheatResult {
+    val settings = container.settingsRepository
+    val modelId = settings.getActiveLocalModelIdNow()
+    val modelPath = if (modelId.isNullOrBlank()) null else ModelPathResolver.getLoadPath(context, modelId)
+    if (modelId.isNullOrBlank() || modelPath == null) {
+        return GpuPreheatCoordinator.PreheatResult.Skipped("未选择本地模型或模型文件缺失")
+    }
+    return coordinator.preheat(modelId, modelPath)
 }

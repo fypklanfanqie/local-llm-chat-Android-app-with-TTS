@@ -656,7 +656,14 @@ class ChatViewModel(
                 val history = container.chatRepository.getHistory(convId).takeLast(AppConfig.MAX_CONTEXT_MESSAGES)
                 val resolvedHistory = history.map { msg ->
                     if (msg.role == "user" && (msg.images.isNotEmpty() || msg.files.isNotEmpty())) {
-                        resolveMultimodalMessage(msg)
+                        // 仅本次发送的消息严格解析（可操作错误照常上抛让用户看到）；
+                        // 历史消息的附件解析失败（旧会话带图/文件后切换了非多模态模型等）静默降级为
+                        // 纯文本，绝不误报「需多模态模型」、绝不阻塞本次发送。
+                        if (msg.databaseId == userMsgId) {
+                            resolveMultimodalMessage(msg)
+                        } else {
+                            resolveHistoryAttachmentLenient(msg)
+                        }
                     } else {
                         msg
                     }
@@ -1018,6 +1025,16 @@ class ChatViewModel(
         return msg.copy(content = newContent, multimodalImages = multimodalImages)
     }
 
+    /** 历史消息附件宽容解析：任何失败（取消除外）降级为纯文本，绝不阻塞本次发送。 */
+    private suspend fun resolveHistoryAttachmentLenient(msg: ChatMessage): ChatMessage =
+        try {
+            resolveMultimodalMessage(msg)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            msg.copy(multimodalImages = emptyList())
+        }
+
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
     }
@@ -1046,8 +1063,11 @@ class ChatViewModel(
                 _uiState.update { it.copy(ttsLoadingIndex = it.messages.indexOf(message), showSwitchSubtitle = false) }
                 val cleanText = container.ttsManager.cleanTtsText(message.content)
                 val lang = container.settingsRepository.getTtsLanguageNow()
+                val engine = container.settingsRepository.getTtsEngineNow()
 
-                val speakText = if (lang == TtsLanguage.JA) {
+                // 日语：仅云端引擎走 LLM 翻译；系统引擎直接朗读原文（设备无日语语音时由引擎报清晰错误），
+                // 避免为系统 TTS 白白消耗一次翻译调用。
+                val speakText = if (lang == TtsLanguage.JA && engine == TtsEngine.CLOUD) {
                     // 日语 -> 翻译
                     try {
                         translateToJapanese(cleanText)

@@ -15,6 +15,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -35,6 +36,64 @@ const val CANCEL_ENDPOINT_VERIFIED = true
 
 /** Seedance 任务集合接口路径后缀（POST 创建任务的相对路径）。 */
 internal const val SEEDANCE_TASKS_SUFFIX = "/contents/generations/tasks"
+
+/** 中转站媒体协议单张参考图（base64 解码后）大小上限（10MB，对齐中转站文档）。 */
+internal const val MEDIA_REFERENCE_MAX_BYTES = 10L * 1024 * 1024
+
+/** 中转站媒体协议缺省模型 ID（dm1124/灵科 Seedance 2.0 参考生视频）。 */
+internal const val DEFAULT_RELAY_MODEL_ID = "kwvideo-v2-ref"
+
+/**
+ * Seedance 服务端协议：
+ *  - [ARK]：火山方舟官方 contents/generations/tasks；
+ *  - [MEDIA_RELAY]：中转站媒体协议 POST /v1/media/generate + GET /v1/media/status。
+ */
+internal enum class SeedanceProtocol { ARK, MEDIA_RELAY }
+
+/**
+ * 依据「服务地址」形态识别协议：
+ *  - 路径含 `/media/generate` → 媒体协议（中转站完整「创建任务」地址）；
+ *  - 已知中转站主机（api.lk888.ai / api.lingkeai.ai / dm1124.com / lingkeai 系）且路径为空或 `/v1` → 媒体协议；
+ *  - 其余（官方 base、任意完整资源路径）→ 方舟协议，行为与旧版完全一致。
+ */
+internal fun seedanceProtocolFor(baseUrl: String): SeedanceProtocol {
+    val trimmed = baseUrl.trim().trimEnd('/')
+    if (trimmed.isEmpty()) return SeedanceProtocol.ARK
+    val afterScheme = trimmed.substringAfter("://", "")
+    val host = afterScheme.substringBefore('/').lowercase()
+    val path = afterScheme.substringAfter('/', "").trim('/')
+    if ("/$path".contains("/media/generate")) return SeedanceProtocol.MEDIA_RELAY
+    val bareOrV1 = path.isBlank() || path == "v1"
+    if (bareOrV1 && host in MEDIA_RELAY_HOSTS) return SeedanceProtocol.MEDIA_RELAY
+    return SeedanceProtocol.ARK
+}
+
+/** 已知中转站主机（仅当路径为空或 `/v1` 时判为媒体协议，避免误伤自建方舟网关）。 */
+private val MEDIA_RELAY_HOSTS = setOf(
+    "api.lk888.ai", "api.lingkeai.ai", "dm1124.com",
+    "lingkeai.vip", "www.lingkeai.vip",
+)
+
+/**
+ * 归一化中转站「创建任务」接口地址（媒体协议）：
+ *  - 已含 `/media/generate` 的完整地址原样使用；
+ *  - 裸主机或 `/v1` 自动补 `/v1/media/generate`；
+ *  - 其它带路径地址原样使用（调用方负责保证其正确）。
+ */
+internal fun resolveMediaGenerateEndpoint(baseUrl: String): String {
+    val trimmed = baseUrl.trim().trimEnd('/')
+    if (trimmed.isEmpty()) return trimmed
+    if (trimmed.contains("/media/generate")) return trimmed
+    val scheme = trimmed.substringBefore("://", "").ifBlank { "https" }
+    val afterScheme = if (trimmed.contains("://")) trimmed.substringAfter("://") else trimmed
+    val host = afterScheme.substringBefore('/')
+    val path = afterScheme.substringAfter('/', "").trim('/')
+    return if (path.isBlank() || path == "v1") "$scheme://$host/v1/media/generate" else trimmed
+}
+
+/** 归一化中转站「任务状态查询」接口地址：由创建地址把 `/media/generate` 替换为 `/media/status`。 */
+internal fun resolveMediaStatusEndpoint(baseUrl: String): String =
+    resolveMediaGenerateEndpoint(baseUrl).replace("/media/generate", "/media/status")
 
 /**
  * 归一化用户填写的“服务地址”为任务集合接口地址。
@@ -132,6 +191,9 @@ class SeedanceClient(
 
     /** 提交创建任务。请求体不含 fps/seed/camera；`generate_audio` 恒为 true。 */
     suspend fun createTask(config: SeedanceConfig, request: CreateSeedanceTask): SeedanceTaskResponse {
+        if (seedanceProtocolFor(config.baseUrl) == SeedanceProtocol.MEDIA_RELAY) {
+            return createMediaTask(config, request)
+        }
         val body = json.encodeToString(CreateSeedanceTaskRequest.serializer(), buildCreateRequest(config, request))
         val httpRequest = Request.Builder()
             .url(resolveSeedanceTaskCollectionEndpoint(config.baseUrl))
@@ -144,6 +206,9 @@ class SeedanceClient(
 
     /** 查询任务状态/结果。 */
     suspend fun getTask(config: SeedanceConfig, taskId: String): SeedanceTaskResponse {
+        if (seedanceProtocolFor(config.baseUrl) == SeedanceProtocol.MEDIA_RELAY) {
+            return getMediaTask(config, taskId)
+        }
         val httpRequest = Request.Builder()
             .url(resolveSeedanceTaskEndpoint(config.baseUrl, taskId))
             .header("Authorization", "Bearer ${config.apiKey}")
@@ -156,8 +221,13 @@ class SeedanceClient(
      * 取消排队中的任务（官方 DELETE）。
      *
      * 仅远端状态为 queued 时才有取消语义；成功返回空体时合成 [SeedanceRemoteStatus.CANCELLED]。
+     * 中转站媒体协议未提供取消端点：抛 [UnsupportedOperationException]，
+     * 由协调器兜底转为继续轮询（以服务端状态为准）。
      */
     suspend fun cancelQueuedTask(config: SeedanceConfig, taskId: String): SeedanceTaskResponse {
+        if (seedanceProtocolFor(config.baseUrl) == SeedanceProtocol.MEDIA_RELAY) {
+            throw UnsupportedOperationException("media relay does not support task cancellation")
+        }
         val httpRequest = Request.Builder()
             .url(resolveSeedanceTaskEndpoint(config.baseUrl, taskId))
             .header("Authorization", "Bearer ${config.apiKey}")
@@ -172,6 +242,193 @@ class SeedanceClient(
         }
     }
 
+    // ===== 中转站媒体协议（POST /v1/media/generate + GET /v1/media/status）=====
+
+    /** 媒体协议：提交创建任务，解析 `data.task_id`（数字/字符串兼容）。 */
+    private suspend fun createMediaTask(
+        config: SeedanceConfig,
+        request: CreateSeedanceTask,
+    ): SeedanceTaskResponse {
+        val body = json.encodeToString(MediaGenerateRequest.serializer(), buildMediaCreateRequest(config, request))
+        val httpRequest = Request.Builder()
+            .url(resolveMediaGenerateEndpoint(config.baseUrl))
+            .header("Authorization", "Bearer ${config.apiKey}")
+            .header("Content-Type", "application/json")
+            .post(body.toRequestBody(jsonMediaType))
+            .build()
+        return withContext(Dispatchers.IO) {
+            val call = client.newCall(httpRequest)
+            val handle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+            try {
+                call.execute().use { response ->
+                    val requestId = extractRequestId(response)
+                    val raw = response.body?.string().orEmpty()
+                    val httpOk = response.isSuccessful
+                    val wrapper = parseMediaCreateResponse(raw)
+                    // 业务码（HTTP 2xx 时以包装 code 为准）：code != 200 → 明确失败，绝不重发。
+                    val businessCode = wrapper?.numericCode
+                    if (httpOk && businessCode != null && businessCode != 200) {
+                        val (remoteCode, remoteMessage) = parseErrorBody(raw)
+                        // 创建阶段的业务失败是终局性的（余额不足/参数错误等），以消息标记词分类
+                        // （追加原始体截断文本，覆盖 `data.失败原因` 等嵌套字段）；仅 429 视为瞬时繁忙
+                        // （协调器同样不会自动重发，只影响文案）。
+                        val classification = if (businessCode == 429) {
+                            SeedanceError.TRANSIENT_429_5XX
+                        } else {
+                            classifySeedanceError(null, remoteCode, "$remoteMessage ${raw.take(2000)}")
+                        }
+                        Log.w(TAG, "seedance media create error http=200 businessCode=$businessCode classification=$classification")
+                        throw SeedanceApiException(
+                            classification = classification,
+                            message = humanReadableMessage(classification, businessCode),
+                            httpStatus = businessCode,
+                            remoteCode = remoteCode,
+                            requestId = requestId,
+                            taskId = null,
+                        )
+                    }
+                    if (!httpOk) {
+                        throw buildApiError(response.code, raw, requestId, null, response.retryAfterMillis())
+                    }
+                    val taskId = wrapper?.taskId
+                    if (taskId.isNullOrBlank()) {
+                        // 成功但未返回任务 ID：返回空响应，由协调器按歧义处理（可能已产生费用）。
+                        SeedanceTaskResponse(requestId = requestId)
+                    } else {
+                        // 创建成功即进入排队；合成 queued 驱动协调器转入轮询阶段。
+                        SeedanceTaskResponse(id = taskId, status = SeedanceRemoteStatus.QUEUED.storageKey, requestId = requestId)
+                    }
+                }
+            } catch (e: IOException) {
+                coroutineContext.ensureActive()
+                Log.w(TAG, "seedance media create network error")
+                throw SeedanceApiException(
+                    classification = SeedanceError.AMBIGUOUS_TRANSPORT,
+                    message = "网络错误，无法确认任务状态：${e.message ?: "请求失败"}",
+                    taskId = null,
+                    cause = e,
+                )
+            } finally {
+                handle?.dispose()
+                call.cancel()
+            }
+        }
+    }
+
+    /** 媒体协议：轮询任务状态（GET /v1/media/status?task_id=...）。 */
+    private suspend fun getMediaTask(config: SeedanceConfig, taskId: String): SeedanceTaskResponse {
+        val base = resolveMediaStatusEndpoint(config.baseUrl)
+        val url = base.toHttpUrlOrNull()
+            ?.newBuilder()
+            ?.addQueryParameter("task_id", taskId)
+            ?.build()
+            ?.toString()
+            ?: "$base?task_id=$taskId"
+        val httpRequest = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer ${config.apiKey}")
+            .get()
+            .build()
+        return withContext(Dispatchers.IO) {
+            val call = client.newCall(httpRequest)
+            val handle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+            try {
+                call.execute().use { response ->
+                    val requestId = extractRequestId(response)
+                    val raw = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        throw buildApiError(response.code, raw, requestId, taskId, response.retryAfterMillis())
+                    }
+                    parseMediaStatusOrThrow(raw, response.code, requestId, taskId)
+                }
+            } catch (e: IOException) {
+                coroutineContext.ensureActive()
+                Log.w(TAG, "seedance media status network error taskId=$taskId")
+                throw SeedanceApiException(
+                    classification = SeedanceError.AMBIGUOUS_TRANSPORT,
+                    message = "网络错误，无法确认任务状态：${e.message ?: "请求失败"}",
+                    taskId = taskId,
+                    cause = e,
+                )
+            } finally {
+                handle?.dispose()
+                call.cancel()
+            }
+        }
+    }
+
+    /** 解析媒体协议创建响应包装；非 JSON / 空体返回 null（由调用方按歧义/错误处理）。 */
+    private fun parseMediaCreateResponse(raw: String): MediaCreateResponse? {
+        if (raw.isBlank()) return null
+        return runCatching { json.decodeFromString(MediaCreateResponse.serializer(), raw) }.getOrNull()
+    }
+
+    /** 解析媒体协议状态响应；无任务字段时按错误包装分类抛出。 */
+    private fun parseMediaStatusOrThrow(
+        raw: String,
+        httpStatus: Int,
+        requestId: String?,
+        taskId: String?,
+    ): SeedanceTaskResponse {
+        if (raw.isBlank()) return SeedanceTaskResponse()
+        val payload: JsonObject = try {
+            val obj = json.parseToJsonElement(raw).jsonObject
+            if (obj["state"] != null) obj else (obj["data"] as? JsonObject) ?: obj
+        } catch (e: Exception) {
+            return SeedanceTaskResponse()
+        }
+        val status = runCatching { json.decodeFromJsonElement(MediaTaskStatus.serializer(), payload) }.getOrNull()
+        if (status != null && (status.state != null || status.taskId != null)) {
+            return mapMediaStatusToTaskResponse(status, requestId)
+        }
+        // 无任务字段：HTTP 2xx 下的错误包装（如「任务不存在」）。以包装 code 为有效状态码分类。
+        val (remoteCode, remoteMessage) = parseErrorBody(raw)
+        val wrapper = parseMediaCreateResponse(raw)
+        val effectiveStatus = wrapper?.numericCode ?: httpStatus
+        val classification = classifySeedanceError(effectiveStatus, remoteCode, remoteMessage)
+        val finalClassification =
+            if (classification == SeedanceError.OTHER) SeedanceError.NOT_FOUND else classification
+        Log.w(TAG, "seedance media status error taskId=$taskId effectiveStatus=$effectiveStatus classification=$finalClassification")
+        throw SeedanceApiException(
+            classification = finalClassification,
+            message = humanReadableMessage(finalClassification, effectiveStatus),
+            httpStatus = effectiveStatus,
+            remoteCode = remoteCode,
+            requestId = requestId,
+            taskId = taskId,
+        )
+    }
+
+    /** 媒体协议创建请求：立绘+背景进 `params.images`，标准/Fast 映射「标准/快速」，P4K 映射「4K」。 */
+    private fun buildMediaCreateRequest(config: SeedanceConfig, request: CreateSeedanceTask): MediaGenerateRequest {
+        val images = buildList {
+            add(request.character.toDataUrl())
+            request.background?.let { add(it.toDataUrl()) }
+        }
+        return MediaGenerateRequest(
+            model = config.relayModelId.ifBlank { DEFAULT_RELAY_MODEL_ID },
+            prompt = request.finalPrompt,
+            params = MediaGenerateParams(
+                images = images,
+                version = when (request.variant) {
+                    SeedanceModelVariant.STANDARD -> "标准"
+                    SeedanceModelVariant.FAST -> "快速"
+                },
+                duration = request.durationSeconds.toString(),
+                aspectRatio = request.ratio.apiValue,
+                resolution = mediaResolutionValue(request.resolution),
+            ),
+        )
+    }
+
+    /** 媒体协议分辨率映射：4K 为大写 K（与方舟协议的 "4k" 不同）。 */
+    private fun mediaResolutionValue(resolution: SeedanceResolution): String = when (resolution) {
+        SeedanceResolution.P480 -> "480p"
+        SeedanceResolution.P720 -> "720p"
+        SeedanceResolution.P1080 -> "1080p"
+        SeedanceResolution.P4K -> "4K"
+    }
+
     /**
      * 探测“服务地址”是否可达且路径正确（设置页「测试连接」用）。
      *
@@ -183,11 +440,20 @@ class SeedanceClient(
      *  - 404/405 且响应体为 JSON → 路径正确（对不存在任务的预期返回）；
      *  - 404/405 且响应体非 JSON（网关 HTML 页）→ 路径可能不正确；
      *  - 连接/IO 错误 → 地址不可达。
+     * 媒体协议地址探测 GET `/v1/media/status?task_id=__probe__`；方舟探测 GET 任务详情。
      */
     suspend fun probeEndpoint(config: SeedanceConfig): SeedanceProbeResult = withContext(Dispatchers.IO) {
         val probeId = "__seedance_probe_check__"
+        val media = seedanceProtocolFor(config.baseUrl) == SeedanceProtocol.MEDIA_RELAY
+        val base = if (media) resolveMediaStatusEndpoint(config.baseUrl) else resolveSeedanceTaskEndpoint(config.baseUrl, probeId)
+        val url = if (media) {
+            base.toHttpUrlOrNull()?.newBuilder()?.addQueryParameter("task_id", probeId)?.build()?.toString()
+                ?: "$base?task_id=$probeId"
+        } else {
+            base
+        }
         val httpRequest = Request.Builder()
-            .url(resolveSeedanceTaskEndpoint(config.baseUrl, probeId))
+            .url(url)
             .header("Authorization", "Bearer ${config.apiKey}")
             .get()
             .build()
@@ -211,9 +477,12 @@ class SeedanceClient(
                         if (jsonBody) {
                             SeedanceProbeResult.Ok("接口可达，路径正确（HTTP $status 为探测任务的预期返回）")
                         } else {
-                            SeedanceProbeResult.Failed(
-                                "接口可达，但路径可能不正确（HTTP $status）：请粘贴中转站完整的「创建任务」接口地址（如 https://xxx/v1/media/generate），不要只填主机或 /v1"
-                            )
+                            val hint = if (media) {
+                                "中转站地址请填写完整「创建任务」接口（如 https://api.lk888.ai/v1/media/generate），或直接填该站点主机"
+                            } else {
+                                "官方地址填 base（含 /api/v3）；中转站请粘贴完整的「创建任务」接口地址（如 https://xxx/v1/media/generate），不要只填主机或 /v1"
+                            }
+                            SeedanceProbeResult.Failed("接口可达，但路径可能不正确（HTTP $status）：$hint")
                         }
                     }
                     else -> SeedanceProbeResult.Failed("接口可达，但返回 HTTP $status，请检查服务地址")
@@ -322,7 +591,7 @@ class SeedanceClient(
         }
     }
 
-    /** 从错误体提取 (code, message)，非 JSON 或缺失时回落 null。 */
+    /** 从错误体提取 (code, message)，非 JSON 或缺失时回落 null。兼容 `{code,msg}` 与 `{error:{code,message}}`。 */
     private fun parseErrorBody(raw: String): Pair<String?, String?> {
         if (raw.isBlank()) return null to null
         return try {
@@ -337,7 +606,7 @@ class SeedanceClient(
                 else -> null
             }
             (code ?: obj["code"]?.jsonPrimitive?.contentOrNull) to
-                (message ?: obj["message"]?.jsonPrimitive?.contentOrNull)
+                (message ?: obj["message"]?.jsonPrimitive?.contentOrNull ?: obj["msg"]?.jsonPrimitive?.contentOrNull)
         } catch (e: Exception) {
             null to null
         }
@@ -363,7 +632,7 @@ class SeedanceClient(
             SeedanceError.AUTH -> "Seedance API Key 无效或未授权"
             SeedanceError.INVALID_PARAMETER -> "请求参数不合法，请调整生成设置"
             SeedanceError.BAD_ENDPOINT ->
-                "服务地址或路径可能不正确（HTTP $httpStatus）：官方 base 会自动补 /contents/generations/tasks；中转站请粘贴完整的「创建任务」接口地址（如 https://xxx/v1/media/generate）"
+                "服务地址或路径可能不正确（HTTP $httpStatus）：官方 base 会自动补 /contents/generations/tasks；中转站请粘贴完整的「创建任务」接口地址（如 https://api.lk888.ai/v1/media/generate）"
             SeedanceError.NOT_FOUND ->
                 "模型或任务不存在（HTTP $httpStatus）：请检查模型 ID 是否可用，以及 API Key 与所选区域是否匹配（火山方舟 / BytePlus / 中转站）"
             SeedanceError.MODEL_NOT_OPEN ->

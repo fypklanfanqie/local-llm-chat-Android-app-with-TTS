@@ -9,8 +9,11 @@ import com.chatbyyourside.data.remote.CreateSeedanceTask
 import com.chatbyyourside.data.remote.SeedanceApiException
 import com.chatbyyourside.data.remote.SeedanceError
 import com.chatbyyourside.data.remote.SeedanceImageContent
+import com.chatbyyourside.data.remote.SeedanceProtocol
 import com.chatbyyourside.data.remote.SeedanceRemoteStatus
 import com.chatbyyourside.data.remote.SeedanceTaskResponse
+import com.chatbyyourside.data.remote.MEDIA_REFERENCE_MAX_BYTES
+import com.chatbyyourside.data.remote.seedanceProtocolFor
 import com.chatbyyourside.data.repository.SeedanceVideoRepository
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
@@ -127,14 +130,31 @@ fun interface SeedanceSnapshotSourceResolver {
     suspend fun resolve(task: SeedanceVideo): SeedanceSnapshotSources?
 }
 
-/** 参考图编码：内部文件路径 + MIME -> base64 图片内容。 */
+/**
+ * 参考图编码：内部文件路径 + MIME -> base64 图片内容。
+ * [maxBytes] 为单张图片（base64 解码后）字节上限，由调用方按协议传入
+ * （方舟 30MB；中转站媒体协议 10MB）。实现须保证返回内容不超过该上限（必要时重编码压缩）。
+ */
 fun interface SeedanceImageEncoder {
-    suspend fun encode(path: String, mime: String): SeedanceImageContent
+    suspend fun encode(path: String, mime: String, maxBytes: Long): SeedanceImageContent
 }
 
 /** 提示词生成（= [SeedancePromptGenerator.generate] 的窄化签名）。 */
 fun interface SeedancePromptProvider {
     suspend fun generate(apiConfig: ApiConfig, input: SeedancePromptInput): SeedancePromptDocument
+}
+
+/**
+ * 前情对话提供者：按会话取最近若干条消息，格式化为纯文本（不含本次已入参的用户发言/角色回复）。
+ * 供提示词生成器理解对话上下文；取不到/出错时返回空串即可，绝不让历史读取阻塞视频流水线。
+ */
+fun interface SeedanceConversationContextProvider {
+    suspend fun recentDialogue(
+        conversationId: Long,
+        currentUserText: String,
+        currentAssistantText: String,
+        maxTurns: Int,
+    ): String
 }
 
 /** 提交歧义错误码（POST 可能已到服务端但未持久化任务 ID，绝不自动重发）。 */
@@ -150,6 +170,9 @@ private const val URL_TTL_MILLIS = 24 * 60 * 60_000L
 
 /** SUBMITTING 残留判定阈值：超过该时长未完成即视为中断，可复位为 FAILED_SUBMISSION（歧义）。 */
 private const val SUBMISSION_STALE_THRESHOLD_MS = 5 * 60_000L
+
+/** 提示词生成时注入的「前情对话」消息条数上限（不含本次用户/助手消息）。 */
+private const val MAX_PROMPT_CONTEXT_TURNS = 8
 
 private const val STAGE_SNAPSHOT = "SNAPSHOT"
 private const val STAGE_PROMPT = "PROMPT"
@@ -176,6 +199,7 @@ class SeedancePipelineCoordinator(
     private val store: SeedancePipelineStore,
     private val submitter: SeedanceSubmitter,
     private val promptProvider: SeedancePromptProvider,
+    private val conversationContextProvider: SeedanceConversationContextProvider,
     private val snapshooter: SeedanceReferenceSnapshooter,
     private val resolveSnapshotSources: SeedanceSnapshotSourceResolver,
     private val downloadVideo: SeedanceVideoDownloader,
@@ -309,18 +333,31 @@ class SeedancePipelineCoordinator(
         return PipelineOutcome.Reschedule(0)
     }
 
-    private fun buildPromptInput(task: SeedanceVideo): SeedancePromptInput = SeedancePromptInput(
-        characterName = task.characterNameSnapshot,
-        characterRole = task.characterRoleSnapshot,
-        characterSystemPrompt = task.characterSystemPromptSnapshot,
-        userText = task.userTextSnapshot,
-        assistantText = task.assistantTextSnapshot,
-        sceneDescription = task.sceneDescriptionSnapshot,
-        variant = task.modelVariant,
-        resolution = task.resolution,
-        ratio = task.ratio,
-        durationSeconds = task.durationSeconds,
-    )
+    private suspend fun buildPromptInput(task: SeedanceVideo): SeedancePromptInput {
+        // 前情对话仅作上下文；提供者失败（库不可用/IO 异常）绝不能阻塞视频流水线，静默降级为空。
+        val recentContext = runCatching {
+            conversationContextProvider.recentDialogue(
+                conversationId = task.sourceConversationId,
+                currentUserText = task.userTextSnapshot,
+                currentAssistantText = task.assistantTextSnapshot,
+                maxTurns = MAX_PROMPT_CONTEXT_TURNS,
+            )
+        }.getOrDefault("")
+        return SeedancePromptInput(
+            characterName = task.characterNameSnapshot,
+            characterRole = task.characterRoleSnapshot,
+            characterSystemPrompt = task.characterSystemPromptSnapshot,
+            userText = task.userTextSnapshot,
+            assistantText = task.assistantTextSnapshot,
+            sceneDescription = task.sceneDescriptionSnapshot,
+            hasBackgroundReference = !task.backgroundImageSourceSnapshot.isNullOrBlank(),
+            recentContext = recentContext,
+            variant = task.modelVariant,
+            resolution = task.resolution,
+            ratio = task.ratio,
+            durationSeconds = task.durationSeconds,
+        )
+    }
 
     // ===== 提交 =====
 
@@ -370,12 +407,18 @@ class SeedancePipelineCoordinator(
 
         // 参考图编码 + 请求构造与提交放入同一段受控流程：编码抛异常（参考图缺失/不可读）
         // 时转 FAILED_SUBMISSION/SNAPSHOT 等待用户，而不是把任务留在 SUBMITTING 直到下次重启。
+        // 单图字节预算按协议传入：方舟 30MB；中转站媒体协议 10MB（其文档的单文件上限）。
+        val imageBudget = if (seedanceProtocolFor(config.baseUrl) == SeedanceProtocol.MEDIA_RELAY) {
+            MEDIA_REFERENCE_MAX_BYTES
+        } else {
+            REFERENCE_MAX_BYTES
+        }
         val request = try {
             CreateSeedanceTask(
                 finalPrompt = finalPrompt,
-                character = encoder.encode(charPath, charMime),
+                character = encoder.encode(charPath, charMime, imageBudget),
                 background = task.backgroundImagePath?.takeIf { it.isNotBlank() }?.let { path ->
-                    encoder.encode(path, task.backgroundImageMime ?: charMime)
+                    encoder.encode(path, task.backgroundImageMime ?: charMime, imageBudget)
                 },
                 variant = task.modelVariant,
                 resolution = task.resolution,
@@ -544,7 +587,8 @@ class SeedancePipelineCoordinator(
             SeedanceRemoteStatus.FAILED -> {
                 store.transition(task.id, task.state, SeedanceVideoState.FAILED_REMOTE) {
                     it.withRemote().copy(errorStage = STAGE_REMOTE, errorCode = "REMOTE_FAILED",
-                        errorMessage = "远端视频生成失败", retryDisposition = "manual")
+                        errorMessage = sanitizeRemoteError(response.error?.message) ?: "远端视频生成失败",
+                        retryDisposition = "manual")
                 }
                 PipelineOutcome.WaitingForUser
             }
@@ -687,4 +731,19 @@ internal fun newAttemptId(now: Long): String =
 private fun sha256Hex(bytes: ByteArray): String {
     val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
     return digest.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+}
+
+/**
+ * 远端失败文案净化：剔除可能泄露的签名 URL 与内联数据，长度截断 200 字符。
+ * 净化后为空返回 null（调用方回退固定文案）。绝不透传服务端原始消息。
+ */
+private fun sanitizeRemoteError(raw: String?): String? {
+    if (raw.isNullOrBlank()) return null
+    val cleaned = raw
+        .replace(Regex("https?://\\S+"), "[链接]")
+        .replace(Regex("data:[^\\s,;}\"']+"), "[数据]")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        .take(200)
+    return cleaned.takeIf { it.isNotBlank() }
 }

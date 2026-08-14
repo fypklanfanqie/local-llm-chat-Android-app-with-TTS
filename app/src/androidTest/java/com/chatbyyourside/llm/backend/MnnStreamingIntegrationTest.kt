@@ -160,6 +160,12 @@ class MnnStreamingIntegrationTest {
             coldLoadMs = null,
             warmLoadMs = null,
             decodeStepTokens = decodeStepTokens,
+            thinkingRequested = null,
+            templateCapability = null,
+            thinkingClassifier = null,
+            thinkingPolicy = null,
+            configuredContextTokens = null,
+            actualContextTokens = null,
         )
     }
 

@@ -40,6 +40,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 class MainActivity : ComponentActivity() {
 
+    /** 本 Activity 注入给 [CpuBoostController] 的 sustained setter；onDestroy 按引用相等清除，
+     *  防止 Application 单例长期持有旧 Activity 的 Window（配置变更重建时的内存泄漏）。 */
+    private var sustainedModeSetter: ((Boolean) -> Unit)? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -98,11 +102,13 @@ class MainActivity : ComponentActivity() {
 
         // CPU 提频（非 root 路线，Task 8）：sustained mode 改为**生成级**——仅 MAXIMUM_SPEED 本地推理
         // 期间经 CpuBoostController 开启，finally/close 恢复；Balanced 永不开启。此处只注入 window setter。
-        app.container.cpuBoostController.sustainedModeSetter = { enabled ->
+        val setter: (Boolean) -> Unit = { enabled ->
             runCatching { window.setSustainedPerformanceMode(enabled) }
                 .onFailure { android.util.Log.w("MainActivity", "setSustainedPerformanceMode($enabled) failed: ${it.message}") }
                 .onSuccess { android.util.Log.i("MainActivity", "SustainedPerformanceMode=$enabled") }
         }
+        sustainedModeSetter = setter
+        app.container.cpuBoostController.sustainedModeSetter = setter
 
         setContent {
             // 主题模式：用户可强制浅色/深色，或跟随系统。
@@ -156,6 +162,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        // 清除本 Activity 注入的 sustained setter：按引用相等清除，配置变更重建时不会误清新 Activity
+        // 的注入（旧 Activity onDestroy 晚于新 Activity onCreate）。避免 Application 单例持有旧 Window。
+        (application as ChatApp).container.cpuBoostController.clearSustainedModeSetter(sustainedModeSetter)
+        sustainedModeSetter = null
         super.onDestroy()
         // 仅在真正退出（isFinishing）时释放音频播放器；配置变更（旋转等）会重建 Activity，
         // 此时 isFinishing=false，不释放以避免中断后台音乐。AudioManager.release 会置空

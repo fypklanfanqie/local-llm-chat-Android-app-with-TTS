@@ -1,6 +1,7 @@
 package com.chatbyyourside.llm.backend
 
 import android.test.mock.MockContext
+import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.GenerationExecutionControl
@@ -16,6 +17,7 @@ import com.chatbyyourside.llm.profile.ResolvedInferencePlan
 import com.chatbyyourside.llm.profile.RuntimeVariant
 import com.chatbyyourside.llm.template.ThinkingOutputClassifier
 import com.chatbyyourside.llm.template.ThinkingTemplateCapability
+import com.chatbyyourside.llm.thinking.ThinkingPolicyTelemetry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -56,6 +58,7 @@ class BackendManagerPlanTest {
         topP = 0.9f,
         repeatPenalty = 1.2f,
         openclHealth = openclHealth,
+        modelClass = AutoBackendModelClass.GPU_ELIGIBLE,
     )
 
     @Test
@@ -207,6 +210,9 @@ class BackendManagerOutputPolicyFallbackTest {
             thinkingRequested: Boolean?,
             templateCapability: String?,
             thinkingClassifier: ThinkingOutputClassifier?,
+            thinkingPolicy: ThinkingPolicyTelemetry?,
+            configuredContextTokens: Int?,
+            actualContextTokens: Int?,
         ): NativeGenerationSummary? {
             generateCalls++
             if (tokensBeforeFailure > 0) {
@@ -299,6 +305,7 @@ class BackendManagerOutputPolicyFallbackTest {
         topP = 0.9f,
         repeatPenalty = 1.2f,
         openclHealth = OpenClHealthState.MODEL_OK,
+        modelClass = AutoBackendModelClass.GPU_ELIGIBLE,
     )
 
     /** 仅含 GPU attempt 的计划（链末端兜底场景：CPU attempt 不存在）。 */

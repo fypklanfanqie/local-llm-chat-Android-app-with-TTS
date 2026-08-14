@@ -2,6 +2,11 @@ package com.chatbyyourside.llm.metrics
 
 import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
+import com.chatbyyourside.llm.thinking.LocalThinkingLevel
+import com.chatbyyourside.llm.thinking.LocalThinkingPlan
+import com.chatbyyourside.llm.thinking.QuestionComplexity
+import com.chatbyyourside.llm.thinking.ThinkingControlMode
+import com.chatbyyourside.llm.thinking.ThinkingPolicyTelemetry
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -205,6 +210,98 @@ class InferenceTelemetryTest {
         val s: String = json.encodeToString(original)
         val decoded: InferenceTurnRecord = json.decodeFromString(s)
         assertEquals(original, decoded)
+    }
+
+    @Suppress("DEPRECATION") // 断言读取兼容字段 thinkingCapTokens，避免弃用告警。
+    @Test
+    fun finalize_carriesThinkingPolicy() {
+        // Task 5：思考档位策略快照随 finalize 一次收口。
+        val t = InferenceTelemetry()
+        t.beginGeneration("g-pol-f", InferencePerformanceMode.BALANCED, null, BackendType.MNN_CPU, 0L)
+        val policy = ThinkingPolicyTelemetry(
+            requestedLevel = "auto",
+            effectiveLevel = "short",
+            complexity = "SIMPLE",
+            controlMode = "PROMPT_FALLBACK",
+            targetMinMs = 5_000L,
+            targetMaxMs = 8_000L,
+            checkpointBudget = 2,
+            generationMode = ThinkingPolicyTelemetry.SINGLE_PASS_SHARED_LIMIT,
+            nativeBudgetCapability = "UNVERIFIED",
+        )
+        assertEquals(0, policy.thinkingCapTokens)
+        val record = t.finalize(
+            nowElapsedMs = 100L,
+            completionReason = CompletionReason.EOS,
+            thinkingPolicy = policy,
+        )!!
+        assertEquals(policy, record.thinkingPolicy)
+    }
+
+    @Test
+    fun turnRecord_roundTripsThinkingPolicy() {
+        val policy = ThinkingPolicyTelemetry(
+            requestedLevel = "auto",
+            effectiveLevel = "medium",
+            complexity = "STANDARD",
+            controlMode = "PROMPT_FALLBACK",
+            targetMinMs = 8_000L,
+            targetMaxMs = 15_000L,
+            checkpointBudget = 4,
+            generationMode = ThinkingPolicyTelemetry.SINGLE_PASS_SHARED_LIMIT,
+            nativeBudgetCapability = "UNVERIFIED",
+        )
+        val original = InferenceTurnRecord(
+            generationId = "g-policy",
+            requestedMode = InferencePerformanceMode.BALANCED,
+            effectiveMode = InferencePerformanceMode.BALANCED,
+            backend = BackendType.MNN_CPU,
+            startedElapsedMs = 1L,
+            endedElapsedMs = 2L,
+            thinkingPolicy = policy,
+        )
+        val s: String = json.encodeToString(original)
+        val decoded: InferenceTurnRecord = json.decodeFromString(s)
+        assertEquals(original, decoded)
+    }
+
+    @Suppress("DEPRECATION") // 断言读取兼容字段 thinkingCapTokens，避免弃用告警。
+    @Test
+    fun thinkingPolicy_decodesLegacyJsonWithNonZeroCap() {
+        // 旧两阶段记录：含 thinkingCapTokens 且无 generationMode —— 前向兼容解码，
+        // generationMode 用默认 SINGLE_PASS_SHARED_LIMIT 兜底。
+        val s = """{"requestedLevel":"auto","effectiveLevel":"medium","complexity":"STANDARD","controlMode":"PROMPT_FALLBACK","targetMinMs":8000,"targetMaxMs":15000,"checkpointBudget":4,"thinkingCapTokens":384,"nativeBudgetCapability":"UNVERIFIED"}"""
+        val decoded: ThinkingPolicyTelemetry = json.decodeFromString(s)
+        assertEquals(384, decoded.thinkingCapTokens)
+        assertEquals(ThinkingPolicyTelemetry.SINGLE_PASS_SHARED_LIMIT, decoded.generationMode)
+    }
+
+    @Suppress("DEPRECATION") // 断言读取兼容字段 thinkingCapTokens，避免弃用告警。
+    @Test
+    fun thinkingPolicy_fromNewPlanRecordsZeroCapAndSinglePassMode() {
+        // 新 from() 记录：生成模式固定 SINGLE_PASS_SHARED_LIMIT、思考 cap 恒为 0（纯软提示）。
+        val plan = LocalThinkingPlan(
+            requestedLevel = LocalThinkingLevel.AUTO,
+            effectiveLevel = LocalThinkingLevel.MEDIUM,
+            complexity = QuestionComplexity.STANDARD,
+            controlMode = ThinkingControlMode.PROMPT_FALLBACK,
+            targetMinMs = 8_000L,
+            targetMaxMs = 15_000L,
+            checkpointBudget = 4,
+            systemInstruction = "纯软提示：只约束思考，不改变最终答案",
+        )
+        val telemetry = ThinkingPolicyTelemetry.from(plan, "UNVERIFIED")!!
+        assertEquals(0, telemetry.thinkingCapTokens)
+        assertEquals(ThinkingPolicyTelemetry.SINGLE_PASS_SHARED_LIMIT, telemetry.generationMode)
+        assertEquals("PROMPT_FALLBACK", telemetry.controlMode)
+    }
+
+    @Test
+    fun turnRecord_legacyJsonWithoutThinkingPolicyDefaultsNull() {
+        // 旧记录缺 thinkingPolicy：ignoreUnknownKeys + 默认值应解码为 null（前向兼容）。
+        val s = """{"generationId":"g-legacy-policy","requestedMode":"BALANCED","effectiveMode":"BALANCED","backend":"MNN_CPU","startedElapsedMs":1,"endedElapsedMs":2}"""
+        val decoded: InferenceTurnRecord = json.decodeFromString(s)
+        assertNull(decoded.thinkingPolicy)
     }
 
     @Test

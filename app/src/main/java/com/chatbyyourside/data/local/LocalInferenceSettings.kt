@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
+import com.chatbyyourside.llm.thinking.LocalThinkingLevel
 
 /**
  * 本地推理参数的不可变快照（Task 6）。
@@ -31,7 +32,10 @@ data class LocalInferenceSettings(
     val cpuBoost: Boolean = true,
     /** legacy：lookahead 投机解码开关（默认关）。性能模式下由解析层决定。 */
     val lookahead: Boolean = false,
+    /** 深度思考开关（本地 + 云端通用，默认关）。开启时展示推理过程并（对支持的供应商）请求思考。 */
     val deepThinking: Boolean = false,
+    /** 本地思考档位（默认 AUTO，仅本地生效）：开启深度思考后决定思考强度；云端不读取本字段。 */
+    val thinkingLevel: LocalThinkingLevel = LocalThinkingLevel.DEFAULT,
 ) {
     companion object {
         // DataStore 键名单点定义；SettingsStore.Keys 中的同名键与这里保持一致。
@@ -44,6 +48,7 @@ data class LocalInferenceSettings(
         const val MAX_TOKENS_KEY = "llm_max_tokens"
         const val BACKEND_KEY = "llm_backend"
         const val DEEP_THINKING_KEY = "deep_thinking"
+        const val THINKING_LEVEL_KEY = "llm_thinking_level"
 
         private val modeKey = stringPreferencesKey(PERFORMANCE_MODE_KEY)
         private val cpuBoostKey = booleanPreferencesKey(CPU_BOOST_KEY)
@@ -54,6 +59,7 @@ data class LocalInferenceSettings(
         private val maxTokensKey = intPreferencesKey(MAX_TOKENS_KEY)
         private val backendKey = stringPreferencesKey(BACKEND_KEY)
         private val thinkKey = booleanPreferencesKey(DEEP_THINKING_KEY)
+        private val thinkingLevelKey = stringPreferencesKey(THINKING_LEVEL_KEY)
 
         /** 从一次 DataStore Preferences 快照聚合出不可变推理设置。 */
         fun fromPreferences(prefs: Preferences): LocalInferenceSettings = LocalInferenceSettings(
@@ -66,6 +72,7 @@ data class LocalInferenceSettings(
             cpuBoost = prefs[cpuBoostKey] ?: true,
             lookahead = prefs[lookaheadKey] ?: false,
             deepThinking = prefs[thinkKey] ?: false,
+            thinkingLevel = LocalThinkingLevel.fromStorageKey(prefs[thinkingLevelKey]),
         )
     }
 }

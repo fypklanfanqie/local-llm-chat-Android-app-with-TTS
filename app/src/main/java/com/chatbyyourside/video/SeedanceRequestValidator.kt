@@ -4,6 +4,8 @@ import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.SeedanceModelVariant
 import com.chatbyyourside.data.model.SeedanceResolution
 import com.chatbyyourside.data.model.SeedanceVideoState
+import com.chatbyyourside.data.remote.SeedanceProtocol
+import com.chatbyyourside.data.remote.seedanceProtocolFor
 
 /**
  * Seedance 视频请求校验结果。
@@ -19,8 +21,10 @@ sealed interface SeedanceValidationResult {
 /**
  * 校验一次 Seedance 视频生成请求：
  *  - [SeedanceConfig.baseUrl]/[SeedanceConfig.apiKey] 非空；
+ *  - 中转站媒体协议下 [SeedanceConfig.relayModelId] 非空；
  *  - 时长在所选模型的 [SeedanceModelVariant.minDurationSeconds]..[maxDurationSeconds] 之间；
- *  - 分辨率在所选模型的 [SeedanceModelVariant.supportedResolutions] 内（Fast 仅 480p/720p）；
+ *  - 分辨率在所选模型的 [SeedanceModelVariant.supportedResolutions] 内（Fast 仅 480p/720p，
+ *    中转站「快速/Mini」版本同样仅支持 480p/720p，与现有约束一致）；
  *  - 角色立绘路径非空。
  * 背景图与场景描述可选，不参与校验。
  */
@@ -33,6 +37,9 @@ fun validateSeedanceRequest(
     }
     if (config.apiKey.isBlank()) {
         return SeedanceValidationResult.Invalid("必须配置 Seedance API Key")
+    }
+    if (seedanceProtocolFor(config.baseUrl) == SeedanceProtocol.MEDIA_RELAY && config.relayModelId.isBlank()) {
+        return SeedanceValidationResult.Invalid("必须填写中转站模型 ID（如 kwvideo-v2-ref）")
     }
     val min = config.variant.minDurationSeconds
     val max = config.variant.maxDurationSeconds

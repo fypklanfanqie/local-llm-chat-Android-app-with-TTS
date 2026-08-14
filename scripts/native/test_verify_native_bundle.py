@@ -445,6 +445,78 @@ class TestVerifyBundle(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(any("libstray" in e for e in result.errors))
 
+    # ---- Task 4: candidate commit ownership (--expected-commit) ----
+
+    def test_expected_commit_mismatch_fails(self):
+        # 候选 bundle 的 manifest.mnnCommit 必须等于请求的 candidate commit；
+        # 若仍指向 pinned commit（旧生产 manifest 误当成候选证据）则拒绝。
+        elf = build_minimal_elf(pt_load_align=0x4000, build_id_hex="cafe1234")
+        import hashlib
+        tmp = self._write_bundle({"libMNN.so": elf})
+        manifest = {
+            "schemaVersion": 1, "mnnCommit": "af0142bcc7b76b7a5128373e285683dc04f55f69",
+            "ndkVersion": "26.1.10909125", "androidApi": 24, "abi": "arm64-v8a",
+            "flags": [],
+            "files": [{"name": "libMNN.so", "sha256": hashlib.sha256(elf).hexdigest(),
+                       "buildId": "cafe1234", "ptLoadAlignment": "0x4000"}],
+        }
+        mpath = os.path.join(tmp, "manifest.json")
+        with open(mpath, "w") as f:
+            import json
+            json.dump(manifest, f)
+        result = vnb.verify_bundle(tmp, mpath,
+                                   expected_commit="75e53afe568f7b6fabb1adc34894fe9f331d52f8")
+        self.assertFalse(result.ok)
+        self.assertTrue(any("mnnCommit" in e and "75e53afe" in e for e in result.errors))
+
+    def test_expected_commit_match_passes(self):
+        elf = build_minimal_elf(pt_load_align=0x4000, build_id_hex="cafe1234")
+        cpp = build_minimal_elf(pt_load_align=0x4000, build_id_hex="babe9876")
+        import hashlib
+        tmp = self._write_bundle({"libMNN.so": elf, "libc++_shared.so": cpp})
+        manifest = {
+            "schemaVersion": 1, "mnnCommit": "75e53afe568f7b6fabb1adc34894fe9f331d52f8",
+            "ndkVersion": "26.1.10909125", "androidApi": 24, "abi": "arm64-v8a",
+            "flags": [],
+            "files": [
+                {"name": "libMNN.so", "sha256": hashlib.sha256(elf).hexdigest(),
+                 "buildId": "cafe1234", "ptLoadAlignment": "0x4000"},
+                {"name": "libc++_shared.so", "sha256": hashlib.sha256(cpp).hexdigest(),
+                 "buildId": "babe9876", "ptLoadAlignment": "0x4000"},
+            ],
+        }
+        mpath = os.path.join(tmp, "manifest.json")
+        with open(mpath, "w") as f:
+            import json
+            json.dump(manifest, f)
+        result = vnb.verify_bundle(tmp, mpath,
+                                   expected_commit="75e53afe568f7b6fabb1adc34894fe9f331d52f8")
+        self.assertTrue(result.ok, msg=result.errors)
+
+    def test_expected_commit_none_preserves_existing_behavior(self):
+        # 不传 --expected-commit 时行为与 Task 8 之前完全一致（既有调用方/测试零影响）。
+        elf = build_minimal_elf(pt_load_align=0x4000, build_id_hex="cafe1234")
+        cpp = build_minimal_elf(pt_load_align=0x4000, build_id_hex="babe9876")
+        import hashlib
+        tmp = self._write_bundle({"libMNN.so": elf, "libc++_shared.so": cpp})
+        manifest = {
+            "schemaVersion": 1, "mnnCommit": "anything",
+            "ndkVersion": "26.1.10909125", "androidApi": 24, "abi": "arm64-v8a",
+            "flags": [],
+            "files": [
+                {"name": "libMNN.so", "sha256": hashlib.sha256(elf).hexdigest(),
+                 "buildId": "cafe1234", "ptLoadAlignment": "0x4000"},
+                {"name": "libc++_shared.so", "sha256": hashlib.sha256(cpp).hexdigest(),
+                 "buildId": "babe9876", "ptLoadAlignment": "0x4000"},
+            ],
+        }
+        mpath = os.path.join(tmp, "manifest.json")
+        with open(mpath, "w") as f:
+            import json
+            json.dump(manifest, f)
+        result = vnb.verify_bundle(tmp, mpath)
+        self.assertTrue(result.ok, msg=result.errors)
+
 
 # ---------------------------------------------------------------------------
 # Manifest generation (generate_manifest / CLI --generate)

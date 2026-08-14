@@ -406,13 +406,27 @@ def verify_manifest_schema(manifest: dict) -> CheckResult:
 # ---------------------------------------------------------------------------
 # Bundle verification
 # ---------------------------------------------------------------------------
-def verify_bundle(bundle_dir: str, manifest_path: str, readelf_path: Optional[str] = None) -> CheckResult:
-    """Verify every ``.so`` in ``bundle_dir`` against ``manifest_path``."""
+def verify_bundle(bundle_dir: str, manifest_path: str, readelf_path: Optional[str] = None,
+                  expected_commit: Optional[str] = None) -> CheckResult:
+    """Verify every ``.so`` in ``bundle_dir`` against ``manifest_path``.
+
+    When ``expected_commit`` is provided (Task 4 candidate build), the manifest's
+    ``mnnCommit`` must equal it exactly — a candidate bundle stamped with a
+    different commit (or a production manifest still pointing at the pinned
+    commit) is rejected, so a candidate never gets confused with the pinned
+    runtime.
+    """
     result = CheckResult()
     if not os.path.isfile(manifest_path):
         return CheckResult(ok=False, errors=[f"manifest not found: {manifest_path}"])
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
+
+    if expected_commit is not None and manifest.get("mnnCommit") != expected_commit:
+        result.errors.append(
+            f"manifest.mnnCommit is '{manifest.get('mnnCommit')}', "
+            f"expected requested commit '{expected_commit}'"
+        )
 
     result.merge(verify_manifest_schema(manifest))
 
@@ -560,6 +574,9 @@ def main(argv=None) -> int:
     parser.add_argument("--ndk-version", default=NDK_VERSION, help="(generate) NDK version")
     parser.add_argument("--android-api", type=int, default=ANDROID_API, help="(generate) Android API")
     parser.add_argument("--abi", default=ABI, help="(generate) ABI")
+    parser.add_argument("--expected-commit", default=None,
+                        help="(verify) require manifest.mnnCommit to equal this commit "
+                             "(Task 4 candidate builds)")
     args = parser.parse_args(argv)
 
     if args.generate:
@@ -582,7 +599,7 @@ def main(argv=None) -> int:
         print(f"manifest written: {args.manifest} ({len(manifest['files'])} files)")
         return 0
 
-    result = verify_bundle(args.dir, args.manifest, args.readelf)
+    result = verify_bundle(args.dir, args.manifest, args.readelf, args.expected_commit)
     if args.json:
         print(json.dumps({
             "ok": result.ok,

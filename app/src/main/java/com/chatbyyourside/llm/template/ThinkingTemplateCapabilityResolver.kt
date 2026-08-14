@@ -9,6 +9,11 @@ import java.util.concurrent.ConcurrentHashMap
  * 用于区分「模板含 `enable_thinking` 分支（开关应生效）」「模板无任何思考分支（开关必然无效）」
  * 与「信息不足（无法定位模板/解析失败）」。**绝不默认 SUPPORTED**：拿不到模板文本时按 UNKNOWN 处理，
  * 避免把「开关未生效」误记成「模板可支持」。
+ *
+ * 范围约束：本解析器只判定 `enable_thinking` **开关分支**。SUPPORTED 不能作为「原生思考 token
+ * 预算 / reasoning effort」的证据——预算/effort 能力必须由
+ * [com.chatbyyourside.llm.thinking.NativeThinkingBudgetCapabilityResolver] 的完整认证证据判定，
+ * 不能由本结果推断。
  */
 enum class ThinkingTemplateCapability {
     /** 模板文本含 `enable_thinking` 分支：开关运行时经 jinja context 注入应能生效。 */
@@ -54,7 +59,11 @@ class ThinkingTemplateCapabilityResolver {
             cache[key]?.let { return it }
         }
         val capability = compute(modelDir, primary)
-        if (primary != null) cache[cacheKey(primary)] = capability
+        if (primary != null) {
+            cache[cacheKey(primary)] = capability
+            // mtime 变化会产生新键、旧键永不命中；达到上限整体清空，防无界增长。
+            if (cache.size > MAX_CACHE_ENTRIES) cache.clear()
+        }
         return capability
     }
 
@@ -148,5 +157,8 @@ class ThinkingTemplateCapabilityResolver {
 
         /** 单源扫描大小上限（字节）：tokenizer.txt 可达数 MB，权重大文件恒二进制不进入候选集。 */
         private const val MAX_SOURCE_BYTES = 8L * 1024 * 1024
+
+        /** 进程内缓存条目上限：mtime 变化产生新键，超过即整体清空，防无界增长。 */
+        private const val MAX_CACHE_ENTRIES = 64
     }
 }

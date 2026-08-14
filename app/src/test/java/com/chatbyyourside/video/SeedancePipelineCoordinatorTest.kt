@@ -92,8 +92,10 @@ class SeedancePipelineCoordinatorTest {
         var failTransient: Throwable? = null
         var failParse = false
         var delayMillis = 0L
+        var lastInput: SeedancePromptInput? = null
         suspend fun generate(apiConfig: ApiConfig, input: SeedancePromptInput): SeedancePromptDocument {
             invokeCount++
+            lastInput = input
             failTransient?.let { throw it }
             if (failParse) throw SeedancePromptParseException("bad json")
             if (delayMillis > 0) delay(delayMillis)
@@ -157,7 +159,9 @@ class SeedancePipelineCoordinatorTest {
 
     private class FakeEncoder : SeedanceImageEncoder {
         var fail = false
-        override suspend fun encode(path: String, mime: String): SeedanceImageContent {
+        val budgets = mutableListOf<Long>()
+        override suspend fun encode(path: String, mime: String, maxBytes: Long): SeedanceImageContent {
+            budgets += maxBytes
             if (fail) throw IOException("参考图缺失或不可读")
             return SeedanceImageContent(mime, "base64-of-$path")
         }
@@ -173,6 +177,10 @@ class SeedancePipelineCoordinatorTest {
         val encoder = FakeEncoder()
         var apiConfig = ApiConfig(baseUrl = "https://api.deepseek.com/v1", apiKey = "sk-test", model = "deepseek-chat")
         var seedanceConfig = SeedanceConfig(baseUrl = "https://ark.cn-beijing.volces.com/api/v3", apiKey = "sk-seedance")
+        /** 前情对话假提供者：记录入参，返回脚本文本；抛错时协调器应静默降级为空。 */
+        var contextScript: String = ""
+        var contextError: Throwable? = null
+        var contextCallArgs: Triple<Long, String, String>? = null
         val fileStore = SeedanceVideoFileStore(root) { clockNow }
         val retryPolicy = SeedanceRetryPolicy(baseBackoffMillis = 1_000L, maxBackoffMillis = 4_000L)
 
@@ -180,6 +188,11 @@ class SeedancePipelineCoordinatorTest {
             store = store,
             submitter = submitter,
             promptProvider = promptProvider::generate,
+            conversationContextProvider = SeedanceConversationContextProvider { conversationId, userText, assistantText, _ ->
+                contextCallArgs = Triple(conversationId, userText, assistantText)
+                contextError?.let { throw it }
+                contextScript
+            },
             snapshooter = snapshooter::snapshot,
             resolveSnapshotSources = SeedanceSnapshotSourceResolver { t ->
                 SeedanceSnapshotSources(
@@ -289,6 +302,44 @@ class SeedancePipelineCoordinatorTest {
         assertEquals(1, e.promptProvider.invokeCount)
         assertEquals(SeedanceVideoState.SUBMISSION_PENDING, e.store.current(1).state)
         assertNotNull(e.store.current(1).finalPrompt)
+    }
+
+    @Test
+    fun promptInputReceivesConversationContext() = runBlocking {
+        val e = env(SeedanceVideoState.PROMPT_PENDING)
+        e.contextScript = "用户：之前我们聊过海边\n角色：对，海边的日落很美"
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        val input = e.promptProvider.lastInput
+        assertNotNull(input)
+        assertEquals("用户：之前我们聊过海边\n角色：对，海边的日落很美", input!!.recentContext)
+        val args = e.contextCallArgs
+        assertNotNull(args)
+        assertEquals(1L, args!!.first)
+        assertEquals("你好", args.second)
+        assertEquals("你好呀", args.third)
+        assertEquals(SeedanceVideoState.SUBMISSION_PENDING, e.store.current(1).state)
+    }
+
+    @Test
+    fun contextProviderFailureDegradesToEmptyContext() = runBlocking {
+        val e = env(SeedanceVideoState.PROMPT_PENDING)
+        e.contextError = IOException("db 忙")
+        assertTrue(e.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        assertEquals("", e.promptProvider.lastInput?.recentContext)
+        assertEquals(SeedanceVideoState.SUBMISSION_PENDING, e.store.current(1).state)
+    }
+
+    @Test
+    fun promptInputReceivesBackgroundReferenceFlag() = runBlocking {
+        val withBg = env(SeedanceVideoState.PROMPT_PENDING) {
+            copy(backgroundImageSourceSnapshot = "file:///data/bg.png")
+        }
+        assertTrue(withBg.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        assertTrue("有背景参考图时应为 true", withBg.promptProvider.lastInput?.hasBackgroundReference == true)
+
+        val withoutBg = env(SeedanceVideoState.PROMPT_PENDING)
+        assertTrue(withoutBg.coordinator.advance(1) is PipelineOutcome.Reschedule)
+        assertFalse("无背景参考图时应为 false", withoutBg.promptProvider.lastInput?.hasBackgroundReference == true)
     }
 
     @Test

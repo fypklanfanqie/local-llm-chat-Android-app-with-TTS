@@ -47,6 +47,8 @@ import com.chatbyyourside.config.PRESET_PROVIDERS
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.ThemeMode
+import com.chatbyyourside.data.model.SystemVoiceTemplate
+import com.chatbyyourside.data.model.TtsEngine
 import com.chatbyyourside.data.model.VoicePair
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.SeedanceConfig
@@ -103,6 +105,18 @@ fun SettingsScreen(
 
     var ttsApiKey by remember(ttsConfig) { mutableStateOf(ttsConfig.apiKey) }
     var showTtsKey by remember { mutableStateOf(false) }
+
+    // 朗读引擎（系统自带 / 云端）与系统声音模板。
+    val ttsEngine by container.settingsRepository.ttsEngine.collectAsState(initial = TtsEngine.DEFAULT)
+    val ttsTemplate by container.settingsRepository.ttsSystemTemplate.collectAsState(initial = SystemVoiceTemplate.DEFAULT_TEMPLATE)
+    var ttsEngineEdit by remember(ttsEngine) { mutableStateOf(ttsEngine) }
+    var ttsTemplateEdit by remember(ttsTemplate) { mutableStateOf(ttsTemplate) }
+    var ttsSaved by remember { mutableStateOf(false) }
+    LaunchedEffect(ttsSaved) {
+        if (ttsSaved) { delay(2000); ttsSaved = false }
+    }
+    var ttsPreviewBusy by remember { mutableStateOf(false) }
+    var ttsPreviewError by remember { mutableStateOf<String?>(null) }
 
     val ttsVoiceMap by container.settingsRepository.ttsVoiceMap.collectAsState(initial = emptyMap())
     var voiceEdit by remember(ttsVoiceMap) { mutableStateOf(ttsVoiceMap) }
@@ -225,25 +239,83 @@ fun SettingsScreen(
         ChatBackgroundSection(container = container, scope = scope)
         SeedanceSettingsSection(container = container, scope = scope)
 
-        // ===== 语音合成 =====
-        GlassListSection(title = "语音合成 (TTS) · 火山引擎") {
+        // ===== 语音合成（朗读）=====
+        GlassListSection(title = "语音合成 (TTS) · 朗读") {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("通过 CloudRun 代理调用，无需配置域名白名单", color = scheme.primary, fontSize = 11.sp)
-                PasswordField("API Key", ttsApiKey, showTtsKey, { ttsApiKey = it }, { showTtsKey = !showTtsKey })
+                Text(
+                    "手机系统语音：离线、免费、开箱即用；云端（火山豆包）：支持声音复刻音色与中日双语，需配置凭据。",
+                    color = scheme.onSurfaceVariant, fontSize = 11.sp,
+                )
+                FieldLabel("朗读引擎")
+                SeedanceDropdown(
+                    items = TtsEngine.entries.map { it to it.label },
+                    selected = ttsEngineEdit,
+                    onSelect = { ttsEngineEdit = it },
+                )
+                if (ttsEngineEdit == TtsEngine.SYSTEM) {
+                    FieldLabel("声音模板")
+                    SeedanceDropdown(
+                        items = SystemVoiceTemplate.entries.map { it to it.label },
+                        selected = ttsTemplateEdit,
+                        onSelect = { ttsTemplateEdit = it },
+                    )
+                    Text(
+                        "模板按手机已装语音自动匹配；无匹配语音时自动回落默认语音（语速/音调仍按模板生效）。音量跟随系统媒体音量。",
+                        color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                    )
+                } else {
+                    Text(
+                        "云端引擎需火山引擎凭据；声音复刻音色按下方「角色音色映射」配置。",
+                        color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                    )
+                    PasswordField("API Key", ttsApiKey, showTtsKey, { ttsApiKey = it }, { showTtsKey = !showTtsKey })
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                ttsPreviewBusy = true
+                                ttsPreviewError = null
+                                val result = runCatching {
+                                    if (ttsEngineEdit == TtsEngine.SYSTEM) {
+                                        container.ttsManager.previewSystem("你好，这是朗读语音的试听效果。", ttsTemplateEdit)
+                                    } else {
+                                        container.ttsManager.speak("你好，这是朗读语音的试听效果。", "")
+                                    }
+                                }
+                                ttsPreviewError = result.exceptionOrNull()?.message
+                                ttsPreviewBusy = false
+                            }
+                        },
+                        enabled = !ttsPreviewBusy,
+                    ) {
+                        Text(if (ttsPreviewBusy) "试听中…" else "试听", fontSize = 12.sp)
+                    }
+                    ttsPreviewError?.let {
+                        Text(it, color = scheme.error, fontSize = 10.sp, modifier = Modifier.weight(1f))
+                    }
+                }
             }
         }
         SaveButton(
             text = "保存 TTS 设置",
-            saved = false,
+            saved = ttsSaved,
             onClick = {
-                scope.launch { container.settingsRepository.setTtsConfig(TtsConfig(ttsApiKey)) }
+                scope.launch {
+                    container.settingsRepository.setTtsEngine(ttsEngineEdit)
+                    container.settingsRepository.setTtsSystemTemplate(ttsTemplateEdit)
+                    if (ttsEngineEdit == TtsEngine.CLOUD) {
+                        container.settingsRepository.setTtsConfig(TtsConfig(ttsApiKey))
+                    }
+                    ttsSaved = true
+                }
             },
         )
 
         TtsGuideButton()
 
         // ===== 角色音色映射 =====
-        GlassListSection(title = "角色音色映射（声音复刻 ID）") {
+        GlassListSection(title = "角色音色映射（声音复刻 ID · 仅云端引擎）") {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
                     "为角色填入火山引擎声音复刻音色 ID（S_xxx），留空则用默认音色。中日分别配置。",
@@ -920,6 +992,7 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
     var apiKey by remember { mutableStateOf("") }
     var showApiKey by remember { mutableStateOf(false) }
     var baseUrl by remember { mutableStateOf(SeedanceConfig().baseUrl) }
+    var relayModelId by remember { mutableStateOf(SeedanceConfig().relayModelId) }
     var variant by remember { mutableStateOf(SeedanceConfig().variant) }
     var resolution by remember { mutableStateOf(SeedanceConfig().resolution) }
     var duration by remember { mutableStateOf(SeedanceConfig().durationSeconds) }
@@ -939,6 +1012,7 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
         val c = settings.getSeedanceConfigNow()
         apiKey = c.apiKey
         baseUrl = c.baseUrl
+        relayModelId = c.relayModelId
         variant = c.variant
         resolution = c.resolution
         duration = c.durationSeconds
@@ -962,14 +1036,14 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
     GlassListSection(title = "Seedance 对话视频") {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(
-                "角色回复后自动生成对应短视频（火山方舟 Seedance 2.0），API Key 与对话模型分开配置。",
+                "角色回复后自动生成对应短视频（Seedance 2.0），支持火山方舟官方与中转站（如 dm1124 媒体协议），API Key 与对话模型分开配置。",
                 color = scheme.onSurfaceVariant, fontSize = 11.sp,
             )
             PasswordField("API Key", apiKey, showApiKey, { apiKey = it }, { showApiKey = !showApiKey })
             FieldLabel("服务地址")
             GlassInputField(value = baseUrl, onValueChange = { baseUrl = it }, placeholder = SeedanceConfig().baseUrl)
             Text(
-                "官方地址填 base（含 /api/v3）；中转站请粘贴完整的「创建任务」接口地址（如 https://xxx/v1/media/generate）。",
+                "官方方舟填 base（含 /api/v3）。中转站可填完整「创建任务」地址（如 https://api.lk888.ai/v1/media/generate）或只填主机（如 https://api.lk888.ai），将自动识别媒体协议并调用 /v1/media/generate 与 /v1/media/status。",
                 color = scheme.onSurfaceVariant, fontSize = 10.sp,
             )
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -999,6 +1073,16 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
                     null -> {}
                 }
             }
+            FieldLabel("模型 ID（中转站媒体协议）")
+            GlassInputField(
+                value = relayModelId,
+                onValueChange = { relayModelId = it },
+                placeholder = SeedanceConfig().relayModelId,
+            )
+            Text(
+                "仅中转站媒体协议使用（官方方舟忽略此项）。默认 kwvideo-v2-ref 即该站 Seedance 2.0 参考生视频模型。",
+                color = scheme.onSurfaceVariant, fontSize = 10.sp,
+            )
             FieldLabel("模型")
             SeedanceDropdown(
                 items = SeedanceModelVariant.entries.map { it to variantLabel(it) },
@@ -1013,6 +1097,10 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
                         duration = duration.coerceIn(v.minDurationSeconds, v.maxDurationSeconds)
                     }
                 },
+            )
+            Text(
+                "中转站映射：标准→version「标准」，Fast→version「快速」（1080p/4K 仅标准版可用）。",
+                color = scheme.onSurfaceVariant, fontSize = 10.sp,
             )
             FieldLabel("分辨率")
             SeedanceDropdown(
@@ -1038,12 +1126,12 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("生成结果带水印", color = scheme.onSurface, fontSize = 13.sp)
-                    Text("默认关闭", color = scheme.onSurfaceVariant, fontSize = 10.sp)
+                    Text("默认关闭；仅方舟官方生效", color = scheme.onSurfaceVariant, fontSize = 10.sp)
                 }
                 Switch(checked = watermark, onCheckedChange = { watermark = it })
             }
             Text(
-                "视频语音固定开启（Seedance 2.0 不支持关闭）。",
+                "视频语音固定开启（Seedance 2.0 不支持关闭，中转站自动生成有声视频）。",
                 color = scheme.onSurfaceVariant, fontSize = 10.sp,
             )
             FieldLabel("背景图（可选）")
@@ -1128,6 +1216,7 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
                     SeedanceConfig(
                         baseUrl = baseUrl,
                         apiKey = apiKey,
+                        relayModelId = relayModelId,
                         variant = variant,
                         resolution = safeResolution,
                         ratio = ratio,

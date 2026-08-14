@@ -1,6 +1,8 @@
 package com.chatbyyourside
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.util.Base64
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.config.AssetPaths
@@ -24,6 +26,7 @@ import com.chatbyyourside.data.repository.SeedanceVideoRepository
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.download.DownloadManager
 import com.chatbyyourside.video.DirectLlmSeedancePromptLlm
+import com.chatbyyourside.video.SeedanceConversationContextProvider
 import com.chatbyyourside.video.SeedanceImageEncoder
 import com.chatbyyourside.video.SeedancePipelineCoordinator
 import com.chatbyyourside.video.SeedancePromptGenerator
@@ -58,6 +61,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -150,6 +154,9 @@ class AppContainer(private val context: Context) {
                     seedanceClient.cancelQueuedTask(config, taskId)
             },
             promptProvider = seedancePromptGenerator::generate,
+            conversationContextProvider = SeedanceConversationContextProvider { conversationId, userText, assistantText, maxTurns ->
+                buildSeedanceConversationContext(conversationId, userText, assistantText, maxTurns)
+            },
             snapshooter = seedanceReferenceStore::snapshot,
             resolveSnapshotSources = SeedanceSnapshotSourceResolver { task ->
                 resolveSeedanceSnapshotSources(task)
@@ -158,8 +165,8 @@ class AppContainer(private val context: Context) {
                 downloadSeedanceVideo(url)
             },
             fileStore = seedanceVideoFileStore,
-            encoder = SeedanceImageEncoder { path, mime ->
-                encodeSeedanceImage(path, mime)
+            encoder = SeedanceImageEncoder { path, mime, maxBytes ->
+                encodeSeedanceImage(path, mime, maxBytes)
             },
             apiConfigProvider = { settingsRepository.getApiConfigNow() },
             seedanceConfigProvider = { settingsRepository.getSeedanceConfigNow() },
@@ -168,6 +175,29 @@ class AppContainer(private val context: Context) {
 
     val seedanceVideoScheduler: SeedanceVideoScheduler by lazy {
         SeedanceVideoScheduler(context, seedancePipelineCoordinator, seedancePipelineStore)
+    }
+
+    /**
+     * 构建提示词生成用的「前情对话」文本：取该会话最近消息（最新在前），
+     * 剔除与本次用户发言/角色回复内容相同的两条（即当前这一轮），再取最多 [maxTurns] 条按时间正序拼接。
+     * 单条截断 200 字；任何异常向上层抛由协调器降级为空串（绝不阻塞视频流水线）。
+     */
+    private suspend fun buildSeedanceConversationContext(
+        conversationId: Long,
+        currentUserText: String,
+        currentAssistantText: String,
+        maxTurns: Int,
+    ): String {
+        val messages = chatRepository.getHistory(conversationId)
+        val relevant = messages.asReversed() // 最新在前
+            .filter { it.content.isNotBlank() }
+            .filter { it.content.trim() != currentUserText.trim() && it.content.trim() != currentAssistantText.trim() }
+            .take(maxTurns)
+            .asReversed() // 恢复时间正序
+        return relevant.joinToString("\n") { msg ->
+            val speaker = if (msg.role == "user") "用户" else "角色"
+            "$speaker：${msg.content.trim().take(200)}"
+        }
     }
 
     /** outbox 来源快照 -> 参考图仓库入参：内置角色用 assets 相对路径，自定义角色用 char.image。 */
@@ -181,12 +211,61 @@ class AppContainer(private val context: Context) {
         )
     }
 
-    /** 参考图内部文件 -> base64 图片内容（读取在 Worker 的 IO 线程，不整读入 UI 线程）。 */
-    private suspend fun encodeSeedanceImage(path: String, mime: String): SeedanceImageContent =
+    /**
+     * 参考图内部文件 -> base64 图片内容（读取在 Worker 的 IO 线程，不整读入 UI 线程）。
+     *
+     * [maxBytes] 为单张图片（base64 解码后）字节上限。原图不超限时直接原样编码；
+     * 超限时降采样 + JPEG 质量梯度重编码至达标（中转站媒体协议单张 ≤10MB，立绘 PNG 常超限）。
+     * 压缩后仍超限则抛异常，由协调器按「参考图缺失或不可读」处理，绝不发送可能被服务端拒绝的超限图片。
+     */
+    private suspend fun encodeSeedanceImage(path: String, mime: String, maxBytes: Long): SeedanceImageContent =
         withContext(Dispatchers.IO) {
-            val bytes = File(path).readBytes()
-            SeedanceImageContent(mime, Base64.encodeToString(bytes, Base64.NO_WRAP))
+            val file = File(path)
+            if (!file.isFile) throw IllegalStateException("参考图文件不存在")
+            val bytes = file.readBytes()
+            if (bytes.size <= maxBytes) {
+                return@withContext SeedanceImageContent(mime, Base64.encodeToString(bytes, Base64.NO_WRAP))
+            }
+            val compressed = compressImageToFit(file, maxBytes)
+                ?: throw IllegalStateException("参考图压缩后仍超过 ${maxBytes / (1024 * 1024)}MB 限制，无法提交")
+            SeedanceImageContent("image/jpeg", Base64.encodeToString(compressed, Base64.NO_WRAP))
         }
+
+    /** 降采样 + JPEG 质量梯度压缩，返回不超过 [maxBytes] 的字节；无法达标返回 null。 */
+    private fun compressImageToFit(file: File, maxBytes: Long): ByteArray? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        // 目标长边从 2560 起步逐级减半重试，直到压缩产物达标或尺寸下限 640。
+        var targetLongSide = 2560
+        while (targetLongSide >= 640) {
+            val inSampleSize = computeSampleSize(bounds.outWidth, bounds.outHeight, targetLongSide)
+            val opts = BitmapFactory.Options().apply { this.inSampleSize = inSampleSize }
+            val bitmap = BitmapFactory.decodeFile(file.absolutePath, opts) ?: return null
+            try {
+                var quality = 90
+                while (quality >= 60) {
+                    val out = ByteArrayOutputStream()
+                    if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)) return null
+                    val data = out.toByteArray()
+                    if (data.size <= maxBytes) return data
+                    quality -= 10
+                }
+            } finally {
+                bitmap.recycle()
+            }
+            targetLongSide /= 2
+        }
+        return null
+    }
+
+    /** 计算 2 的幂降采样系数，使解码后长边不超过 [targetLongSide]。 */
+    private fun computeSampleSize(width: Int, height: Int, targetLongSide: Int): Int {
+        var sample = 1
+        while (maxOf(width, height) / (sample * 2) >= targetLongSide) sample *= 2
+        return sample
+    }
 
     /** GET 远端签名 URL，返回未消费的流（失败/非 2xx 返回 null）。 */
     private suspend fun downloadSeedanceVideo(url: String): SeedanceVideoDownload? =

@@ -1,12 +1,20 @@
 package com.chatbyyourside.ui.settings
 
+import com.chatbyyourside.data.model.AutoBackendModelClass
+import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendType
+import com.chatbyyourside.llm.benchmark.BenchmarkScenarioResult
+import com.chatbyyourside.llm.benchmark.BenchmarkSummary
 import com.chatbyyourside.llm.benchmark.CertifiedInferenceOptions
+import com.chatbyyourside.llm.benchmark.InferenceBenchmarkScenario
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.DowngradeReason
 import com.chatbyyourside.llm.template.ThinkingEffect
 import com.chatbyyourside.llm.template.ThinkingTemplateCapability
+import com.chatbyyourside.llm.thinking.LocalThinkingLevel
+import com.chatbyyourside.llm.thinking.ThinkingPolicyTelemetry
+import com.chatbyyourside.provider.local.LocalChatProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -20,6 +28,96 @@ import org.junit.Test
  * 全部为纯函数，不触 Android 运行时。
  */
 class BackendDiagnosticsTextTest {
+
+    // ===== 思考档位文案 =====
+
+    @Test
+    fun autoLevelIsMarkedRecommended() {
+        assertTrue(thinkingLevelTitle(LocalThinkingLevel.AUTO).contains("推荐"))
+        assertTrue(thinkingLevelTitle(LocalThinkingLevel.AUTO).contains("自动"))
+    }
+
+    @Test
+    fun allThinkingLevelsHaveDistinctDescriptions() {
+        val descs = LocalThinkingLevel.entries.map { thinkingLevelDesc(it) }
+        assertEquals(4, descs.distinct().size)
+        // 文案只描述策略，不承诺精确时长，也不暗示强制截断。
+        LocalThinkingLevel.entries.forEach {
+            val d = thinkingLevelDesc(it)
+            assertTrue(d.isNotBlank())
+            assertTrue(!d.contains("强制"))
+            assertTrue(!d.contains("自动停止"))
+        }
+    }
+
+    @Test
+    fun autoDescriptionMentionsAdaptiveComplexity() {
+        val d = thinkingLevelDesc(LocalThinkingLevel.AUTO)
+        assertTrue(d.contains("按问题复杂度"))
+        assertTrue(!d.contains("强制"))
+    }
+
+    // ===== 思考档位策略行（Task 5）=====
+
+    @Test
+    fun autoPolicyShowsRouteToEffectiveWithComplexity() {
+        val rows = thinkingPolicyRows(
+            ThinkingPolicyTelemetry(
+                requestedLevel = "auto",
+                effectiveLevel = "medium",
+                complexity = "STANDARD",
+                controlMode = "PROMPT_FALLBACK",
+                targetMinMs = 8_000L,
+                targetMaxMs = 15_000L,
+                checkpointBudget = 4,
+                generationMode = ThinkingPolicyTelemetry.SINGLE_PASS_SHARED_LIMIT,
+                nativeBudgetCapability = "UNVERIFIED",
+            ),
+        )
+        assertEquals(2, rows.size)
+        val level = rows.first { it.label == "思考档位" }
+        assertTrue(level.value.contains("自动"))
+        assertTrue(level.value.contains("中"))
+        assertTrue(level.value.contains("标准"))
+        val target = rows.first { it.label == "思考策略" }
+        assertTrue(target.value.contains("约 8–15 秒"))
+        assertTrue(target.value.contains("4 个核验点"))
+        assertTrue(target.value.contains("提示策略"))
+        assertTrue(target.value.contains("单次生成"))
+        assertTrue(target.value.contains("共享最大生成长度"))
+        assertTrue(!target.value.contains("硬上限"))
+        assertTrue(!target.value.contains("tokens"))
+    }
+
+    @Test
+    fun manualPolicyShowsSingleLevelWithoutComplexity() {
+        val rows = thinkingPolicyRows(
+            ThinkingPolicyTelemetry(
+                requestedLevel = "long",
+                effectiveLevel = "long",
+                complexity = null,
+                controlMode = "PROMPT_FALLBACK",
+                targetMinMs = 20_000L,
+                targetMaxMs = 45_000L,
+                checkpointBudget = 8,
+                generationMode = ThinkingPolicyTelemetry.SINGLE_PASS_SHARED_LIMIT,
+                nativeBudgetCapability = "UNVERIFIED",
+            ),
+        )
+        val level = rows.first { it.label == "思考档位" }
+        assertEquals("长", level.value)
+        val strategy = rows.first { it.label == "思考策略" }
+        assertTrue(strategy.value.contains("单次生成"))
+        assertTrue(strategy.value.contains("共享最大生成长度"))
+        assertTrue(strategy.value.contains("提示策略"))
+        assertTrue(!strategy.value.contains("硬上限"))
+        assertTrue(!strategy.value.contains("tokens"))
+    }
+
+    @Test
+    fun nullPolicyYieldsNoRows() {
+        assertTrue(thinkingPolicyRows(null).isEmpty())
+    }
 
     // ===== 模板能力文案（Step 5）=====
 
@@ -131,12 +229,49 @@ class BackendDiagnosticsTextTest {
         assertEquals("lookahead 未认证（未启用）", downgradeReasonText(DowngradeReason.LOOKAHEAD_UNCERTIFIED.name))
         assertEquals("OpenCL 健康异常（未入链）", downgradeReasonText(DowngradeReason.OPENCL_UNHEALTHY.name))
         assertEquals("标准构建不含 QNN（解析为 CPU）", downgradeReasonText(DowngradeReason.QNN_UNAVAILABLE_IN_STANDARD_BUILD.name))
+        assertEquals("当前模型 ≤7B，AUTO 用 CPU（GPU 仅 >7B 启用）", downgradeReasonText(DowngradeReason.AUTO_MODEL_AT_OR_BELOW_7B_CPU.name))
+        assertEquals("模型参数未知，AUTO 默认 CPU", downgradeReasonText(DowngradeReason.AUTO_MODEL_PARAMETERS_UNKNOWN_CPU.name))
+        assertEquals("GPU 加载失败，回退 CPU", downgradeReasonText(DowngradeReason.GPU_LOAD_FALLBACK.name))
+        assertEquals("GPU 生成异常，回退 CPU", downgradeReasonText(DowngradeReason.GPU_GENERATION_FALLBACK.name))
+        assertEquals("思考超过档位预算，已截断并直接作答", downgradeReasonText(LocalChatProvider.THINKING_BUDGET_TRUNCATED))
     }
 
     @Test
     fun unknownDowngradeReasonIsKeptVerbatim() {
         // 未知原因原样保留，不猜测也不崩溃。
         assertEquals("SOME_FUTURE_REASON", downgradeReasonText("SOME_FUTURE_REASON"))
+    }
+
+    // ===== 模型大小策略文案与默认链（Task 15）=====
+
+    @Test
+    fun autoSubtitleIsModelAware() {
+        assertTrue(autoSubtitle(AutoBackendModelClass.GPU_ELIGIBLE, true).contains("GPU 优先"))
+        assertTrue(autoSubtitle(AutoBackendModelClass.GPU_ELIGIBLE, false).contains("GPU 未就绪"))
+        assertTrue(autoSubtitle(AutoBackendModelClass.CPU_BELOW_OR_EQUAL_THRESHOLD, true).contains("≤7B"))
+        assertTrue(autoSubtitle(AutoBackendModelClass.CPU_UNKNOWN_PARAMETERS, true).contains("参数未知"))
+    }
+
+    @Test
+    fun previewFallbackChainRespectsModelSizeGate() {
+        // AUTO：仅 >7B 且 GPU 就绪时呈 GPU→CPU；小/未知模型恒 CPU。
+        assertEquals(
+            listOf(BackendType.MNN_GPU, BackendType.MNN_CPU),
+            previewFallbackChain(BackendPreference.AUTO, AutoBackendModelClass.GPU_ELIGIBLE, gpuReady = true),
+        )
+        assertEquals(
+            listOf(BackendType.MNN_CPU),
+            previewFallbackChain(BackendPreference.AUTO, AutoBackendModelClass.CPU_BELOW_OR_EQUAL_THRESHOLD, gpuReady = true),
+        )
+        assertEquals(
+            listOf(BackendType.MNN_CPU),
+            previewFallbackChain(BackendPreference.AUTO, AutoBackendModelClass.CPU_UNKNOWN_PARAMETERS, gpuReady = true),
+        )
+        // 显式 GPU 不受大小门槛限制。
+        assertEquals(
+            listOf(BackendType.MNN_GPU, BackendType.MNN_CPU),
+            previewFallbackChain(BackendPreference.MNN_GPU, AutoBackendModelClass.CPU_BELOW_OR_EQUAL_THRESHOLD, gpuReady = true),
+        )
     }
 
     // ===== 认证状态文案 =====
@@ -249,5 +384,68 @@ class BackendDiagnosticsTextTest {
             ThinkingTemplateCapability.SUPPORTED,
         )
         assertTrue(rows.none { it.label == "阶段计时" })
+    }
+
+    @Test
+    fun contextDowngradeRowShownWhenAdmissionReducedContext() {
+        // Task 15：内存准入把 context 仅本次降级 -> 显示「配置值 → 实际值（仅本次）」。
+        val rows = diagnosticRows(
+            record().copy(
+                configuredContextTokens = 8192,
+                actualContextTokens = 4096,
+                downgradeReasons = listOf(DowngradeReason.MEMORY.name),
+            ),
+            ThinkingTemplateCapability.SUPPORTED,
+        )
+        val ctx = rows.firstOrNull { it.label == "上下文" }
+        assertTrue("应存在上下文降级行", ctx != null)
+        assertTrue(ctx!!.value.contains("8192 → 4096"))
+        assertTrue(ctx.value.contains("仅本次"))
+        assertTrue(ctx.value.contains("未修改设置"))
+        val fallback = rows.firstOrNull { it.label == "回退/降级" }
+        assertTrue(fallback!!.value.contains("内存受限"))
+    }
+
+    @Test
+    fun noContextRowWhenNotDowngraded() {
+        val rows = diagnosticRows(record(), ThinkingTemplateCapability.SUPPORTED)
+        assertTrue(rows.none { it.label == "上下文" })
+    }
+
+    // ===== CPU/GPU prefill 对比摘要（Task 15/16）=====
+
+    private fun prefillResult(
+        prefillTps: Float?,
+        ttftMs: Float?,
+        decodeTps: Float?,
+        backendCounts: Map<String, Int>,
+    ) = BenchmarkScenarioResult(
+        scenario = InferenceBenchmarkScenario.LONG_PREFILL,
+        deviceFingerprint = "d",
+        configFingerprint = "c",
+        summary = BenchmarkSummary(
+            medianPrefillTps = prefillTps,
+            medianTtftMs = ttftMs,
+            medianDecodeTps = decodeTps,
+        ),
+        recordedSampleCount = 5,
+        warmupSampleCount = 1,
+        coolRun = true,
+        actualBackendCounts = backendCounts,
+    )
+
+    @Test
+    fun prefillComparisonTextShowsBothSidesAndActualBackends() {
+        val text = prefillComparisonText(
+            prefillResult(100f, 800f, 10f, mapOf("MNN_CPU" to 5)),
+            prefillResult(200f, 500f, 10f, mapOf("MNN_GPU" to 3, "MNN_CPU" to 2)),
+        )
+        assertTrue(text.contains("CPU:"))
+        assertTrue(text.contains("GPU:"))
+        assertTrue(text.contains("prefill 100.0 tok/s"))
+        assertTrue(text.contains("TTFT 800ms"))
+        // GPU 目标混入 CPU fallback 时如实标出，不冒充 GPU 性能。
+        assertTrue(text.contains("MNN_GPU=3"))
+        assertTrue(text.contains("MNN_CPU=2"))
     }
 }

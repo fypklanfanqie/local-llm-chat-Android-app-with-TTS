@@ -581,10 +581,13 @@ class SeedanceClientTest {
 
     @Test
     fun createTask_relayResourcePathBase_hitsVerbatimPath() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"id":"cgt-abc"}"""))
+        // 路径含 /media/generate → 自动切换媒体协议：POST 原路径并解析 data.task_id。
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"code":200,"msg":"任务创建成功","data":{"task_id":123456}}"""))
         val relay = server.url("/v1/media/generate").toString().trimEnd('/')
-        client.createTask(SeedanceConfig(baseUrl = relay), request())
+        val resp = client.createTask(SeedanceConfig(baseUrl = relay), request())
         assertEquals("/v1/media/generate", server.takeRequest().path)
+        assertEquals("123456", resp.id)
+        assertEquals(SeedanceRemoteStatus.QUEUED, resp.remoteStatus)
     }
 
     @Test
@@ -595,6 +598,276 @@ class SeedanceClientTest {
         assertEquals(3, content.size) // text + 角色 reference_image + 背景 reference_image
         assertEquals("reference_image", content[1].jsonObject["role"]?.jsonPrimitive?.content)
         assertEquals("reference_image", content[2].jsonObject["role"]?.jsonPrimitive?.content)
+    }
+
+    // ---- 中转站媒体协议（POST /v1/media/generate + GET /v1/media/status）----
+
+    /** 媒体协议配置：路径含 /media/generate 触发协议切换。 */
+    private fun mediaConfig(relayModelId: String = "kwvideo-v2-ref"): SeedanceConfig = SeedanceConfig(
+        baseUrl = server.url("/v1/media/generate").toString().trimEnd('/'),
+        apiKey = TEST_API_KEY,
+        relayModelId = relayModelId,
+    )
+
+    @Test
+    fun mediaCreate_postsMediaBodyWithMappingsAndImages() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"code":200,"msg":"任务创建成功","data":{"task_id":"t-42"}}"""))
+        val resp = client.createTask(
+            mediaConfig(),
+            request(
+                variant = SeedanceModelVariant.STANDARD,
+                resolution = SeedanceResolution.P4K,
+                ratio = SeedanceRatio.LANDSCAPE,
+                durationSeconds = 12,
+                background = background,
+            ),
+        )
+        assertEquals("t-42", resp.id)
+        assertEquals(SeedanceRemoteStatus.QUEUED, resp.remoteStatus)
+
+        val recorded = server.takeRequest()
+        assertEquals("POST", recorded.method)
+        assertEquals("/v1/media/generate", recorded.path)
+        assertEquals("Bearer $TEST_API_KEY", recorded.getHeader("Authorization"))
+        val body = testJson.parseToJsonElement(recorded.body.readUtf8()).jsonObject
+        assertEquals("kwvideo-v2-ref", body["model"]!!.jsonPrimitive.content)
+        assertEquals("一位少女在夕阳下回眸", body["prompt"]!!.jsonPrimitive.content)
+        val params = body["params"]!!.jsonObject
+        assertEquals("标准", params["version"]!!.jsonPrimitive.content)
+        assertEquals("12", params["duration"]!!.jsonPrimitive.content)
+        assertEquals("16:9", params["aspect_ratio"]!!.jsonPrimitive.content)
+        assertEquals("4K", params["resolution"]!!.jsonPrimitive.content) // 媒体协议 4K 为大写 K
+        val images = params["images"]!!.jsonArray
+        assertEquals(2, images.size)
+        assertEquals("data:image/png;base64,aGVsbG8=", images[0].jsonPrimitive.content) // 立绘在前
+        assertEquals("data:image/jpeg;base64,d29ybGQ=", images[1].jsonPrimitive.content) // 背景在后
+    }
+
+    @Test
+    fun mediaCreate_fastVariant_mapsVersionKuaisu() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"code":200,"data":{"task_id":1}}"""))
+        client.createTask(mediaConfig(), request(variant = SeedanceModelVariant.FAST, resolution = SeedanceResolution.P720))
+        val body = testJson.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        assertEquals("快速", body["params"]!!.jsonObject["version"]!!.jsonPrimitive.content)
+        assertEquals("720p", body["params"]!!.jsonObject["resolution"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun mediaCreate_blankRelayModelId_fallsBackToDefault() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"code":200,"data":{"task_id":1}}"""))
+        client.createTask(mediaConfig(relayModelId = "  "), request())
+        val body = testJson.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        assertEquals(DEFAULT_RELAY_MODEL_ID, body["model"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun mediaCreate_numericTaskId_isParsedAsText() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"code":200,"msg":"任务创建成功","data":{"task_id":123456}}"""))
+        val resp = client.createTask(mediaConfig(), request())
+        assertEquals("123456", resp.id)
+    }
+
+    @Test
+    fun mediaCreate_flatTaskIdWithoutWrapper_isParsed() = runBlocking {
+        // 无包装直接平铺 task_id 的兼容渠道。
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"task_id":"flat-9"}"""))
+        val resp = client.createTask(mediaConfig(), request())
+        assertEquals("flat-9", resp.id)
+    }
+
+    @Test
+    fun mediaCreate_successWithoutTaskId_returnsEmptyResponse() = runBlocking {
+        // 2xx 但拿不到任务 ID：交给协调器按歧义处理（可能已产生费用），客户端不抛错。
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"code":200,"msg":"ok","data":{}}"""))
+        val resp = client.createTask(mediaConfig(), request())
+        assertNull(resp.id)
+        assertNull(resp.remoteStatus)
+    }
+
+    @Test
+    fun mediaCreate_businessCode500_insufficientBalance_isClassifiedQuota() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody("""{"code":500,"msg":"任务创建失败","data":{"失败数量":1,"失败原因":["余额不足"]}}""")
+        )
+        val ex = expectMediaApiException()
+        assertEquals(SeedanceError.QUOTA_EXCEEDED, ex.classification)
+        assertEquals(500, ex.httpStatus)
+    }
+
+    @Test
+    fun mediaCreate_businessCode429_isClassifiedTransient() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"code":429,"msg":"繁忙"}"""))
+        val ex = expectMediaApiException()
+        assertEquals(SeedanceError.TRANSIENT_429_5XX, ex.classification)
+    }
+
+    private suspend fun expectMediaApiException(): SeedanceApiException {
+        val ex = runCatching { client.createTask(mediaConfig(), request()) }.exceptionOrNull()
+        assertNotNull("期望抛出 SeedanceApiException", ex)
+        assertTrue("期望 SeedanceApiException，实际 ${ex!!.javaClass.simpleName}", ex is SeedanceApiException)
+        return ex as SeedanceApiException
+    }
+
+    @Test
+    fun mediaStatus_getsStatusPathWithTaskIdQuery() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"task_id":123456,"state":"running","status":"处理中","status_group":"进行中","is_final":false,"progress":"45%","result_url":"","result_type":"","error":"","cost":0}"""
+            )
+        )
+        val resp = client.getTask(mediaConfig(), "123456")
+        assertEquals("123456", resp.id)
+        assertEquals(SeedanceRemoteStatus.RUNNING, resp.remoteStatus)
+        assertNull(resp.output?.videoUrl)
+
+        val recorded = server.takeRequest()
+        assertEquals("GET", recorded.method)
+        assertEquals("/v1/media/status?task_id=123456", recorded.path)
+        assertEquals("Bearer $TEST_API_KEY", recorded.getHeader("Authorization"))
+    }
+
+    @Test
+    fun mediaStatus_successWithUrl_mapsSucceededWithVideoUrl() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"task_id":1,"state":"success","is_final":true,"progress":"100%","result_url":"https://cdn.example.com/output.mp4","result_type":"video","error":"","cost":0.23}"""
+            )
+        )
+        val resp = client.getTask(mediaConfig(), "1")
+        assertEquals(SeedanceRemoteStatus.SUCCEEDED, resp.remoteStatus)
+        assertEquals("https://cdn.example.com/output.mp4", resp.output?.videoUrl)
+    }
+
+    @Test
+    fun mediaStatus_successWithoutUrl_keepsRunningToPollAgain() = runBlocking {
+        // 完成但 URL 未就绪：继续轮询，绝不误进「成功无产物」分支。
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"task_id":1,"state":"success","is_final":true,"progress":"100%","result_url":"","result_type":"","error":""}"""
+            )
+        )
+        val resp = client.getTask(mediaConfig(), "1")
+        assertEquals(SeedanceRemoteStatus.RUNNING, resp.remoteStatus)
+    }
+
+    @Test
+    fun mediaStatus_pending_mapsQueued() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"task_id":1,"state":"pending","is_final":false}"""))
+        assertEquals(SeedanceRemoteStatus.QUEUED, client.getTask(mediaConfig(), "1").remoteStatus)
+    }
+
+    @Test
+    fun mediaStatus_failed_carriesErrorMessage() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"task_id":1,"state":"failed","is_final":true,"error":"内容审核未通过"}"""
+            )
+        )
+        val resp = client.getTask(mediaConfig(), "1")
+        assertEquals(SeedanceRemoteStatus.FAILED, resp.remoteStatus)
+        assertEquals("内容审核未通过", resp.error?.message)
+    }
+
+    @Test
+    fun mediaStatus_unknownStateNotFinal_keepsRunning() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"task_id":1,"state":"weird","is_final":false}"""))
+        assertEquals(SeedanceRemoteStatus.RUNNING, client.getTask(mediaConfig(), "1").remoteStatus)
+    }
+
+    @Test
+    fun mediaStatus_unknownStateFinal_fallsBackToFailed() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"task_id":1,"state":"weird","is_final":true}"""))
+        assertEquals(SeedanceRemoteStatus.FAILED, client.getTask(mediaConfig(), "1").remoteStatus)
+    }
+
+    @Test
+    fun mediaStatus_wrappedInData_isParsed() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"code":200,"msg":"ok","data":{"task_id":7,"state":"running","is_final":false}}"""
+            )
+        )
+        val resp = client.getTask(mediaConfig(), "7")
+        assertEquals(SeedanceRemoteStatus.RUNNING, resp.remoteStatus)
+        assertEquals("7", resp.id)
+    }
+
+    @Test
+    fun mediaStatus_errorWrapperTaskNotFound_isClassifiedNotFound() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"code":404,"msg":"任务不存在"}"""))
+        val ex = runCatching { client.getTask(mediaConfig(), "999") }.exceptionOrNull()
+        assertNotNull(ex)
+        assertTrue("期望 SeedanceApiException，实际 ${ex!!.javaClass.simpleName}", ex is SeedanceApiException)
+        assertEquals(SeedanceError.NOT_FOUND, (ex as SeedanceApiException).classification)
+    }
+
+    @Test
+    fun mediaCancel_throwsUnsupported() = runBlocking {
+        val ex = runCatching { client.cancelQueuedTask(mediaConfig(), "1") }.exceptionOrNull()
+        assertNotNull(ex)
+        assertTrue("期望 UnsupportedOperationException，实际 ${ex!!.javaClass.simpleName}", ex is UnsupportedOperationException)
+    }
+
+    @Test
+    fun mediaProbe_getsMediaStatusPath() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"code":404,"msg":"任务不存在"}"""))
+        val result = client.probeEndpoint(mediaConfig())
+        assertTrue("期望 Ok，实际 $result", result is SeedanceProbeResult.Ok)
+        val recorded = server.takeRequest()
+        assertTrue(recorded.path!!.startsWith("/v1/media/status?task_id="))
+    }
+
+    @Test
+    fun mediaProbe_401_reportsKeyInvalid() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"code":401,"msg":"未授权"}"""))
+        val result = client.probeEndpoint(mediaConfig())
+        assertTrue("期望 Failed，实际 $result", result is SeedanceProbeResult.Failed)
+        assertTrue((result as SeedanceProbeResult.Failed).message.contains("API Key"))
+    }
+
+    // ---- 协议识别与媒体端点解析 ----
+
+    @Test
+    fun protocolDetection_mediaPath_isMediaRelay() {
+        assertEquals(SeedanceProtocol.MEDIA_RELAY, seedanceProtocolFor("https://api.lk888.ai/v1/media/generate"))
+        assertEquals(SeedanceProtocol.MEDIA_RELAY, seedanceProtocolFor("https://relay.example.com/v2/media/generate/"))
+    }
+
+    @Test
+    fun protocolDetection_knownRelayHostBareOrV1_isMediaRelay() {
+        assertEquals(SeedanceProtocol.MEDIA_RELAY, seedanceProtocolFor("https://api.lk888.ai"))
+        assertEquals(SeedanceProtocol.MEDIA_RELAY, seedanceProtocolFor("https://api.lk888.ai/v1"))
+        assertEquals(SeedanceProtocol.MEDIA_RELAY, seedanceProtocolFor("https://api.lingkeai.ai"))
+        assertEquals(SeedanceProtocol.MEDIA_RELAY, seedanceProtocolFor("https://dm1124.com"))
+    }
+
+    @Test
+    fun protocolDetection_officialAndUnknownBases_stayArk() {
+        assertEquals(SeedanceProtocol.ARK, seedanceProtocolFor("https://ark.cn-beijing.volces.com/api/v3"))
+        assertEquals(SeedanceProtocol.ARK, seedanceProtocolFor("https://relay.example.com"))
+        assertEquals(SeedanceProtocol.ARK, seedanceProtocolFor("https://relay.example.com/v1"))
+        assertEquals(SeedanceProtocol.ARK, seedanceProtocolFor(""))
+    }
+
+    @Test
+    fun resolveMediaGenerateEndpoint_fullPathUsedVerbatim() {
+        assertEquals(
+            "https://api.lk888.ai/v1/media/generate",
+            resolveMediaGenerateEndpoint("https://api.lk888.ai/v1/media/generate/"),
+        )
+    }
+
+    @Test
+    fun resolveMediaGenerateEndpoint_bareHostAndV1_appendMediaGenerate() {
+        assertEquals("https://api.lk888.ai/v1/media/generate", resolveMediaGenerateEndpoint("https://api.lk888.ai"))
+        assertEquals("https://api.lk888.ai/v1/media/generate", resolveMediaGenerateEndpoint("https://api.lk888.ai/v1"))
+    }
+
+    @Test
+    fun resolveMediaStatusEndpoint_replacesGenerateWithStatus() {
+        assertEquals("https://api.lk888.ai/v1/media/status", resolveMediaStatusEndpoint("https://api.lk888.ai/v1/media/generate"))
+        assertEquals("https://api.lk888.ai/v1/media/status", resolveMediaStatusEndpoint("https://api.lk888.ai"))
     }
 
     // ---- 404/405 → BAD_ENDPOINT ----

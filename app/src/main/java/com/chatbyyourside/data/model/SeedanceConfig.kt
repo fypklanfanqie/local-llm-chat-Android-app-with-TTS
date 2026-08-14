@@ -100,6 +100,12 @@ enum class SeedanceRatio(val apiValue: String) {
 data class SeedanceConfig(
     val baseUrl: String = "https://ark.cn-beijing.volces.com/api/v3",
     val apiKey: String = "",
+    /**
+     * 中转站媒体协议（POST /v1/media/generate）使用的 `model` 字段值。
+     * 官方方舟路径不使用本字段（模型由 [variant] 决定）。默认值对齐 dm1124/灵科中转站的
+     * Seedance 2.0 参考生视频模型（kwvideo-v2-ref）。
+     */
+    val relayModelId: String = "kwvideo-v2-ref",
     val variant: SeedanceModelVariant = SeedanceModelVariant.STANDARD,
     val resolution: SeedanceResolution = SeedanceResolution.P720,
     val ratio: SeedanceRatio = SeedanceRatio.PORTRAIT,
