@@ -22,6 +22,7 @@
   Thinking-depth levels with byte-budget control; reasoning rendered as collapsible blocks.
 - **🎬 角色视频生成 · Seedance video** — 聊天回复自动触发角色短片生成（「邂逅」时间线：播放 / 导出 / 历史），自定义参考图与场景。
   Auto-generate a short Seedance video of your character acting out the reply — with a full Encounter timeline, playback, export and history.
+  <img width="1080" height="2400" alt="Screenshot_2026-08-15-10-22-24-324_com chatbyyou" src="https://github.com/user-attachments/assets/5d365711-b091-40dc-8068-30d11643f77f" /> <img width="1080" height="2400" alt="Screenshot_2026-08-15-10-22-17-079_com chatbyyou" src="https://github.com/user-attachments/assets/ea74ffbb-ce8d-47dd-8431-64cddc73922d" />
 - **🔊 双 TTS 引擎 · Dual TTS** — 系统离线 TTS（默认）＋ 火山引擎豆包云端声音复刻（每角色独立音色）。
   Offline system TTS (default) plus Volcengine Doubao cloud voice cloning — per-character voices.
 - **🛡️ 内存准入 + 基准认证 · Memory admission & benchmark certification** — 大模型不 OOM：内存不足自动降上下文；实验性加速（lookahead / 多 token 解码）必须在设备端基准测试中证明收益后才启用。
