@@ -239,7 +239,12 @@ fun SettingsScreen(
             AlertDialog(
                 onDismissRequest = { showFreeNotice = false },
                 title = { Text("免费对话") },
-                text = { Text("此为免费模型，参数量为7b，如果出现错误稍等就行，免费的服务请大家谅解！") },
+                text = {
+                    Text(
+                        "此为免费模型，参数量为7b，如果出现错误稍等就行，免费的服务请大家谅解！\n\n此服务需要国外网络环境访问！",
+                        color = scheme.onSurface,
+                    )
+                },
                 confirmButton = {
                     TextButton(onClick = { showFreeNotice = false }) { Text("知道了") }
                 },
