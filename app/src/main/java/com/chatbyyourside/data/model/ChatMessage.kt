@@ -124,4 +124,9 @@ data class DisplayMessage(
      * 视频状态/提示词/本地路径绝不进入 LLM 历史。
      */
     val video: SeedanceVideo? = null,
+    /**
+     * 已落库消息的 Room 主键（持久消息才有值；流式气泡 / 乐观完成消息由构造方回填）。
+     * 供气泡「删除」操作按行 ID 精确删除（[com.chatbyyourside.ui.chat.ChatViewModel.deleteMessage]）。
+     */
+    val databaseId: Long? = null,
 )

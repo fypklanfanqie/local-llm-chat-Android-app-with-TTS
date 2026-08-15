@@ -387,6 +387,7 @@ fun ChatScreen(
                         ChatMessageList(
                             state = state,
                             onTts = { viewModel.playTts(it) },
+                            onDelete = { viewModel.deleteMessage(it.databaseId) },
                             modifier = Modifier.fillMaxSize(),
                             // Task 8：内联播放开关 / 全屏 / 保存到本地；Task 7 接取消/重试。
                             onPlayVideo = { video -> handleVideoPlay(video) },
@@ -818,6 +819,7 @@ internal fun MessageBubble(
     characterImage: String,
     characterName: String,
     onTts: () -> Unit,
+    onDelete: () -> Unit = {},
     onPlayVideo: (() -> Unit)? = null,
     onFullScreenVideo: (() -> Unit)? = null,
     onExportVideo: (() -> Unit)? = null,
@@ -994,6 +996,14 @@ internal fun MessageBubble(
                                 icon = Icons.AutoMirrored.Outlined.VolumeUp,
                                 label = "朗读",
                                 onClick = onTts,
+                            )
+                        }
+                        // 删除单条消息（用户问题 / 助手回答）：仅持久消息提供入口（数据库Id非空）。
+                        if (message.databaseId != null) {
+                            ActionChip(
+                                icon = Icons.Outlined.Delete,
+                                label = "删除",
+                                onClick = onDelete,
                             )
                         }
                     }

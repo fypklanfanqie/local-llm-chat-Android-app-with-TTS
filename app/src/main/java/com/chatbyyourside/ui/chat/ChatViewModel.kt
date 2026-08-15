@@ -279,7 +279,10 @@ class ChatViewModel(
             videos = videos,
         )
         if (result.pendingResolved) pendingFinal = null
-        _uiState.update { it.copy(messages = result.messages, showWelcome = result.showWelcome) }
+        // 欢迎页仅在「没有任何可显示消息」时出现：用 result.messages 而非 reconciler 的
+        // history/streaming/pending 组合判定，防止本地首答完成后（乐观消息已入列表但 Room
+        // 旧快照尚未回填的窗口内）showWelcome 残留 true，把刚生成的回答遮成欢迎页。
+        _uiState.update { it.copy(messages = result.messages, showWelcome = result.messages.isEmpty()) }
     }
 
     // ===== 会话管理 =====
@@ -908,6 +911,7 @@ class ChatViewModel(
             segments = MarkdownParser.parseWithThink(assistantSrc, isStreaming = false),
             sender = senderName,
             completionState = completionState,
+            databaseId = assistantRowId,
         )
         pendingFinal = PendingFinal(
             conversationId = convId,
@@ -1037,6 +1041,36 @@ class ChatViewModel(
 
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
+    }
+
+    /**
+     * 删除单条消息（用户问题或助手回答）。
+     *
+     * 仅删除已落库的持久消息（[DisplayMessage.databaseId] 非空）；流式气泡不提供入口。
+     * 删除后 Room Flow 自动重渲染；若删除的是乐观完成消息（pendingFinal），先同步清除该
+     * pending 并从列表移除，避免 Room 旧快照在删除落库前把消息重新带回。
+     * 关联的 Seedance 视频任务保留（其来源快照独立，删除聊天消息不影响已完成视频）。
+     */
+    fun deleteMessage(databaseId: Long?) {
+        val id = databaseId ?: return
+        if (id <= 0L) return
+        viewModelScope.launch {
+            if (_activeConversationId.value == null) return@launch
+            // 正在展示的乐观完成消息：先清 pending 并从列表移除，防止 Room 旧快照把它带回来。
+            if (pendingFinal?.databaseId == id) {
+                pendingFinal = null
+                _uiState.update { s ->
+                    s.copy(messages = s.messages.filterNot { it.id == "msg-$id" })
+                }
+            }
+            container.chatRepository.deleteMessage(id)
+            // 兜底：DB 删除提交后（Room 已不会再回填该行），确保列表中不残留。
+            _uiState.update { s ->
+                if (s.messages.any { it.id == "msg-$id" }) {
+                    s.copy(messages = s.messages.filterNot { it.id == "msg-$id" })
+                } else s
+            }
+        }
     }
 
     /** TTS 播放 */

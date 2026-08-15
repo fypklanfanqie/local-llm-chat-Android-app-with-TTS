@@ -90,6 +90,26 @@ class ChatTimelineReconcilerTest {
     }
 
     @Test
+    fun databaseId_isCarriedOntoDisplayMessagesForDeletion() {
+        // 气泡「删除」按行 ID 精确删行：持久消息的 databaseId 必须透传到展示层。
+        val history = listOf(
+            user(id = 1L, content = "你好"),
+            assistant(id = 7L, content = "回复", modelContent = "raw"),
+        )
+        val result = ChatTimelineReconciler.reconcile(
+            history = history,
+            activeConversationId = 1L,
+            pendingFinal = null,
+            streaming = null,
+            showThink = false,
+            characterName = "AI",
+        )
+        assertEquals(1L, result.messages.first { it.role == "user" }.databaseId)
+        assertEquals(7L, result.messages.first { it.role == "assistant" }.databaseId)
+        assertTrue("流式气泡 databaseId 应为 null", streaming().databaseId == null)
+    }
+
+    @Test
     fun identicalAssistantTexts_areDistinguishedByRowId() {
         // 两次回复文本完全相同，必须按行 ID 区分，不能因文本相等而误清 pending。
         val history = listOf(

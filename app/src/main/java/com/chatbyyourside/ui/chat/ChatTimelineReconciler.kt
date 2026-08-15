@@ -105,6 +105,8 @@ object ChatTimelineReconciler {
                 completionState = msg.completionState,
                 // Task 7：Seedance 视频任务仅附加到助手消息（展示层投影，不进入 LLM 历史）。
                 video = if (msg.role == "assistant") videoByAssistantId[msg.databaseId] else null,
+                // 持久行主键：气泡删除操作按此精确删行（流式气泡为 null）。
+                databaseId = msg.databaseId,
             )
         }
     }
