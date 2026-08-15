@@ -1,4 +1,4 @@
-# Chat by your side · 语畔拾光
+# Chat by your side
 
 > 一款苹果风液态玻璃 UI 的安卓 **本地 AI 角色扮演聊天**应用，端侧 MNN 大模型推理 + 云端双引擎 · An Apple-style liquid-glass **on-device LLM** roleplay chat app for Android (MNN local inference + cloud dual engine)
 
