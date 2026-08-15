@@ -228,6 +228,49 @@ class SeedancePromptGeneratorTest {
         assertTrue("系统指令应要求 environment 以场景补充为依据", system.contains("场景补充"))
     }
 
+    // ---- 时长适配：动作/镜头/音效数量与总时长匹配 ----
+
+    @Test
+    fun userMessageCarriesDurationAndScalingGuidance() = runBlocking {
+        val fake = FakeLlm(fullDocumentJson())
+        SeedancePromptGenerator(fake).generate(apiConfig(), input(durationSeconds = 5))
+        val user = singleUserMessage(fake)
+        assertTrue("用户消息应写明视频总时长", user.contains("视频总时长为 5 秒"))
+        assertTrue("用户消息应含时长适配小节", user.contains("视频时长"))
+    }
+
+    @Test
+    fun shortDurationForbidsMultiStageAction() = runBlocking {
+        val fake = FakeLlm(fullDocumentJson())
+        SeedancePromptGenerator(fake).generate(apiConfig(), input(durationSeconds = 5))
+        val user = singleUserMessage(fake)
+        assertTrue("5 秒短片应写为单个连续动作", user.contains("单个连续动作"))
+        assertTrue("5 秒短片不得分多阶段展开", user.contains("不允许分多阶段展开"))
+    }
+
+    @Test
+    fun mediumDurationAllowsTwoStages() = runBlocking {
+        val fake = FakeLlm(fullDocumentJson())
+        SeedancePromptGenerator(fake).generate(apiConfig(), input(durationSeconds = 8))
+        assertTrue("6-9 秒应允许最多两个自然阶段", singleUserMessage(fake).contains("最多两个自然阶段"))
+    }
+
+    @Test
+    fun longDurationAllowsMultiStageAction() = runBlocking {
+        val fake = FakeLlm(fullDocumentJson())
+        SeedancePromptGenerator(fake).generate(apiConfig(), input(durationSeconds = 12))
+        assertTrue("10-15 秒应允许多阶段运动", singleUserMessage(fake).contains("两到三阶段运动"))
+    }
+
+    @Test
+    fun systemPromptRequiresDurationMatching() = runBlocking {
+        val fake = FakeLlm(fullDocumentJson())
+        SeedancePromptGenerator(fake).generate(apiConfig(), input())
+        val system = (fake.calls.single().messages[0].content as JsonPrimitive).content
+        assertTrue("系统指令应要求动作编排与时长匹配", system.contains("时长适配"))
+        assertTrue("系统指令应要求短视频更精简", system.contains("视频越短越精简"))
+    }
+
     // ---- 质量红线：过短拒绝 ----
 
     @Test
