@@ -41,7 +41,12 @@ class CloudChatProvider(
         activeCall = null
 
         val apiConfig = settings.getApiConfigNow()
-        if (apiConfig.apiKey.isBlank()) {
+        // 内置「免费对话」供应商的 key 由云端代理注入，App 端允许空 key（无需在设置页填写）。
+        val isFreeProxy = apiConfig.baseUrl.trimEnd('/').equals(
+            com.chatbyyourside.config.FREE_PROVIDER_BASE_URL.trimEnd('/'),
+            ignoreCase = true,
+        )
+        if (apiConfig.apiKey.isBlank() && !isFreeProxy) {
             throw Exception("请先在设置页配置 API Key")
         }
 

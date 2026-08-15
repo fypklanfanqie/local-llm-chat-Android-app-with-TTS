@@ -43,6 +43,7 @@ import com.chatbyyourside.ui.theme.GlassShapes
 import com.chatbyyourside.config.Characters
 import com.chatbyyourside.config.ModelProvider
 import com.chatbyyourside.config.PresetModel
+import com.chatbyyourside.config.FREE_PROVIDER_ID
 import com.chatbyyourside.config.PRESET_PROVIDERS
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.data.model.ChatProviderType
@@ -94,6 +95,8 @@ fun SettingsScreen(
 
     var providerExpanded by remember { mutableStateOf(false) }
     var modelExpanded by remember { mutableStateOf(false) }
+    // 「免费对话」供应商选择时的免费提示弹窗。
+    var showFreeNotice by remember { mutableStateOf(false) }
 
     var customBaseUrl by remember(apiConfig) { mutableStateOf(apiConfig.baseUrl) }
     var customModel by remember(apiConfig) { mutableStateOf(apiConfig.model) }
@@ -186,6 +189,8 @@ fun SettingsScreen(
                         selectedProvider = provider
                         selectedModel = provider?.models?.firstOrNull()
                         providerExpanded = false
+                        // 选中「免费对话」：弹出免费服务提示。
+                        if (provider?.id == FREE_PROVIDER_ID) showFreeNotice = true
                     },
                 )
                 if (!isCustom && selectedProvider != null) {
@@ -204,7 +209,14 @@ fun SettingsScreen(
                     GlassInputField(value = customBaseUrl, onValueChange = { customBaseUrl = it }, placeholder = "API BASE URL")
                     GlassInputField(value = customModel, onValueChange = { customModel = it }, placeholder = "MODEL")
                 }
-                PasswordField("API KEY", apiKey, showApiKey, { apiKey = it }, { showApiKey = !showApiKey })
+                if (selectedProvider?.id == FREE_PROVIDER_ID) {
+                    Text(
+                        "已内置免费共享 Key（由云端代理注入，无需填写）",
+                        color = scheme.onSurfaceVariant, fontSize = 12.sp,
+                    )
+                } else {
+                    PasswordField("API KEY", apiKey, showApiKey, { apiKey = it }, { showApiKey = !showApiKey })
+                }
             }
         }
         SaveButton(
@@ -214,11 +226,25 @@ fun SettingsScreen(
                 scope.launch {
                     val baseUrl = if (isCustom) customBaseUrl else selectedProvider?.baseUrl ?: customBaseUrl
                     val model = if (isCustom) customModel else selectedModel?.id ?: customModel
-                    container.settingsRepository.setApiConfig(ApiConfig(baseUrl, apiKey, model))
+                    // 「免费对话」供应商的 key 由云端代理注入，App 端存空即可。
+                    val key = if (selectedProvider?.id == FREE_PROVIDER_ID) "" else apiKey
+                    container.settingsRepository.setApiConfig(ApiConfig(baseUrl, key, model))
                     apiSaved = true
                 }
             },
         )
+
+        // 「免费对话」选择提示
+        if (showFreeNotice) {
+            AlertDialog(
+                onDismissRequest = { showFreeNotice = false },
+                title = { Text("免费对话") },
+                text = { Text("此为免费模型，参数量为7b，如果出现错误稍等就行，免费的服务请大家谅解！") },
+                confirmButton = {
+                    TextButton(onClick = { showFreeNotice = false }) { Text("知道了") }
+                },
+            )
+        }
 
         // ===== 对话 =====
         GlassListSection(title = "对话") {

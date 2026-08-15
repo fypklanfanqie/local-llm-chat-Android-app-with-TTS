@@ -136,6 +136,10 @@
   云端 OpenAI 兼容 API（SSE 流式）与本地 MNN 离线推理一键切换，对话按角色独立保存。
   Switch between a cloud OpenAI-compatible API (SSE streaming) and on-device MNN offline inference. Conversations are saved per character.
 
+- **内置免费云端 · Built-in free cloud**
+  内置「免费对话」供应商（硅基流动免费 7B 模型），开箱即用、无需 API Key；Key 由 Cloudflare 云端代理注入，App 端与仓库均不含明文 Key。
+  Built-in "Free Chat" provider (SiliconFlow free 7B) — works out of the box with no API key; the key is injected by a Cloudflare server-side proxy, never embedded in the app or repo.
+
 - **🎬 角色视频生成 · Character video generation**
   对话回复完成后自动触发 Seedance 2.0 短片生成：LLM 生成导演级分镜提示词 → 角色立绘 / 背景参考图快照 → 提交 / 轮询 / 下载 → 校验后「邂逅」时间线播放与导出。同时支持火山方舟与媒体中继协议；失败自动有界重试，**计费 POST 永不自动重发**，重试前需二次确认。
   Auto-generate a Seedance 2.0 video of your character after a reply — director-style prompt generation, reference snapshots, submit/query/download pipeline, playback & export. Volcengine Ark and media-relay protocols; bounded retries with cost-confirmation before fee-bearing regeneration.

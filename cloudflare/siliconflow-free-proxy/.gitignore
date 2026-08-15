@@ -1,0 +1,4 @@
+# Wrangler 本地状态 / 本地机密（永不提交）
+.wrangler/
+.dev.vars
+.dev.vars.*

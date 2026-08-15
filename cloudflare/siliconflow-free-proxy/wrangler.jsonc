@@ -1,0 +1,11 @@
+{
+  // SiliconFlow 免费对话代理
+  // 部署：wrangler deploy；API Key 用 wrangler secret put SILICONFLOW_API_KEY 设置（绝不出现在源码/GitHub）。
+  "name": "siliconflow-free-proxy",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-08-15",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  }
+}

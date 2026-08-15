@@ -22,7 +22,31 @@ data class ModelProvider(
     val requiresApiKey: Boolean = true,
 )
 
+/**
+ * 内置「免费对话」供应商（SiliconFlow 免费 7B）。
+ *
+ * API Key 存于 Cloudflare Worker Secret（[FREE_PROVIDER_BASE_URL] 指向的代理），
+ * 代理在服务端注入 key 后转发到硅基流动 —— App 端与 GitHub 均不含 key，
+ * 故 [requiresApiKey] 为 false，云端请求允许空 key。
+ */
+const val FREE_PROVIDER_ID = "siliconflow-free"
+const val FREE_PROVIDER_BASE_URL = "https://siliconflow-free-proxy.lanfanqie.workers.dev/v1"
+
 val PRESET_PROVIDERS: List<ModelProvider> = listOf(
+    ModelProvider(
+        id = FREE_PROVIDER_ID,
+        displayName = "免费对话",
+        baseUrl = FREE_PROVIDER_BASE_URL,
+        defaultModel = "Qwen/Qwen2.5-7B-Instruct",
+        models = listOf(
+            PresetModel(
+                "Qwen/Qwen2.5-7B-Instruct",
+                "Qwen2.5-7B（免费）",
+                "硅基流动免费共享 7B 模型，人多时可能稍慢，出错稍等重试即可",
+            ),
+        ),
+        requiresApiKey = false,
+    ),
     ModelProvider(
         id = "deepseek",
         displayName = "DeepSeek",
