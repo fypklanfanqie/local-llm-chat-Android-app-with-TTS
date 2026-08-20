@@ -447,6 +447,7 @@ fun ChatScreen(
                 deepThinkingEnabled = state.deepThinkingEnabled,
                 videoAutoEnabled = state.activeConversationAutoVideoEnabled,
                 videoToggleDisabled = isLocal,
+                specialEventActive = state.activeSpecialEventId != null,
                 onBack = onBack,
                 onClickCharacter = onNavigateToCharacters,
                 onSwitchProvider = { viewModel.switchProvider(it) },
@@ -813,6 +814,7 @@ private fun ChatTopBar(
     deepThinkingEnabled: Boolean,
     videoAutoEnabled: Boolean,
     videoToggleDisabled: Boolean,
+    specialEventActive: Boolean,
     onBack: () -> Unit,
     onClickCharacter: () -> Unit,
     onSwitchProvider: (ChatProviderType) -> Unit,
@@ -895,17 +897,21 @@ private fun ChatTopBar(
             highlighted = deepThinkingEnabled,
             onClick = onToggleDeepThinking,
         )
-        // Seedance 自动视频开关（Task 7）：LOCAL Provider 下禁用并提示「仅云端可用」，
+        // Seedance 自动视频开关（Task 7）：LOCAL Provider / 特殊邂逅下禁用并提示，
         // 不清空已存储的会话开关值；开启准入（Key/立绘）由 ViewModel 校验。
         IconBubble(
             icon = Icons.Outlined.Videocam,
-            contentDescription = if (videoToggleDisabled) "自动视频：仅云端可用" else "自动视频",
-            highlighted = videoAutoEnabled && !videoToggleDisabled,
+            contentDescription = when {
+                specialEventActive -> "特殊邂逅中不可生成视频"
+                videoToggleDisabled -> "自动视频：仅云端可用"
+                else -> "自动视频"
+            },
+            highlighted = videoAutoEnabled && !videoToggleDisabled && !specialEventActive,
             onClick = {
-                if (videoToggleDisabled) {
-                    Toast.makeText(context, "自动视频仅云端可用", Toast.LENGTH_SHORT).show()
-                } else {
-                    onToggleVideoAuto()
+                when {
+                    specialEventActive -> Toast.makeText(context, "特殊邂逅中不可生成视频", Toast.LENGTH_SHORT).show()
+                    videoToggleDisabled -> Toast.makeText(context, "自动视频仅云端可用", Toast.LENGTH_SHORT).show()
+                    else -> onToggleVideoAuto()
                 }
             },
         )
