@@ -469,7 +469,7 @@ fun SettingsScreen(
         GlassListSection(title = "关于") {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Chat by your side", color = scheme.onSurface, fontSize = 16.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
-                Text("Android 版 v1.0.0", color = scheme.onSurfaceVariant, fontSize = 12.sp)
+                Text("Android 版 v2.5", color = scheme.onSurfaceVariant, fontSize = 12.sp)
                 Text("AI 角色扮演聊天应用", color = scheme.onSurfaceVariant, fontSize = 12.sp)
                 Spacer(Modifier.height(4.dp))
                 Text(
