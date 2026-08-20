@@ -2,6 +2,7 @@ package com.chatbyyourside.data.local
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import com.chatbyyourside.config.AppConfig
@@ -38,7 +39,7 @@ import kotlinx.serialization.json.Json
 // 保证启动路径永远可读（设置项自然回退默认值）。
 private val Context.settingsDataStore by preferencesDataStore(
     name = "rhodes_settings",
-    corruptionHandler = ReplaceFileCorruptionHandler { _ -> emit(emptyPreferences()) },
+    corruptionHandler = ReplaceFileCorruptionHandler { _ -> emptyPreferences() },
 )
 
 /**

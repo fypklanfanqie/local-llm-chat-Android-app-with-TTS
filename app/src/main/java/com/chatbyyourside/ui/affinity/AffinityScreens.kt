@@ -50,6 +50,7 @@ import com.chatbyyourside.affinity.AFFINITY_EVENT_THRESHOLDS
 import com.chatbyyourside.affinity.SpecialEventLaunchResult
 import com.chatbyyourside.affinity.formatAffinity
 import com.chatbyyourside.affinity.nextAffinityHint
+import com.chatbyyourside.affinity.toScript
 import com.chatbyyourside.data.local.SpecialEventScriptEntity
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.CharacterAffinity
@@ -150,7 +151,7 @@ fun AffinityEventsScreen(
     var editingThreshold by remember { mutableStateOf<Int?>(null) }
     val currentScript by produceState<SpecialEventScript?>(initialValue = null, editingThreshold) {
         value = editingThreshold?.let { threshold ->
-            container.specialEventScriptStore.get(character.id, threshold)
+            container.specialEventScriptStore.get(character.id, threshold)?.toScript()
         }
     }
 

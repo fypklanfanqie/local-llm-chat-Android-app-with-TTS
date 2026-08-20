@@ -62,7 +62,7 @@ object CrashReporter {
             val dir = crashDir ?: File(context.filesDir, DIR_NAME).also { crashDir = it }
             dir.mkdirs()
             val file = File(dir, "event_${timestamp()}.log")
-            file.writeText(buildLogHeader(context) + "\n[$tag] $message\n")
+            file.writeText(buildLogHeader() + "\n[$tag] $message\n")
         } catch (_: Exception) {
             // 记录失败不影响主流程
         }

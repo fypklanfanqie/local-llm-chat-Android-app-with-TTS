@@ -166,7 +166,7 @@ class VolcTtsClient(
 
         // 执行请求（OkHttp execute 是阻塞的，在 IO 调度器运行）
         val response = call.execute()
-        response.use { resp ->
+        return response.use { resp ->
             val body = resp.body ?: throw Exception("TTS 代理返回空响应体")
             if (!resp.isSuccessful) {
                 // 错误响应体通常很小，有界读；只取前 500 字符，不整读大错误体。
@@ -201,7 +201,7 @@ class VolcTtsClient(
         val call = client.newCall(request)
         currentCoroutineContext()[Job]?.invokeOnCompletion { runCatching { call.cancel() } }
 
-        call.execute().use { response ->
+        return call.execute().use { response ->
             val body = response.body ?: throw Exception("火山引擎 TTS 返回空响应体")
             val logId = response.header("X-Tt-Logid")
             if (!response.isSuccessful) {
