@@ -137,8 +137,8 @@
   <img width="1080" height="2400" alt="Screenshot_2026-08-07-18-20-04-991_com chatbyyou" src="https://github.com/user-attachments/assets/2f6457c6-96e5-4184-b3a7-c41dd0eb36b7" />
 
 - **云端 + 本地双引擎** · **Cloud + local dual engine**
-  云端 OpenAI 兼容 API（SSE 流式）与本地 MNN 离线推理一键切换，对话按角色独立保存；自定义云端 LLM 支持 **OpenAI 与 Anthropic 两种协议格式**、可填任意 base URL 与模型名。
-  Switch between a cloud OpenAI-compatible API (SSE streaming) and on-device MNN offline inference. Conversations are saved per character; custom cloud endpoints support both OpenAI and Anthropic request formats with user-defined base URL and model.
+  云端 OpenAI 兼容 API（SSE 流式）与本地 MNN 离线推理一键切换，对话按角色独立保存；自定义云端 LLM 支持 **OpenAI（/chat/completions）与 Anthropic（/v1/messages）双协议自动识别**、可填任意 base URL 与模型名（Base URL 也支持直接填完整端点，不会重复拼接）。
+  Switch between a cloud OpenAI-compatible API (SSE streaming) and on-device MNN offline inference. Conversations are saved per character; custom cloud endpoints auto-detect both OpenAI and Anthropic request formats with user-defined base URL and model (full endpoints are accepted without duplicate path joining).
 
 - **内置免费云端 · Built-in free cloud**
   内置「免费对话」供应商（硅基流动免费 7B 模型，含 DeepSeek-R1-7B 免费推理模型），开箱即用、无需 API Key；Key 由 Cloudflare 云端代理注入，App 端与仓库均不含明文 Key。

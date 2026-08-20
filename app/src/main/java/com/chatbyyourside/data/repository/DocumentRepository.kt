@@ -235,7 +235,7 @@ class DocumentRepository(
             })
         }
         val messages = listOf(ChatMessageDto(role = "user", content = content))
-        return client.chatOnce(cfg.baseUrl, cfg.apiKey, cfg.model, messages, format = cfg.format)
+        return client.chatOnce(cfg.baseUrl, cfg.apiKey, cfg.model, messages, )
     }
 
     /** 根据 base64 数据的魔术字节推断图片 MIME */

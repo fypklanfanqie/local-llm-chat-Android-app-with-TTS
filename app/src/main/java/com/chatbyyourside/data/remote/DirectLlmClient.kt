@@ -1,6 +1,5 @@
 package com.chatbyyourside.data.remote
 
-import com.chatbyyourside.data.model.LlmApiFormat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
@@ -66,12 +65,12 @@ class DirectLlmClient(
         onChunk: (String) -> Unit,
         onCall: ((Call) -> Unit)? = null,
         deepThinking: Boolean = false,
-        format: LlmApiFormat = LlmApiFormat.OPENAI,
-    ): String {
-        if (format == LlmApiFormat.ANTHROPIC) {
-            return anthropicChatStream(baseUrl, apiKey, model, messages, onChunk, onCall)
-        }
-        return withContext(Dispatchers.IO) {
+    ): String = withContext(Dispatchers.IO) {
+        // Anthropic 格式：/v1/messages + x-api-key 头 + content_block_delta 流式；
+        // 其余端点一律 OpenAI 兼容格式。
+        if (isAnthropicEndpoint(baseUrl)) {
+            anthropicChatStream(baseUrl, apiKey, model, messages, onChunk, onCall)
+        } else {
             val request = buildRequest(
                 endpoint = buildEndpoint(baseUrl),
                 apiKey = apiKey,
@@ -88,8 +87,7 @@ class DirectLlmClient(
         apiKey: String,
         model: String,
         messages: List<ChatMessageDto>,
-        format: LlmApiFormat = LlmApiFormat.OPENAI,
-    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson = false, format = format)
+    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson = false)
 
     /** 非流式一次性对话，可请求结构化 JSON 输出。
      *  仅当 [responseFormatJson]=true 且供应商在白名单内时才注入 response_format=json_object，
@@ -100,8 +98,7 @@ class DirectLlmClient(
         model: String,
         messages: List<ChatMessageDto>,
         responseFormatJson: Boolean,
-        format: LlmApiFormat = LlmApiFormat.OPENAI,
-    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson, format)
+    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson)
 
     private suspend fun chatOnceInternal(
         baseUrl: String,
@@ -109,12 +106,10 @@ class DirectLlmClient(
         model: String,
         messages: List<ChatMessageDto>,
         responseFormatJson: Boolean,
-        format: LlmApiFormat = LlmApiFormat.OPENAI,
-    ): String {
-        if (format == LlmApiFormat.ANTHROPIC) {
-            return anthropicChatOnce(baseUrl, apiKey, model, messages)
-        }
-        return withContext(Dispatchers.IO) {
+    ): String = withContext(Dispatchers.IO) {
+        if (isAnthropicEndpoint(baseUrl)) {
+            anthropicChatOnce(baseUrl, apiKey, model, messages)
+        } else {
             val request = buildRequest(
                 endpoint = buildEndpoint(baseUrl),
                 apiKey = apiKey,
@@ -206,8 +201,26 @@ class DirectLlmClient(
         return renderAccumulated(reasoningBuf, contentBuf, contentStarted)
     }
 
-    private fun buildEndpoint(baseUrl: String): String =
-        baseUrl.trimEnd('/') + "/chat/completions"
+    private fun buildEndpoint(baseUrl: String): String {
+        val base = baseUrl.trim().trimEnd('/')
+        return if (base.endsWith("/chat/completions", ignoreCase = true)) {
+            base
+        } else {
+            "$base/chat/completions"
+        }
+    }
+
+    /**
+     * 从 baseUrl 自动探测 Anthropic 格式端点（/v1/messages + x-api-key 头）：
+     * - baseUrl 含 anthropic / claude（官方域或中转网关）→ Anthropic；
+     * - baseUrl 以 /v1/messages 结尾 → Anthropic；
+     * - 其余一律 OpenAI 兼容格式。
+     */
+    private fun isAnthropicEndpoint(baseUrl: String): Boolean {
+        val b = baseUrl.lowercase()
+        return b.contains("anthropic") || b.contains("claude") ||
+            b.trim().trimEnd('/').endsWith("/v1/messages")
+    }
 
     private fun buildBody(
         model: String,
@@ -347,70 +360,94 @@ class DirectLlmClient(
         }
         return if (msg.isNullOrBlank()) "HTTP $code" else "HTTP $code: $msg"
     }
-
     // ===== Anthropic 格式（/v1/messages + x-api-key / anthropic-version）=====
 
-    /** Anthropic 最大输出 token：客户端统一上限，避免各家默认差异。 */
-    private companion object {
-        const val ANTHROPIC_MAX_TOKENS = 8192
-        const val ANTHROPIC_VERSION = "2023-06-01"
-    }
+    private val ANTHROPIC_VERSION = "2023-06-01"
+    private val ANTHROPIC_MAX_TOKENS = 8192
 
-    /** 兼容用户填写的 baseUrl 形态：`…/v1` / 裸域 / 已含 /messages。 */
+    /** 兼容用户填写的 baseUrl 形态：`…/v1` / `…/v1/messages` 已含 / 裸域。 */
     private fun buildAnthropicEndpoint(baseUrl: String): String {
-        val trimmed = baseUrl.trimEnd('/')
+        val base = baseUrl.trim().trimEnd('/')
         return when {
-            trimmed.endsWith("/messages") -> trimmed
-            trimmed.endsWith("/v1") -> "$trimmed/messages"
-            else -> "$trimmed/v1/messages"
+            base.endsWith("/v1/messages") -> base
+            base.endsWith("/v1") -> "$base/messages"
+            else -> "$base/v1/messages"
         }
     }
 
-    private fun buildAnthropicRequest(endpoint: String, apiKey: String, body: String): Request =
-        Request.Builder()
+    private fun buildAnthropicRequest(endpoint: String, apiKey: String, body: String, accept: String?): Request {
+        val reqBody = body.toRequestBody(jsonMediaType)
+        return Request.Builder()
             .url(endpoint)
-            .header("x-api-key", apiKey)
+            .header("x-api-key", apiKey.trim())
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("Content-Type", "application/json")
-            .post(body.toRequestBody(jsonMediaType))
+            .apply { if (accept != null) header("Accept", accept) }
+            .post(reqBody)
             .build()
+    }
 
-    private fun buildAnthropicBody(model: String, messages: List<ChatMessageDto>, stream: Boolean): String {
-        val system = messages
-            .filter { it.role == "system" }
-            .mapNotNull { (it.content as? JsonPrimitive)?.contentOrNull }
-            .joinToString("\n")
+    private fun buildAnthropicBody(
+        model: String,
+        messages: List<ChatMessageDto>,
+        stream: Boolean,
+        maxTokens: Int,
+    ): String {
+        val system = messages.filter { it.role == "system" }
+            .joinToString("\n") { anthropicTextOf(it.content) }
+        val apiMessages = messages.filter { it.role != "system" }.map { m ->
+            buildJsonObject {
+                put("role", m.role)
+                put("content", anthropicContent(m.content))
+            }
+        }
         return buildJsonObject {
-            put("model", model)
-            put("max_tokens", ANTHROPIC_MAX_TOKENS)
+            put("model", model.trim())
+            put("max_tokens", maxTokens)
             if (system.isNotBlank()) put("system", system)
-            put("messages", buildJsonArray {
-                messages.filter { it.role != "system" }.forEach { m ->
-                    add(buildJsonObject {
-                        put("role", if (m.role == "assistant") "assistant" else "user")
-                        put("content", toAnthropicContent(m.content))
-                    })
-                }
-            })
+            put("messages", buildJsonArray { apiMessages.forEach { add(it) } })
             put("stream", stream)
         }.toString()
     }
 
-    /** 把 OpenAI 兼容 content（纯文本 JsonPrimitive 或多模态数组）映射为 Anthropic content 块。 */
-    private fun toAnthropicContent(content: JsonElement): JsonElement {
-        if (content !is JsonArray) return content // 纯文本原样透传
+    /** 纯文本提取（system 拼接用）：字符串原样；多模态数组只取 text 块。 */
+    private fun anthropicTextOf(content: JsonElement): String = when (content) {
+        is JsonPrimitive -> content.contentOrNull.orEmpty()
+        is JsonArray -> content.mapNotNull { b ->
+            val obj = b.jsonObject
+            if (obj["type"]?.jsonPrimitive?.content == "text") obj["text"]?.jsonPrimitive?.contentOrNull else null
+        }.joinToString("")
+        else -> ""
+    }
+
+    /** 把 OpenAI 兼容 content 映射为 Anthropic content 块：image_url(data URI)→base64 图块，text 原样。 */
+    private fun anthropicContent(content: JsonElement): JsonElement {
+        if (content is JsonPrimitive) return content
+        if (content !is JsonArray) return JsonPrimitive("")
         return buildJsonArray {
-            content.forEach { block ->
-                val obj = block as? JsonObject
-                when (obj?.get("type")?.jsonPrimitive?.contentOrNull) {
-                    "image_url" -> add(buildJsonObject {
-                        put("type", "image")
-                        put("source", buildJsonObject {
-                            put("type", "url")
-                            put("url", obj["image_url"]?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull.orEmpty())
-                        })
+            content.forEach { item ->
+                val obj = item.jsonObject
+                when (obj["type"]?.jsonPrimitive?.content) {
+                    "image_url" -> {
+                        val url = obj["image_url"]?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull
+                            ?: return@forEach
+                        // url = "data:<mime>;base64,<data>"
+                        val parts = url.removePrefix("data:").split(";base64,", limit = 2)
+                        if (parts.size == 2 && parts[1].isNotBlank()) {
+                            add(buildJsonObject {
+                                put("type", "image")
+                                put("source", buildJsonObject {
+                                    put("type", "base64")
+                                    put("media_type", parts[0])
+                                    put("data", parts[1])
+                                })
+                            })
+                        }
+                    }
+                    "text" -> add(buildJsonObject {
+                        put("type", "text")
+                        put("text", obj["text"]?.jsonPrimitive?.contentOrNull.orEmpty())
                     })
-                    else -> add(block) // text 块等原样透传
                 }
             }
         }
@@ -425,48 +462,64 @@ class DirectLlmClient(
         onCall: ((Call) -> Unit)?,
     ): String {
         val request = buildAnthropicRequest(
-            buildAnthropicEndpoint(baseUrl),
-            apiKey,
-            buildAnthropicBody(model, messages, stream = true),
+            endpoint = buildAnthropicEndpoint(baseUrl),
+            apiKey = apiKey,
+            body = buildAnthropicBody(model, messages, stream = true, maxTokens = ANTHROPIC_MAX_TOKENS),
+            accept = "text/event-stream",
         )
+        return executeAnthropicStreaming(request, onChunk, onCall)
+    }
+
+    private suspend fun executeAnthropicStreaming(
+        request: Request,
+        onChunk: (String) -> Unit,
+        onCall: ((Call) -> Unit)?,
+    ): String {
         val call = client.newCall(request)
         onCall?.invoke(call)
         val handle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
-        val reasoningBuf = StringBuilder()
         val contentBuf = StringBuilder()
-        var contentStarted = false
         try {
             call.execute().use { response ->
                 val body = response.body
                 if (!response.isSuccessful || body == null) {
                     val raw = body?.string().orEmpty()
-                    throw Exception(parseAnthropicError(response.code, raw))
+                    throw Exception(parseError(response.code, raw))
                 }
-                val source = body.source()
-                while (!source.exhausted()) {
-                    val line = source.readUtf8Line() ?: break
-                    coroutineContext.ensureActive()
-                    if (line.isBlank() || line.startsWith(":")) continue
-                    if (!line.startsWith("data:", ignoreCase = true)) continue
-                    val data = line.substringAfter("data:").trim()
-                    if (data.isEmpty()) continue
-                    val (text, reasoning) = parseAnthropicDelta(data)
-                    if (!reasoning.isNullOrEmpty()) reasoningBuf.append(reasoning)
-                    if (!text.isNullOrEmpty()) {
-                        contentStarted = true
-                        contentBuf.append(text)
+                val isSse = body.contentType()?.subtype
+                    ?.equals("event-stream", ignoreCase = true) == true
+                if (isSse) {
+                    val source = body.source()
+                    while (!source.exhausted()) {
+                        val line = source.readUtf8Line() ?: break
+                        coroutineContext.ensureActive()
+                        if (line.isBlank() || line.startsWith(":")) continue
+                        if (!line.startsWith("data:", ignoreCase = true)) continue
+                        val data = line.substringAfter("data:").trim()
+                        if (data == "[DONE]") break
+                        val text = parseAnthropicDelta(data)
+                        if (!text.isNullOrEmpty()) contentBuf.append(text)
+                        onChunk(contentBuf.toString())
+                        if (isAnthropicStop(data)) break
                     }
-                    onChunk(renderAccumulated(reasoningBuf, contentBuf, contentStarted))
+                } else {
+                    // 个别供应商忽略 stream:true，返回整段 JSON
+                    val raw = body.string()
+                    val content = parseAnthropicContent(raw)
+                    if (content.isNotEmpty()) {
+                        contentBuf.append(content)
+                        onChunk(contentBuf.toString())
+                    }
                 }
             }
         } catch (e: IOException) {
-            coroutineContext.ensureActive()
+            coroutineContext.ensureActive() // 被取消时抛 CancellationException
             throw Exception("网络错误: ${e.message ?: "请求失败"}", e)
         } finally {
             handle?.dispose()
             call.cancel()
         }
-        return renderAccumulated(reasoningBuf, contentBuf, contentStarted)
+        return contentBuf.toString()
     }
 
     private suspend fun anthropicChatOnce(
@@ -474,19 +527,20 @@ class DirectLlmClient(
         apiKey: String,
         model: String,
         messages: List<ChatMessageDto>,
-    ): String = withContext(Dispatchers.IO) {
+    ): String {
         val request = buildAnthropicRequest(
-            buildAnthropicEndpoint(baseUrl),
-            apiKey,
-            buildAnthropicBody(model, messages, stream = false),
+            endpoint = buildAnthropicEndpoint(baseUrl),
+            apiKey = apiKey,
+            body = buildAnthropicBody(model, messages, stream = false, maxTokens = ANTHROPIC_MAX_TOKENS),
+            accept = null,
         )
         val call = client.newCall(request)
         val handle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
-        try {
+        return try {
             call.execute().use { response ->
                 val raw = response.body?.string().orEmpty()
-                if (!response.isSuccessful) throw Exception(parseAnthropicError(response.code, raw))
-                parseAnthropicFullContent(raw)
+                if (!response.isSuccessful) throw Exception(parseError(response.code, raw))
+                parseAnthropicContent(raw)
             }
         } catch (e: IOException) {
             coroutineContext.ensureActive()
@@ -497,66 +551,33 @@ class DirectLlmClient(
         }
     }
 
-    /** 解析 Anthropic SSE data 负载：(正文增量, 思考增量)。text_delta=正文，thinking_delta=推理。 */
-    private fun parseAnthropicDelta(data: String): Pair<String?, String?> = try {
+    /** 解析 Anthropic SSE data 负载中的 text_delta 增量；其它事件返回 null。 */
+    private fun parseAnthropicDelta(data: String): String? = try {
         val obj = json.parseToJsonElement(data).jsonObject
-        if (obj["type"]?.jsonPrimitive?.contentOrNull != "content_block_delta") {
-            null to null
-        } else {
+        if (obj["type"]?.jsonPrimitive?.content == "content_block_delta") {
             val delta = obj["delta"]?.jsonObject
-            when (delta?.get("type")?.jsonPrimitive?.contentOrNull) {
-                "text_delta" -> delta["text"]?.jsonPrimitive?.contentOrNull to null
-                "thinking_delta" -> null to delta["thinking"]?.jsonPrimitive?.contentOrNull
-                else -> null to null
-            }
-        }
+            if (delta?.get("type")?.jsonPrimitive?.content == "text_delta") {
+                delta["text"]?.jsonPrimitive?.contentOrNull
+            } else null
+        } else null
     } catch (e: Exception) {
-        null to null
+        null
     }
 
     /** 解析 Anthropic 非流式响应：content[] 中所有 text 块拼接。 */
-    private fun parseAnthropicFullContent(raw: String): String = try {
+    private fun parseAnthropicContent(raw: String): String = try {
         val obj = json.parseToJsonElement(raw).jsonObject
-        val content = obj["content"]?.jsonArray ?: return parseAnthropicSseToContent(raw)
-        content.mapNotNull { block ->
+        obj["content"]?.jsonArray?.mapNotNull { block ->
             val b = block.jsonObject
-            if (b["type"]?.jsonPrimitive?.contentOrNull == "text") {
-                b["text"]?.jsonPrimitive?.contentOrNull
-            } else null
-        }.joinToString("")
+            if (b["type"]?.jsonPrimitive?.content == "text") b["text"]?.jsonPrimitive?.contentOrNull else null
+        }?.joinToString("").orEmpty()
     } catch (e: Exception) {
-        parseAnthropicSseToContent(raw)
+        ""
     }
 
-    /** 从一段 Anthropic SSE 文本拼接所有 text_delta（供应商忽略 stream 时兜底）。 */
-    private fun parseAnthropicSseToContent(raw: String): String {
-        val sb = StringBuilder()
-        raw.lineSequence().forEach { line ->
-            if (!line.startsWith("data:", ignoreCase = true)) return@forEach
-            val data = line.substringAfter("data:").trim()
-            if (data.isEmpty()) return@forEach
-            parseAnthropicDelta(data).first?.let { sb.append(it) }
-        }
-        return sb.toString()
-    }
-
-    /** 从 Anthropic 错误响应提取可读信息（error.message / error.type）。 */
-    private fun parseAnthropicError(code: Int, raw: String): String {
-        val msg = try {
-            val obj = json.parseToJsonElement(raw).jsonObject
-            val err = obj["error"]
-            when {
-                err is JsonObject -> {
-                    val m = err["message"]?.jsonPrimitive?.contentOrNull
-                    val t = err["type"]?.jsonPrimitive?.contentOrNull
-                    listOfNotNull(m, t?.let { "($it)" }).joinToString(" ")
-                }
-                err is JsonPrimitive -> err.contentOrNull
-                else -> obj["message"]?.jsonPrimitive?.contentOrNull
-            }
-        } catch (e: Exception) {
-            null
-        }
-        return if (msg.isNullOrBlank()) "HTTP $code" else "HTTP $code: $msg"
-    }
+    /** Anthropic SSE 是否已到 message_stop（正常结束标记）。 */
+    private fun isAnthropicStop(data: String): Boolean = runCatching {
+        json.parseToJsonElement(data).jsonObject["type"]?.jsonPrimitive?.content == "message_stop"
+    }.getOrDefault(false)
 }
+

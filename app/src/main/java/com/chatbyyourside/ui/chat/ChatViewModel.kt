@@ -1243,7 +1243,6 @@ class ChatViewModel(
             apiKey = apiConfig.apiKey,
             model = apiConfig.model,
             messages = messages,
-            format = apiConfig.format,
         )
         return translated.ifBlank { text }
     }

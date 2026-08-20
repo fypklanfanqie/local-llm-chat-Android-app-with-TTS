@@ -11,7 +11,6 @@ import com.chatbyyourside.data.model.ApiConfig
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.GroupChatConfig
-import com.chatbyyourside.data.model.LlmApiFormat
 import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.UserProfileConfig
 import com.chatbyyourside.data.model.SeedanceModelVariant
@@ -61,7 +60,6 @@ class SettingsStore(
         val API_BASE = stringPreferencesKey("api_base")
         val API_KEY = stringPreferencesKey("api_key")
         val API_MODEL = stringPreferencesKey("api_model")
-        val API_FORMAT = stringPreferencesKey("api_format")  // openai（默认）/ anthropic
 
         // TTS
         val TTS_API_KEY = stringPreferencesKey("tts_api_key")
@@ -193,7 +191,6 @@ class SettingsStore(
             baseUrl = p[Keys.API_BASE] ?: AppConfig.DEFAULT_API_BASE,
             apiKey = p[Keys.API_KEY] ?: "",
             model = p[Keys.API_MODEL] ?: AppConfig.DEFAULT_MODEL,
-            format = LlmApiFormat.fromStorageKey(p[Keys.API_FORMAT]),
         )
     }
 
@@ -202,7 +199,6 @@ class SettingsStore(
             p[Keys.API_BASE] = config.baseUrl
             p[Keys.API_KEY] = config.apiKey
             p[Keys.API_MODEL] = config.model
-            p[Keys.API_FORMAT] = config.format.storageKey
         }
     }
 

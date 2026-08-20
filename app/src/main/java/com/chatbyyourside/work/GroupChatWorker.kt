@@ -283,7 +283,7 @@ class GroupChatWorker(
         ).map { ChatMessageDto(it.role, JsonPrimitive(it.content)) }
         return try {
             withTimeout(AppConfig.GroupChat.GENERATE_TIMEOUT_MS) {
-                client.chatOnce(apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, messages, format = apiConfig.format)
+                client.chatOnce(apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, messages)
                     .let { GroupChatPromptBuilder.stripSpeakerPrefix(it, members.map { c -> c.name }) }
             }.takeIf { it.isNotBlank() }
         } catch (ce: CancellationException) {

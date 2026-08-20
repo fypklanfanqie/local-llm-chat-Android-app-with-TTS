@@ -334,7 +334,7 @@ class GreetingWorker(
             }
         }
 
-        return client.chatOnce(apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, messages, format = apiConfig.format)
+        return client.chatOnce(apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, messages)
             .trim()
             .removeSurrounding("\"")
     }
