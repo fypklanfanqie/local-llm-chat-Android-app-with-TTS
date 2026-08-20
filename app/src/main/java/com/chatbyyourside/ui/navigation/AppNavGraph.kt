@@ -407,7 +407,6 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false, crash
     }
 }
 }
-}
 
 /**
  * 底部额外留白 = (IME 高度 - 底栏预留高度 [reserved]).coerceAtLeast(0)。
