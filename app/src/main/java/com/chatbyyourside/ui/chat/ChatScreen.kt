@@ -537,7 +537,6 @@ fun ChatScreen(
                 onTextChange = { viewModel.updateInputText(it) },
                 onSend = { viewModel.sendMessage() },
                 onStop = { viewModel.stopGeneration() },
-                onPickImage = { imagePicker.launch(arrayOf("image/*")) },
                 onPickFile = { filePicker.launch(arrayOf("*/*")) },
                 onOpenGifts = { showGiftSheet = true },
                 onRemoveImage = { viewModel.removeImage(it) },
@@ -1488,7 +1487,6 @@ internal fun ChatInputBar(
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
-    onPickImage: () -> Unit,
     onPickFile: () -> Unit,
     onOpenGifts: () -> Unit,
     onRemoveImage: (Int) -> Unit,
@@ -1572,22 +1570,16 @@ internal fun ChatInputBar(
             verticalAlignment = Alignment.Bottom,
         ) {
             Box(
-                modifier = Modifier.size(40.dp).clickable(onClick = onPickImage),
+                modifier = Modifier.size(40.dp).clickable(onClick = onOpenGifts),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Outlined.Add, contentDescription = "添加图片", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                Icon(Icons.Filled.CardGiftcard, contentDescription = "赠送礼物", tint = scheme.primary, modifier = Modifier.size(20.dp))
             }
             Box(
                 modifier = Modifier.size(40.dp).clickable(onClick = onPickFile),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(Icons.Outlined.AttachFile, contentDescription = "添加文件", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
-            }
-            Box(
-                modifier = Modifier.size(40.dp).clickable(onClick = onOpenGifts),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Icons.Filled.CardGiftcard, contentDescription = "赠送礼物", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
             }
             BasicTextField(
                 value = text,

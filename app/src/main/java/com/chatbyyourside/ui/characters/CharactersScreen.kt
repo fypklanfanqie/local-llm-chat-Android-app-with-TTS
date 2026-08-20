@@ -226,36 +226,6 @@ private fun CharacterCard(
             .clickable(onClick = onSelect)
             .padding(12.dp),
     ) {
-        // 好感 pill：点击进入关系档案；有未读特殊邂逅时右上角加红点。
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .clip(RoundedCornerShape(50))
-                .clickable(onClick = onViewAffinity)
-                .background(scheme.primary.copy(alpha = 0.16f))
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.Favorite, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(11.dp))
-                Spacer(Modifier.width(3.dp))
-                Text(
-                    "好感 ${affinityValue?.let { if (it % 1f == 0f) it.toInt() else it } ?: 0} / 200",
-                    color = scheme.primary,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-        }
-        if (hasUnreadAffinityEvent) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .offset(x = 14.dp, y = (-6).dp)
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFFE36B5D)),
-            )
-        }
         Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -293,20 +263,47 @@ private fun CharacterCard(
             }
             Spacer(Modifier.height(4.dp))
             Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(50))
-                    .clickable(onClick = onViewPersona)
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    Icons.Filled.Info,
-                    contentDescription = null,
-                    tint = scheme.onSurfaceVariant,
-                    modifier = Modifier.size(12.dp),
-                )
-                Spacer(Modifier.width(4.dp))
-                Text("查看人设", color = scheme.onSurfaceVariant, fontSize = 11.5.sp)
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable(onClick = onViewPersona)
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Filled.Info,
+                        contentDescription = null,
+                        tint = scheme.onSurfaceVariant,
+                        modifier = Modifier.size(12.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("查看人设", color = scheme.onSurfaceVariant, fontSize = 11.5.sp)
+                }
+                Box {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .clickable(onClick = onViewAffinity)
+                            .padding(horizontal = 8.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Filled.Favorite, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(12.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("好感 ${affinityValue?.let { if (it % 1f == 0f) it.toInt() else it } ?: 0} / 200", color = scheme.primary, fontSize = 10.sp)
+                    }
+                    if (hasUnreadAffinityEvent) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(scheme.error),
+                        )
+                    }
+                }
             }
         }
         if (isActive) {
