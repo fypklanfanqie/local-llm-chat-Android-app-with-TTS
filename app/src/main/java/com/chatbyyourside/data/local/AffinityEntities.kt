@@ -118,10 +118,13 @@ data class AffinityRewardEntity(
  * 自定义角色可编辑的特殊邂逅脚本（内置角色不落此表，走 JSON 目录 / 离线保底）。
  * 以 (characterId, threshold) 为复合主键，覆盖即整条替换。
  */
-@Entity(tableName = "special_event_script")
+@Entity(
+    tableName = "special_event_script",
+    primaryKeys = ["characterId", "threshold"],
+)
 data class SpecialEventScriptEntity(
-    @PrimaryKey val characterId: String,
-    @PrimaryKey val threshold: Int,
+    val characterId: String,
+    val threshold: Int,
     val title: String,
     val scene: String,
     val opening: String,
