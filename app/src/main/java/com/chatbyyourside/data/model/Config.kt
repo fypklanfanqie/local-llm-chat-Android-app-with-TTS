@@ -11,7 +11,25 @@ data class ApiConfig(
     val baseUrl: String = "https://api.deepseek.com/v1",
     val apiKey: String = "",
     val model: String = "deepseek-chat",
+    /** 请求/响应协议格式：OpenAI 兼容（/chat/completions）或 Anthropic（/v1/messages）。 */
+    val format: LlmApiFormat = LlmApiFormat.OPENAI,
 )
+
+/**
+ * 云端 LLM API 协议格式：
+ * - [OPENAI]：`/chat/completions` + `Authorization: Bearer` + `choices[].delta.content`（DeepSeek/OpenAI/Qwen/GLM 等）；
+ * - [ANTHROPIC]：`/v1/messages` + `x-api-key`/`anthropic-version` 头 + `content[].text`（Claude / 兼容网关）。
+ */
+enum class LlmApiFormat(val storageKey: String, val label: String) {
+    OPENAI("openai", "OpenAI 格式"),
+    ANTHROPIC("anthropic", "Anthropic 格式");
+
+    companion object {
+        val DEFAULT: LlmApiFormat = OPENAI
+        fun fromStorageKey(value: String?): LlmApiFormat =
+            entries.firstOrNull { it.storageKey == value } ?: DEFAULT
+    }
+}
 
 /**
  * TTS 配置（火山引擎）

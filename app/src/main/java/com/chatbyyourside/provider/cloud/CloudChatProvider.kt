@@ -65,6 +65,7 @@ class CloudChatProvider(
             onChunk = onChunk,
             onCall = { activeCall = it },
             deepThinking = settings.getDeepThinkingNow(),
+            format = apiConfig.format,
         )
         if (content.isBlank()) throw Exception("API 返回空内容")
         return content

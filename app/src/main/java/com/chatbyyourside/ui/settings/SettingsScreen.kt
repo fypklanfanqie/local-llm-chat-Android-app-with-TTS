@@ -32,6 +32,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import coil.compose.AsyncImage
 import com.chatbyyourside.AppContainer
 import com.chatbyyourside.data.model.ApiConfig
+import com.chatbyyourside.data.model.LlmApiFormat
 import com.chatbyyourside.data.model.TtsConfig
 import com.chatbyyourside.data.repository.ChatBackgroundConfig
 import com.chatbyyourside.data.repository.ChatBackgroundRepository
@@ -117,6 +118,8 @@ fun SettingsScreen(
 
     var customBaseUrl by remember(apiConfig) { mutableStateOf(apiConfig.baseUrl) }
     var customModel by remember(apiConfig) { mutableStateOf(apiConfig.model) }
+    // 自定义云端 LLM 的请求协议格式（OpenAI / Anthropic）；预设供应商固定 OpenAI。
+    var apiFormatEdit by remember(apiConfig) { mutableStateOf(apiConfig.format) }
 
     var apiSaved by remember { mutableStateOf(false) }
     LaunchedEffect(apiSaved) {
@@ -221,6 +224,8 @@ fun SettingsScreen(
                         selectedProvider = provider
                         selectedModel = provider?.models?.firstOrNull()
                         providerExpanded = false
+                        // 预设供应商均为 OpenAI 兼容格式；切回预设时复位协议格式。
+                        if (provider != null) apiFormatEdit = LlmApiFormat.OPENAI
                         // 选中「免费对话」：弹出免费服务提示。
                         if (provider?.id == FREE_PROVIDER_ID) showFreeNotice = true
                     },
@@ -240,6 +245,16 @@ fun SettingsScreen(
                 } else {
                     GlassInputField(value = customBaseUrl, onValueChange = { customBaseUrl = it }, placeholder = "API BASE URL")
                     GlassInputField(value = customModel, onValueChange = { customModel = it }, placeholder = "MODEL")
+                    FieldLabel("协议格式")
+                    SeedanceDropdown(
+                        items = LlmApiFormat.entries.map { it to it.label },
+                        selected = apiFormatEdit,
+                        onSelect = { apiFormatEdit = it },
+                    )
+                    Text(
+                        "Anthropic 格式：/v1/messages + x-api-key 头（Claude 及兼容网关）；OpenAI 格式：/chat/completions + Bearer 头。自定义模型名可任意填写。",
+                        color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                    )
                 }
                 if (selectedProvider?.id == FREE_PROVIDER_ID) {
                     Text(
@@ -260,7 +275,9 @@ fun SettingsScreen(
                     val model = if (isCustom) customModel else selectedModel?.id ?: customModel
                     // 「免费对话」供应商的 key 由云端代理注入，App 端存空即可。
                     val key = if (selectedProvider?.id == FREE_PROVIDER_ID) "" else apiKey
-                    container.settingsRepository.setApiConfig(ApiConfig(baseUrl, key, model))
+                    // 自定义供应商应用所选协议格式；预设供应商固定 OpenAI。
+                    val format = if (isCustom) apiFormatEdit else LlmApiFormat.OPENAI
+                    container.settingsRepository.setApiConfig(ApiConfig(baseUrl, key, model, format))
                     apiSaved = true
                 }
             },

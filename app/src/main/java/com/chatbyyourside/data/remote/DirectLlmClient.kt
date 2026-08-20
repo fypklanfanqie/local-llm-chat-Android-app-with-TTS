@@ -1,11 +1,14 @@
 package com.chatbyyourside.data.remote
 
+import com.chatbyyourside.data.model.LlmApiFormat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -63,14 +66,20 @@ class DirectLlmClient(
         onChunk: (String) -> Unit,
         onCall: ((Call) -> Unit)? = null,
         deepThinking: Boolean = false,
-    ): String = withContext(Dispatchers.IO) {
-        val request = buildRequest(
-            endpoint = buildEndpoint(baseUrl),
-            apiKey = apiKey,
-            body = buildBody(model, messages, stream = true, baseUrl = baseUrl, deepThinking = deepThinking),
-            accept = "text/event-stream",
-        )
-        executeStreaming(request, onChunk, onCall, deepThinking)
+        format: LlmApiFormat = LlmApiFormat.OPENAI,
+    ): String {
+        if (format == LlmApiFormat.ANTHROPIC) {
+            return anthropicChatStream(baseUrl, apiKey, model, messages, onChunk, onCall)
+        }
+        return withContext(Dispatchers.IO) {
+            val request = buildRequest(
+                endpoint = buildEndpoint(baseUrl),
+                apiKey = apiKey,
+                body = buildBody(model, messages, stream = true, baseUrl = baseUrl, deepThinking = deepThinking),
+                accept = "text/event-stream",
+            )
+            executeStreaming(request, onChunk, onCall, deepThinking)
+        }
     }
 
     /** 非流式一次性对话。返回 choices[0].message.content。 */
@@ -79,7 +88,8 @@ class DirectLlmClient(
         apiKey: String,
         model: String,
         messages: List<ChatMessageDto>,
-    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson = false)
+        format: LlmApiFormat = LlmApiFormat.OPENAI,
+    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson = false, format = format)
 
     /** 非流式一次性对话，可请求结构化 JSON 输出。
      *  仅当 [responseFormatJson]=true 且供应商在白名单内时才注入 response_format=json_object，
@@ -90,7 +100,8 @@ class DirectLlmClient(
         model: String,
         messages: List<ChatMessageDto>,
         responseFormatJson: Boolean,
-    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson)
+        format: LlmApiFormat = LlmApiFormat.OPENAI,
+    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson, format)
 
     private suspend fun chatOnceInternal(
         baseUrl: String,
@@ -98,34 +109,40 @@ class DirectLlmClient(
         model: String,
         messages: List<ChatMessageDto>,
         responseFormatJson: Boolean,
-    ): String = withContext(Dispatchers.IO) {
-        val request = buildRequest(
-            endpoint = buildEndpoint(baseUrl),
-            apiKey = apiKey,
-            body = buildBody(
-                model = model,
-                messages = messages,
-                stream = false,
-                baseUrl = baseUrl,
-                deepThinking = false,
-                responseFormatJson = responseFormatJson && supportsJsonObjectResponse(baseUrl, model),
-            ),
-            accept = null,
-        )
-        val call = client.newCall(request)
-        val handle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
-        try {
-            call.execute().use { response ->
-                val raw = response.body?.string().orEmpty()
-                if (!response.isSuccessful) throw Exception(parseError(response.code, raw))
-                parseFullContent(raw)
+        format: LlmApiFormat = LlmApiFormat.OPENAI,
+    ): String {
+        if (format == LlmApiFormat.ANTHROPIC) {
+            return anthropicChatOnce(baseUrl, apiKey, model, messages)
+        }
+        return withContext(Dispatchers.IO) {
+            val request = buildRequest(
+                endpoint = buildEndpoint(baseUrl),
+                apiKey = apiKey,
+                body = buildBody(
+                    model = model,
+                    messages = messages,
+                    stream = false,
+                    baseUrl = baseUrl,
+                    deepThinking = false,
+                    responseFormatJson = responseFormatJson && supportsJsonObjectResponse(baseUrl, model),
+                ),
+                accept = null,
+            )
+            val call = client.newCall(request)
+            val handle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+            try {
+                call.execute().use { response ->
+                    val raw = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) throw Exception(parseError(response.code, raw))
+                    parseFullContent(raw)
+                }
+            } catch (e: IOException) {
+                coroutineContext.ensureActive() // 被取消（call.cancel 触发流关闭）时抛 CancellationException
+                throw Exception("网络错误: ${e.message ?: "请求失败"}", e)
+            } finally {
+                handle?.dispose()
+                call.cancel()
             }
-        } catch (e: IOException) {
-            coroutineContext.ensureActive() // 被取消（call.cancel 触发流关闭）时抛 CancellationException
-            throw Exception("网络错误: ${e.message ?: "请求失败"}", e)
-        } finally {
-            handle?.dispose()
-            call.cancel()
         }
     }
 
@@ -323,6 +340,218 @@ class DirectLlmClient(
             when (val err = obj["error"]) {
                 is JsonObject -> err["message"]?.jsonPrimitive?.contentOrNull
                 is JsonPrimitive -> err.contentOrNull
+                else -> obj["message"]?.jsonPrimitive?.contentOrNull
+            }
+        } catch (e: Exception) {
+            null
+        }
+        return if (msg.isNullOrBlank()) "HTTP $code" else "HTTP $code: $msg"
+    }
+
+    // ===== Anthropic 格式（/v1/messages + x-api-key / anthropic-version）=====
+
+    /** Anthropic 最大输出 token：客户端统一上限，避免各家默认差异。 */
+    private companion object {
+        const val ANTHROPIC_MAX_TOKENS = 8192
+        const val ANTHROPIC_VERSION = "2023-06-01"
+    }
+
+    /** 兼容用户填写的 baseUrl 形态：`…/v1` / 裸域 / 已含 /messages。 */
+    private fun buildAnthropicEndpoint(baseUrl: String): String {
+        val trimmed = baseUrl.trimEnd('/')
+        return when {
+            trimmed.endsWith("/messages") -> trimmed
+            trimmed.endsWith("/v1") -> "$trimmed/messages"
+            else -> "$trimmed/v1/messages"
+        }
+    }
+
+    private fun buildAnthropicRequest(endpoint: String, apiKey: String, body: String): Request =
+        Request.Builder()
+            .url(endpoint)
+            .header("x-api-key", apiKey)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("Content-Type", "application/json")
+            .post(body.toRequestBody(jsonMediaType))
+            .build()
+
+    private fun buildAnthropicBody(model: String, messages: List<ChatMessageDto>, stream: Boolean): String {
+        val system = messages
+            .filter { it.role == "system" }
+            .mapNotNull { (it.content as? JsonPrimitive)?.contentOrNull }
+            .joinToString("\n")
+        return buildJsonObject {
+            put("model", model)
+            put("max_tokens", ANTHROPIC_MAX_TOKENS)
+            if (system.isNotBlank()) put("system", system)
+            put("messages", buildJsonArray {
+                messages.filter { it.role != "system" }.forEach { m ->
+                    add(buildJsonObject {
+                        put("role", if (m.role == "assistant") "assistant" else "user")
+                        put("content", toAnthropicContent(m.content))
+                    })
+                }
+            })
+            put("stream", stream)
+        }.toString()
+    }
+
+    /** 把 OpenAI 兼容 content（纯文本 JsonPrimitive 或多模态数组）映射为 Anthropic content 块。 */
+    private fun toAnthropicContent(content: JsonElement): JsonElement {
+        if (content !is JsonArray) return content // 纯文本原样透传
+        return buildJsonArray {
+            content.forEach { block ->
+                val obj = block as? JsonObject
+                when (obj?.get("type")?.jsonPrimitive?.contentOrNull) {
+                    "image_url" -> add(buildJsonObject {
+                        put("type", "image")
+                        put("source", buildJsonObject {
+                            put("type", "url")
+                            put("url", obj["image_url"]?.jsonObject?.get("url")?.jsonPrimitive?.contentOrNull.orEmpty())
+                        })
+                    })
+                    else -> add(block) // text 块等原样透传
+                }
+            }
+        }
+    }
+
+    private suspend fun anthropicChatStream(
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+        messages: List<ChatMessageDto>,
+        onChunk: (String) -> Unit,
+        onCall: ((Call) -> Unit)?,
+    ): String {
+        val request = buildAnthropicRequest(
+            buildAnthropicEndpoint(baseUrl),
+            apiKey,
+            buildAnthropicBody(model, messages, stream = true),
+        )
+        val call = client.newCall(request)
+        onCall?.invoke(call)
+        val handle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+        val reasoningBuf = StringBuilder()
+        val contentBuf = StringBuilder()
+        var contentStarted = false
+        try {
+            call.execute().use { response ->
+                val body = response.body
+                if (!response.isSuccessful || body == null) {
+                    val raw = body?.string().orEmpty()
+                    throw Exception(parseAnthropicError(response.code, raw))
+                }
+                val source = body.source()
+                while (!source.exhausted()) {
+                    val line = source.readUtf8Line() ?: break
+                    coroutineContext.ensureActive()
+                    if (line.isBlank() || line.startsWith(":")) continue
+                    if (!line.startsWith("data:", ignoreCase = true)) continue
+                    val data = line.substringAfter("data:").trim()
+                    if (data.isEmpty()) continue
+                    val (text, reasoning) = parseAnthropicDelta(data)
+                    if (!reasoning.isNullOrEmpty()) reasoningBuf.append(reasoning)
+                    if (!text.isNullOrEmpty()) {
+                        contentStarted = true
+                        contentBuf.append(text)
+                    }
+                    onChunk(renderAccumulated(reasoningBuf, contentBuf, contentStarted))
+                }
+            }
+        } catch (e: IOException) {
+            coroutineContext.ensureActive()
+            throw Exception("网络错误: ${e.message ?: "请求失败"}", e)
+        } finally {
+            handle?.dispose()
+            call.cancel()
+        }
+        return renderAccumulated(reasoningBuf, contentBuf, contentStarted)
+    }
+
+    private suspend fun anthropicChatOnce(
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+        messages: List<ChatMessageDto>,
+    ): String = withContext(Dispatchers.IO) {
+        val request = buildAnthropicRequest(
+            buildAnthropicEndpoint(baseUrl),
+            apiKey,
+            buildAnthropicBody(model, messages, stream = false),
+        )
+        val call = client.newCall(request)
+        val handle = coroutineContext[Job]?.invokeOnCompletion { call.cancel() }
+        try {
+            call.execute().use { response ->
+                val raw = response.body?.string().orEmpty()
+                if (!response.isSuccessful) throw Exception(parseAnthropicError(response.code, raw))
+                parseAnthropicFullContent(raw)
+            }
+        } catch (e: IOException) {
+            coroutineContext.ensureActive()
+            throw Exception("网络错误: ${e.message ?: "请求失败"}", e)
+        } finally {
+            handle?.dispose()
+            call.cancel()
+        }
+    }
+
+    /** 解析 Anthropic SSE data 负载：(正文增量, 思考增量)。text_delta=正文，thinking_delta=推理。 */
+    private fun parseAnthropicDelta(data: String): Pair<String?, String?> = try {
+        val obj = json.parseToJsonElement(data).jsonObject
+        if (obj["type"]?.jsonPrimitive?.contentOrNull != "content_block_delta") {
+            null to null
+        } else {
+            val delta = obj["delta"]?.jsonObject
+            when (delta?.get("type")?.jsonPrimitive?.contentOrNull) {
+                "text_delta" -> delta["text"]?.jsonPrimitive?.contentOrNull to null
+                "thinking_delta" -> null to delta["thinking"]?.jsonPrimitive?.contentOrNull
+                else -> null to null
+            }
+        }
+    } catch (e: Exception) {
+        null to null
+    }
+
+    /** 解析 Anthropic 非流式响应：content[] 中所有 text 块拼接。 */
+    private fun parseAnthropicFullContent(raw: String): String = try {
+        val obj = json.parseToJsonElement(raw).jsonObject
+        val content = obj["content"]?.jsonArray ?: return parseAnthropicSseToContent(raw)
+        content.mapNotNull { block ->
+            val b = block.jsonObject
+            if (b["type"]?.jsonPrimitive?.contentOrNull == "text") {
+                b["text"]?.jsonPrimitive?.contentOrNull
+            } else null
+        }.joinToString("")
+    } catch (e: Exception) {
+        parseAnthropicSseToContent(raw)
+    }
+
+    /** 从一段 Anthropic SSE 文本拼接所有 text_delta（供应商忽略 stream 时兜底）。 */
+    private fun parseAnthropicSseToContent(raw: String): String {
+        val sb = StringBuilder()
+        raw.lineSequence().forEach { line ->
+            if (!line.startsWith("data:", ignoreCase = true)) return@forEach
+            val data = line.substringAfter("data:").trim()
+            if (data.isEmpty()) return@forEach
+            parseAnthropicDelta(data).first?.let { sb.append(it) }
+        }
+        return sb.toString()
+    }
+
+    /** 从 Anthropic 错误响应提取可读信息（error.message / error.type）。 */
+    private fun parseAnthropicError(code: Int, raw: String): String {
+        val msg = try {
+            val obj = json.parseToJsonElement(raw).jsonObject
+            val err = obj["error"]
+            when {
+                err is JsonObject -> {
+                    val m = err["message"]?.jsonPrimitive?.contentOrNull
+                    val t = err["type"]?.jsonPrimitive?.contentOrNull
+                    listOfNotNull(m, t?.let { "($it)" }).joinToString(" ")
+                }
+                err is JsonPrimitive -> err.contentOrNull
                 else -> obj["message"]?.jsonPrimitive?.contentOrNull
             }
         } catch (e: Exception) {

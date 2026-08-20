@@ -1,6 +1,7 @@
 package com.chatbyyourside.video
 
 import com.chatbyyourside.data.model.ApiConfig
+import com.chatbyyourside.data.model.LlmApiFormat
 import com.chatbyyourside.data.model.SeedanceModelVariant
 import com.chatbyyourside.data.model.SeedanceRatio
 import com.chatbyyourside.data.model.SeedanceResolution
@@ -65,6 +66,7 @@ data class SeedancePromptRequest(
     val model: String,
     val messages: List<ChatMessageDto>,
     val jsonMode: Boolean,
+    val format: LlmApiFormat = LlmApiFormat.OPENAI,
 )
 
 /**
@@ -87,6 +89,7 @@ class DirectLlmSeedancePromptLlm(
             model = request.model,
             messages = request.messages,
             responseFormatJson = request.jsonMode,
+            format = request.format,
         )
 }
 
@@ -121,6 +124,7 @@ class SeedancePromptGenerator(
                 model = apiConfig.model,
                 messages = messages,
                 jsonMode = true,
+                format = apiConfig.format,
             )
         )
         return parseDocument(raw, input)
