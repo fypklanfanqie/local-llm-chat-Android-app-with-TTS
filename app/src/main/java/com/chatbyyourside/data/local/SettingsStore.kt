@@ -2,7 +2,7 @@ package com.chatbyyourside.data.local
 
 import android.content.Context
 import androidx.datastore.core.DataStore
-import androidx.datastore.core.ReplaceFileCorruptionHandler
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import com.chatbyyourside.config.AppConfig
