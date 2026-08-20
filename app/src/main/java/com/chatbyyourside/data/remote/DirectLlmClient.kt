@@ -231,7 +231,8 @@ class DirectLlmClient(
         responseFormatJson: Boolean = false,
     ): String {
         val obj = buildJsonObject {
-            put("model", model)
+            // trim：粘贴带入的首尾空白会让模型名不匹配被上游拒 400。
+            put("model", model.trim())
             put("messages", buildJsonArray {
                 messages.forEach { m ->
                     add(buildJsonObject {
@@ -257,7 +258,8 @@ class DirectLlmClient(
         val reqBody = body.toRequestBody(jsonMediaType)
         return Request.Builder()
             .url(endpoint)
-            .header("Authorization", "Bearer $apiKey")
+            // trim：粘贴带入的首尾空白会让 Bearer 头不合法被上游拒收（401/400）。
+            .header("Authorization", "Bearer ${apiKey.trim()}")
             .header("Content-Type", "application/json")
             .apply { if (accept != null) header("Accept", accept) }
             .post(reqBody)
