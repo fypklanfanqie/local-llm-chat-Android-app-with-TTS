@@ -40,7 +40,7 @@ class PerformanceCollector(
 ) {
 
     private val activityManager =
-        context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
 
     /** 上一次 CPU 采样（/proc/stat 累计值），用于计算差值得到瞬时使用率 */
     @Volatile private var prevCpuTotal: Long = 0
@@ -320,13 +320,13 @@ class PerformanceCollector(
     // ========== 内存 ==========
     private fun collectUsedMemoryMB(): Long {
         val memInfo = ActivityManager.MemoryInfo()
-        activityManager.getMemoryInfo(memInfo)
+        activityManager?.getMemoryInfo(memInfo)
         return (memInfo.totalMem - memInfo.availMem) / (1024 * 1024)
     }
 
     private fun collectTotalMemoryMB(): Long {
         val memInfo = ActivityManager.MemoryInfo()
-        activityManager.getMemoryInfo(memInfo)
+        activityManager?.getMemoryInfo(memInfo)
         return memInfo.totalMem / (1024 * 1024)
     }
 }

@@ -64,12 +64,15 @@ class AudioManager(
                             player.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
                         }
                     } catch (e: IOException) {
-                        // 资源被压缩时 openFd 抛错 -> 拷贝到缓存临时文件后播放（兜底，正常不走到）
+                        // 资源被压缩时 openFd 抛错 -> 拷贝到缓存临时文件后播放（兜底，正常不走到）。
+                        // 原子写：先写 .tmp 再 rename，避免进程中途被杀残留半截文件被复用导致播放失败。
                         val temp = File(context.cacheDir, "voice_${relPath.hashCode()}.bin")
                         if (temp.length() == 0L) {
+                            val tmp = File(context.cacheDir, "voice_${relPath.hashCode()}.tmp")
                             context.assets.open(relPath).use { input ->
-                                temp.outputStream().use { output -> input.copyTo(output) }
+                                tmp.outputStream().use { output -> input.copyTo(output) }
                             }
+                            tmp.renameTo(temp)
                         }
                         player.setDataSource(temp.absolutePath)
                     }
@@ -80,17 +83,22 @@ class AudioManager(
             val v = (volume / 100f).coerceIn(0f, 1f)
             player.setVolume(v, v)
             player.setOnCompletionListener { mp ->
+                // 仅当该播放器仍是当前 voicePlayer 时才清引用，避免旧播放器回调误清新播放器
+                if (mp === voicePlayer) voicePlayer = null
                 try { mp.release() } catch (e: Exception) {}
-                voicePlayer = null
             }
             player.setOnErrorListener { mp, _, _ ->
                 Log.w(TAG, "Voice play failed: $url")
+                if (mp === voicePlayer) voicePlayer = null
                 try { mp.release() } catch (e: Exception) {}
-                voicePlayer = null
                 true
             }
             // 异步准备：网络 URL 时 prepare() 会阻塞主线程导致 ANR，改用 prepareAsync
-            player.setOnPreparedListener { it.start() }
+            // 身份校验：快速连点第二个角色语音时，stopVoice() 已 release 旧播放器，
+            // 旧播放器 pending 的 onPrepared 仍会回调，需确认其仍是当前 voicePlayer 再 start，否则 IllegalStateException。
+            player.setOnPreparedListener { mp ->
+                if (mp === voicePlayer) mp.start()
+            }
             player.prepareAsync()
         } catch (e: Exception) {
             Log.w(TAG, "Voice play error: ${e.message}")
@@ -101,6 +109,10 @@ class AudioManager(
 
     fun stopVoice() {
         voicePlayer?.let {
+            // release 前先置空监听器，避免 pending 的 onPrepared/onCompletion 回调打到已释放的播放器
+            it.setOnPreparedListener(null)
+            it.setOnCompletionListener(null)
+            it.setOnErrorListener(null)
             // stop() 在 IDLE/ERROR 等状态会抛 IllegalStateException，单独 try 以保证 release() 一定执行
             try { it.stop() } catch (e: Exception) {}
             try { it.release() } catch (e: Exception) {}

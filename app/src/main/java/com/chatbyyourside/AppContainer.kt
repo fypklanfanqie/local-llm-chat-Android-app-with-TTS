@@ -21,9 +21,15 @@ import com.chatbyyourside.data.repository.ChatBackgroundRepository
 import com.chatbyyourside.data.repository.ChatRepository
 import com.chatbyyourside.data.repository.ConversationRepository
 import com.chatbyyourside.data.repository.DocumentRepository
+import com.chatbyyourside.data.repository.GroupChatRepository
 import com.chatbyyourside.data.repository.MusicLibraryRepository
 import com.chatbyyourside.data.repository.SeedanceVideoRepository
 import com.chatbyyourside.data.repository.SettingsRepository
+import com.chatbyyourside.conversationexport.ConversationExportService
+import com.chatbyyourside.affinity.AffinityRepository
+import com.chatbyyourside.affinity.SpecialEventCatalog
+import com.chatbyyourside.affinity.SpecialEventConversationCoordinator
+import com.chatbyyourside.affinity.SpecialEventScriptStore
 import com.chatbyyourside.download.DownloadManager
 import com.chatbyyourside.video.DirectLlmSeedancePromptLlm
 import com.chatbyyourside.video.SeedanceConversationContextProvider
@@ -82,6 +88,26 @@ class AppContainer(private val context: Context) {
     val assetRepository: AssetRepository by lazy { AssetRepository(context) }
     val documentRepository: DocumentRepository by lazy { DocumentRepository(directLlmClient) }
     val characterRepository: CharacterRepository by lazy { CharacterRepository(settingsRepository) }
+    val groupChatRepository: GroupChatRepository by lazy {
+        GroupChatRepository(conversationRepository, chatRepository)
+    }
+    val conversationExportService: ConversationExportService by lazy {
+        ConversationExportService(conversationRepository, chatRepository, characterRepository)
+    }
+    val specialEventCatalog: SpecialEventCatalog by lazy { SpecialEventCatalog(context) }
+    val specialEventScriptStore: SpecialEventScriptStore by lazy { SpecialEventScriptStore(database, specialEventCatalog) }
+    val affinityRepository: AffinityRepository by lazy { AffinityRepository(database, specialEventCatalog, characterRepository, specialEventScriptStore) }
+    val specialEventConversationCoordinator: SpecialEventConversationCoordinator by lazy {
+        SpecialEventConversationCoordinator(
+            database = database,
+            conversations = conversationRepository,
+            chats = chatRepository,
+            settings = settingsRepository,
+            catalog = specialEventCatalog,
+            characters = characterRepository,
+            scriptStore = specialEventScriptStore,
+        )
+    }
 
     // 通讯界面背景：内置 PRTS 轮播 + 用户自定义图片（最多 20 张，复制到内部存储）。
     val chatBackgroundRepository: ChatBackgroundRepository by lazy {
@@ -170,6 +196,12 @@ class AppContainer(private val context: Context) {
             },
             apiConfigProvider = { settingsRepository.getApiConfigNow() },
             seedanceConfigProvider = { settingsRepository.getSeedanceConfigNow() },
+            onReady = { video ->
+                val conversation = conversationRepository.getById(video.sourceConversationId)
+                if (conversation != null && !conversation.isGroup) {
+                    affinityRepository.addVideoAffinity(conversation.characterId, video.id)
+                }
+            },
         )
     }
 
@@ -222,8 +254,9 @@ class AppContainer(private val context: Context) {
         withContext(Dispatchers.IO) {
             val file = File(path)
             if (!file.isFile) throw IllegalStateException("参考图文件不存在")
-            val bytes = file.readBytes()
-            if (bytes.size <= maxBytes) {
+            // 先按文件大小判断是否已达标，避免超限高清图整读进内存导致 OOM
+            if (file.length() <= maxBytes) {
+                val bytes = file.readBytes()
                 return@withContext SeedanceImageContent(mime, Base64.encodeToString(bytes, Base64.NO_WRAP))
             }
             val compressed = compressImageToFit(file, maxBytes)
@@ -295,7 +328,7 @@ class AppContainer(private val context: Context) {
         }
 
     // ===== TTS =====
-    val ttsClient: VolcTtsClient by lazy { VolcTtsClient(AppConfig.TTS_PROXY_URL, RetrofitClient.okHttpClient) }
+    val ttsClient: VolcTtsClient by lazy { VolcTtsClient(AppConfig.TTS_PROXY_URL, RetrofitClient.okHttpClient, directUrl = AppConfig.TTS_DIRECT_URL) }
     val ttsManager: TtsManager by lazy { TtsManager(context, ttsClient, settingsRepository) }
 
     // ===== 音频 =====

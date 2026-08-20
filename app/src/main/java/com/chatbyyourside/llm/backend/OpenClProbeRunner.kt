@@ -3,6 +3,8 @@ package com.chatbyyourside.llm.backend
 import android.content.Context
 import android.content.Intent
 import android.os.SystemClock
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.delay
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -61,7 +63,11 @@ class OpenClProbeRunner(
                     // 清旧结果 + 写 pending 标记，再启动探测进程。
                     File(cacheDir, RESULT_FILE).delete()
                     File(cacheDir, PENDING_FILE).writeText("1")
-                    context.startService(Intent(context, OpenClProbeService::class.java))
+                    // Android 8+ 后台禁止 startService：仅前台时启动探测，后台跳过（探测本就可选，失败回退 CPU）。
+                    // 加 runCatching 兜底极端时序（门控后瞬间退后台）下的 IllegalStateException。
+                    if (ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                        runCatching { context.startService(Intent(context, OpenClProbeService::class.java)) }
+                    }
                 },
                 readResult = {
                     val file = File(cacheDir, RESULT_FILE)

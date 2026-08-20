@@ -196,10 +196,14 @@ class DocumentRepository(
                 val page = renderer.openPage(i)
                 val scale = 2 // 2x 提升清晰度，便于模型识读
                 val bitmap = Bitmap.createBitmap(page.width * scale, page.height * scale, Bitmap.Config.ARGB_8888)
-                page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                page.close()
-                images.add(bitmapToBase64Jpeg(bitmap))
-                bitmap.recycle() // 逐页回收，控制峰值内存
+                try {
+                    page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    images.add(bitmapToBase64Jpeg(bitmap))
+                } finally {
+                    // 逐页回收，控制峰值内存；异常路径也回收，避免 bitmap/page 泄漏
+                    page.close()
+                    bitmap.recycle()
+                }
             }
         } finally {
             renderer.close()

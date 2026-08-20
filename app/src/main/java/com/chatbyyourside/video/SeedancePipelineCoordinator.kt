@@ -210,6 +210,7 @@ class SeedancePipelineCoordinator(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val idGenerator: () -> String = { newAttemptId(clock()) },
     private val retryPolicy: SeedanceRetryPolicy = SeedanceRetryPolicy(),
+    private val onReady: suspend (SeedanceVideo) -> Unit = {},
 ) {
 
     private val promptJson = Json { encodeDefaults = true }
@@ -632,6 +633,7 @@ class SeedancePipelineCoordinator(
                         downloadedAt = clock(), errorStage = null, errorCode = null,
                         errorMessage = null, nextRetryAt = null)
                 }
+                store.getById(task.id)?.let { ready -> onReady(ready) }
                 return PipelineOutcome.Complete
             }
         }
@@ -659,6 +661,7 @@ class SeedancePipelineCoordinator(
                     downloadedAt = clock(), errorStage = null, errorCode = null,
                     errorMessage = null, nextRetryAt = null)
             }
+            store.getById(task.id)?.let { ready -> onReady(ready) }
             PipelineOutcome.Complete
         }
     }

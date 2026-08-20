@@ -58,6 +58,12 @@ object FeedRoute {
     const val FEED = "feed"
     const val CHAT = "chat_detail"
     const val ENCOUNTER = "encounter"
+    /** 群聊列表（微信式：新建/进入已有群）。 */
+    const val GROUP_LIST = "group_list"
+    /** 群聊会话页路由模板（后接群 id）。 */
+    const val GROUP_CHAT = "group_chat/{groupId}"
+
+    fun groupChatRoute(groupId: Long): String = "group_chat/$groupId"
 }
 
 /**
@@ -69,10 +75,14 @@ object FeedRoute {
 fun CharacterFeedScreen(
     container: AppContainer,
     bottomBarHeight: Dp = 0.dp,
+    /** 上次启动在加载窗口内异常退出（原生崩溃判定）：首页弹出引导用户查看崩溃日志。 */
+    crashNotice: Boolean = false,
     onOpenChat: (String) -> Unit,
     onNavigateToCharacters: () -> Unit,
     /** 进入「邂逅」沉浸式视频历史流（顶栏玻璃按钮）。 */
     onOpenEncounter: () -> Unit = {},
+    /** 进入「群聊」多人同群聊天（顶栏玻璃按钮，仅云端可用）。 */
+    onOpenGroupChat: () -> Unit = {},
     /** 当前落定立绘的主题色上报（供 dock 栏等全局着色）；页面销毁时应回传 null 复位。 */
     onAccent: (Color?) -> Unit = {},
 ) {
@@ -105,6 +115,8 @@ fun CharacterFeedScreen(
     var showPersona by remember { mutableStateOf<Character?>(null) }
     var showCreate by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<Character?>(null) }
+    // 上次启动异常退出提示：仅当 crashNotice 为 true 时首次进入弹一次（用户点掉后不再弹）。
+    var showCrashNotice by remember { mutableStateOf(crashNotice) }
 
     // settle 检测：滚动停止且落在某页时更新（滚动中保持旧值），驱动回弹 / 图标弹出 / 随机问好
     val settledPage = pagerState.settledPage
@@ -228,6 +240,19 @@ fun CharacterFeedScreen(
                     )
                 }
                 GlassButton(
+                    onClick = onOpenGroupChat,
+                    style = GlassButtonStyle.Glass,
+                    horizontalPadding = 12.dp,
+                    verticalPadding = 8.dp,
+                ) {
+                    Text(
+                        "群聊",
+                        color = Color.White.copy(alpha = 0.92f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+                GlassButton(
                     onClick = { showCreate = true },
                     style = GlassButtonStyle.Glass,
                     horizontalPadding = 12.dp,
@@ -293,6 +318,27 @@ fun CharacterFeedScreen(
             },
             dismissButton = {
                 TextButton(onClick = { deleteTarget = null }) { Text("取消") }
+            },
+        )
+    }
+
+    // 上次启动在加载窗口内异常退出：提示用户去 设置 → 崩溃日志 分享日志给开发者。
+    // Java 崩溃堆栈已由 CrashReporter 落盘；原生崩溃无法捕堆栈，但仍可提示用户反馈机型/复现步骤。
+    if (showCrashNotice) {
+        AlertDialog(
+            onDismissRequest = { showCrashNotice = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            title = { Text("上次启动异常退出") },
+            text = {
+                Text(
+                    "应用上次启动时异常退出（可能是设备兼容性问题）。\n\n" +
+                        "崩溃日志已自动保存，请前往「设置 → 崩溃日志」查看并分享给开发者，帮助修复。",
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showCrashNotice = false }) { Text("知道了") }
             },
         )
     }

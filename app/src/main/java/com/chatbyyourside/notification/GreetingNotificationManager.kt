@@ -1,5 +1,6 @@
 package com.chatbyyourside.notification
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -20,6 +21,11 @@ object GreetingNotificationManager {
 
     const val CHANNEL_ID = "character_greeting"
 
+    /** 问候生成期间的前台进度通知渠道（低优先级，无声）。 */
+    const val PROGRESS_CHANNEL_ID = "greeting_progress"
+    /** 问候 Worker 前台化用的通知 id（与投递通知的 characterId.hashCode() 区分）。 */
+    const val PROGRESS_NOTIFICATION_ID = 2001
+
     /** 通知 PendingIntent extra：目标角色 id。 */
     const val EXTRA_CHARACTER_ID = "extra_greeting_character_id"
     /** 通知 PendingIntent extra：目标会话 id。 */
@@ -30,6 +36,7 @@ object GreetingNotificationManager {
     /** 创建通知 channel（Android 8+ 必须）。importance HIGH -> 横幅通知（类微信）。 */
     fun createChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = context.getSystemService(NotificationManager::class.java)
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "角色问候",
@@ -38,10 +45,29 @@ object GreetingNotificationManager {
                 description = "角色主动发来的消息提醒"
                 enableVibration(true)
             }
-            context.getSystemService(NotificationManager::class.java)
-                .createNotificationChannel(channel)
+            nm.createNotificationChannel(channel)
+            // 问候生成期间前台保活通知渠道（低优先级，无声）
+            val progress = NotificationChannel(
+                PROGRESS_CHANNEL_ID,
+                "问候生成",
+                NotificationManager.IMPORTANCE_LOW,
+            ).apply {
+                description = "生成角色主动消息时的保活通知"
+                setShowBadge(false)
+            }
+            nm.createNotificationChannel(progress)
         }
     }
+
+    /** 问候生成期间的前台保活通知（低优先级 ongoing），供 GreetingWorker setForeground 用。 */
+    fun buildProgressNotification(context: Context): Notification =
+        NotificationCompat.Builder(context, PROGRESS_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("正在生成角色消息…")
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .build()
 
     /**
      * 发送一条角色主动消息通知。

@@ -49,6 +49,7 @@ import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.ThemeMode
 import com.chatbyyourside.data.model.SystemVoiceTemplate
+import com.chatbyyourside.data.model.TtsEndpointMode
 import com.chatbyyourside.data.model.TtsEngine
 import com.chatbyyourside.data.model.VoicePair
 import com.chatbyyourside.data.model.Character
@@ -64,6 +65,22 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import com.chatbyyourside.data.remote.SeedanceProbeResult
 import java.io.File
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.LifecycleEventObserver
+import android.provider.Settings
+import android.widget.Toast
+import com.chatbyyourside.util.BackgroundSurvivalHelper
+import com.chatbyyourside.ui.theme.LocalDarkTheme
+import com.chatbyyourside.data.model.GroupChatConfig
+import com.chatbyyourside.data.model.UserProfileConfig
+import com.chatbyyourside.util.AppStorageUsage
+import com.chatbyyourside.util.CrashReporter
+import com.chatbyyourside.util.UserProfileImageStore
+import com.chatbyyourside.work.GroupChatScheduler
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsScreen(
@@ -112,8 +129,10 @@ fun SettingsScreen(
     // 朗读引擎（系统自带 / 云端）与系统声音模板。
     val ttsEngine by container.settingsRepository.ttsEngine.collectAsState(initial = TtsEngine.DEFAULT)
     val ttsTemplate by container.settingsRepository.ttsSystemTemplate.collectAsState(initial = SystemVoiceTemplate.DEFAULT_TEMPLATE)
+    val ttsEndpoint by container.settingsRepository.ttsEndpointMode.collectAsState(initial = TtsEndpointMode.DEFAULT)
     var ttsEngineEdit by remember(ttsEngine) { mutableStateOf(ttsEngine) }
     var ttsTemplateEdit by remember(ttsTemplate) { mutableStateOf(ttsTemplate) }
+    var ttsEndpointEdit by remember(ttsEndpoint) { mutableStateOf(ttsEndpoint) }
     var ttsSaved by remember { mutableStateOf(false) }
     LaunchedEffect(ttsSaved) {
         if (ttsSaved) { delay(2000); ttsSaved = false }
@@ -135,6 +154,8 @@ fun SettingsScreen(
 
     var showGuide by remember { mutableStateOf(false) }
     var showThemePicker by remember { mutableStateOf(false) }
+    // 崩溃日志查看/分享对话框（OPPO/鸿蒙闪退排查：用户闪退后无需 adb，从这里把日志发给开发者）。
+    var showCrashLogs by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -151,6 +172,17 @@ fun SettingsScreen(
                 title = "使用指南",
                 subtitle = "快速了解全部功能与配置",
                 onClick = { showGuide = true },
+                trailing = { Chevron() },
+                showDivider = false,
+            )
+        }
+
+        // ===== 崩溃日志（诊断：让受影响用户无需 adb 即可把崩溃堆栈发给开发者）=====
+        GlassListSection {
+            GlassListRow(
+                title = "崩溃日志",
+                subtitle = "查看并分享应用崩溃 / 启动异常日志",
+                onClick = { showCrashLogs = true },
                 trailing = { Chevron() },
                 showDivider = false,
             )
@@ -267,7 +299,10 @@ fun SettingsScreen(
         }
 
         GreetingSection(container = container, scope = scope)
+        GroupChatSection(container = container, scope = scope)
+        UserProfileSection(container = container, scope = scope)
         ChatBackgroundSection(container = container, scope = scope)
+        StorageSection(container = container, scope = scope)
         SeedanceSettingsSection(container = container, scope = scope)
 
         // ===== 语音合成（朗读）=====
@@ -300,6 +335,18 @@ fun SettingsScreen(
                         color = scheme.onSurfaceVariant, fontSize = 10.sp,
                     )
                     PasswordField("API Key", ttsApiKey, showTtsKey, { ttsApiKey = it }, { showTtsKey = !showTtsKey })
+                    FieldLabel("接入方式")
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(if (ttsEndpointEdit == TtsEndpointMode.DIRECT) "直连火山引擎（绕过代理）" else "CloudBase 代理（默认）", color = scheme.onSurface, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = ttsEndpointEdit == TtsEndpointMode.DIRECT,
+                            onCheckedChange = { direct -> ttsEndpointEdit = if (direct) TtsEndpointMode.DIRECT else TtsEndpointMode.PROXY },
+                        )
+                    }
+                    Text(
+                        "直连需新版 API Key；代理模式才支持旧版 App ID + Access Key。",
+                        color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                    )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     TextButton(
@@ -335,6 +382,7 @@ fun SettingsScreen(
                 scope.launch {
                     container.settingsRepository.setTtsEngine(ttsEngineEdit)
                     container.settingsRepository.setTtsSystemTemplate(ttsTemplateEdit)
+                    container.settingsRepository.setTtsEndpointMode(ttsEndpointEdit)
                     if (ttsEngineEdit == TtsEngine.CLOUD) {
                         container.settingsRepository.setTtsConfig(TtsConfig(ttsApiKey))
                     }
@@ -442,6 +490,10 @@ fun SettingsScreen(
             onDismiss = { showThemePicker = false },
         )
     }
+
+    if (showCrashLogs) {
+        CrashLogsDialog(onDismiss = { showCrashLogs = false })
+    }
 }
 
 @Composable
@@ -486,6 +538,80 @@ private fun ThemePickerDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("取消", color = scheme.onSurfaceVariant) }
+        },
+    )
+}
+
+/** 崩溃日志对话框：列出 filesDir/crash/ 下的崩溃/事件日志，点按即分享（用户无需 adb 即可把日志发给开发者）。 */
+@Composable
+private fun CrashLogsDialog(onDismiss: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // 打开时扫描一次日志文件（最新在前）。
+    val logFiles = remember {
+        CrashReporter.crashLogDir(context).listFiles()
+            ?.filter { it.isFile && it.extension == "log" }
+            ?.sortedByDescending { it.lastModified() }
+            .orEmpty()
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = scheme.surfaceContainerHigh,
+        title = { Text("崩溃日志", color = scheme.onSurface) },
+        text = {
+            if (logFiles.isEmpty()) {
+                Text("暂无崩溃日志。", color = scheme.onSurfaceVariant)
+            } else {
+                Column {
+                    Text(
+                        "共 ${logFiles.size} 条。点击条目即可分享给开发者（内容含机型 / 系统 / ABI 与崩溃堆栈）。",
+                        color = scheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    LazyColumn(modifier = Modifier.height(280.dp)) {
+                        items(logFiles) { file ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        scope.launch {
+                                            val content = withContext(Dispatchers.IO) {
+                                                runCatching { file.readText() }.getOrNull()
+                                            }
+                                            if (content != null) {
+                                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                                    type = "text/plain"
+                                                    putExtra(Intent.EXTRA_TEXT, content)
+                                                }
+                                                runCatching {
+                                                    context.startActivity(Intent.createChooser(intent, "分享崩溃日志"))
+                                                }
+                                            }
+                                        }
+                                    }
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(file.name, color = scheme.onSurface, fontSize = 13.sp)
+                                    Text(
+                                        "大小 ${(file.length() + 1023) / 1024} KB",
+                                        color = scheme.onSurfaceVariant,
+                                        fontSize = 11.sp,
+                                    )
+                                }
+                                Text("分享", color = scheme.primary, fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
         },
     )
 }
@@ -778,7 +904,41 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
         if (testScheduled) { delay(12_000); testScheduled = false }
     }
 
-    val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    // 后台保活相关权限状态（国产 ROM）：通知权限 / 电池白名单 / 精确闹钟。ON_RESUME 重新核验，
+    // 用户从系统设置跳回后刷新，避免状态过期。
+    var notifGranted by remember {
+        mutableStateOf(
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            } else true
+        )
+    }
+    var ignoringBattery by remember {
+        mutableStateOf(BackgroundSurvivalHelper.isIgnoringBatteryOptimizations(context))
+    }
+    var exactAlarmGranted by remember {
+        mutableStateOf(BackgroundSurvivalHelper.canScheduleExactAlarms(context))
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                notifGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                        android.content.pm.PackageManager.PERMISSION_GRANTED
+                } else true
+                ignoringBattery = BackgroundSurvivalHelper.isIgnoringBatteryOptimizations(context)
+                exactAlarmGranted = BackgroundSurvivalHelper.canScheduleExactAlarms(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        notifGranted = it
+    }
 
     GlassListSection(title = "角色问候") {
         GlassListRow(
@@ -788,20 +948,46 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
             trailing = {
                 Switch(
                     checked = enabled,
-                    enabled = isCloud,
+                    // 始终可点：本地下尝试开启时以 Toast 说明原因，而不是整条置灰让人以为坏了
+                    enabled = true,
                     onCheckedChange = { on ->
-                        scope.launch {
-                            settings.setGreetingEnabled(on)
-                            if (on && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        if (on && !isCloud) {
+                            Toast.makeText(context, "角色主动问候仅云端 AI 可用，请先切换到云端 AI", Toast.LENGTH_SHORT).show()
+                        } else {
+                            scope.launch {
+                                settings.setGreetingEnabled(on)
+                                if (on && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                                GreetingScheduler.reschedule(context, settings)
                             }
-                            GreetingScheduler.reschedule(context, settings)
                         }
                     },
                 )
             },
             showDivider = isCloud && enabled,
         )
+        if (enabled && isCloud && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !notifGranted) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("⚠️", fontSize = 14.sp)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "通知权限未开启，收不到主动消息提醒",
+                    color = scheme.error,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = {
+                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    }
+                    runCatching { context.startActivity(intent) }
+                }) { Text("去开启", color = scheme.primary, fontSize = 12.sp) }
+            }
+        }
         if (isCloud) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
@@ -858,9 +1044,67 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
                         steps = AppConfig.Greeting.MAX_DAILY_COUNT - AppConfig.Greeting.MIN_DAILY_COUNT - 1,
                     )
                     Text(
-                        "提示：部分手机需在系统设置中允许本应用「后台运行 / 自启动」。",
+                        "部分国产 ROM 需手动允许后台运行 / 自启动，否则可能收不到主动消息：",
                         color = scheme.onSurfaceVariant, fontSize = 10.sp,
                     )
+                    // 电池优化白名单：未允许时可能被省电冻结，点「去允许」跳系统电池设置
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("🔋", fontSize = 14.sp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (ignoringBattery) "后台运行：已允许" else "后台运行：未允许（可能被省电冻结）",
+                            color = if (ignoringBattery) scheme.tertiary else scheme.error,
+                            fontSize = 11.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (!ignoringBattery) {
+                            TextButton(onClick = { BackgroundSurvivalHelper.requestIgnoreBatteryOptimizations(context) }) {
+                                Text("去允许", color = scheme.primary, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    // 厂商自启动设置（仅当厂商入口可达时显示，如小米/OPPO/vivo 等）
+                    val autostartIntent = remember { BackgroundSurvivalHelper.manufacturerAutostartIntent(context) }
+                    if (autostartIntent != null) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("📱", fontSize = 14.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "自启动管理（厂商设置）",
+                                color = scheme.onSurface,
+                                fontSize = 11.sp,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { runCatching { context.startActivity(autostartIntent) } }) {
+                                Text("去设置", color = scheme.primary, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                    // 精确闹钟（Android 12+）：未授权时提醒，提升后台触发可靠性
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !exactAlarmGranted) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("⏰", fontSize = 14.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "精确闹钟未授权（后台触发可靠性降低）",
+                                color = scheme.onSurface,
+                                fontSize = 11.sp,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { BackgroundSurvivalHelper.requestScheduleExactAlarm(context) }) {
+                                Text("去授权", color = scheme.primary, fontSize = 12.sp)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -890,10 +1134,10 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
                             }
                         }) { Text("清空", color = scheme.error, fontSize = 12.sp) }
                     }
-                    Column(
-                        modifier = Modifier.verticalScroll(rememberScrollState()).heightIn(max = 360.dp),
-                    ) {
-                        characters.forEach { c ->
+                    // 固定高度 LazyColumn：AlertDialog 内 verticalScroll + heightIn 在无界约束下不滚动，
+                    // 列表会撑满整屏导致下方角色选不到（bug 修复）。
+                    LazyColumn(modifier = Modifier.height(360.dp)) {
+                        items(characters, key = { it.id }) { c ->
                             val checked = c.id in charIds
                             Row(
                                 modifier = Modifier
@@ -927,8 +1171,8 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 private fun ProviderDropdown(
     selectedProvider: ModelProvider?,
     expanded: Boolean,
@@ -1373,5 +1617,389 @@ private fun ModelDropdown(
                 )
             }
         }
+    }
+}
+
+
+@Composable
+private fun GroupChatSection(container: AppContainer, scope: CoroutineScope) {
+    val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val settings = container.settingsRepository
+
+    val config by settings.groupChatConfig.collectAsState(initial = GroupChatConfig())
+    val dailyRounds by settings.groupDailyRounds.collectAsState(initial = AppConfig.GroupChat.DEFAULT_DAILY_ROUNDS)
+    val provider by settings.activeProvider.collectAsState(initial = ChatProviderType.CLOUD)
+    val isCloud = provider == ChatProviderType.CLOUD
+
+    var roundsValue by remember(dailyRounds) { mutableStateOf(dailyRounds.toFloat()) }
+    var testScheduled by remember { mutableStateOf(false) }
+    LaunchedEffect(testScheduled) {
+        if (testScheduled) { delay(12_000); testScheduled = false }
+    }
+
+    val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    GlassListSection(title = "群聊") {
+        GlassListRow(
+            title = "多人角色群聊",
+            subtitle = if (isCloud) "勾选角色同群聊天；空闲时自动互相聊天并可主动向你提问。仅云端 AI 可用。"
+            else "仅云端 AI 模式可用，请先切换为云端 AI。",
+            trailing = {
+                Switch(
+                    checked = config.enabled,
+                    // 始终可点：本地下尝试开启时以 Toast 说明原因
+                    enabled = true,
+                    onCheckedChange = { on ->
+                        if (on && !isCloud) {
+                            Toast.makeText(context, "群聊仅云端 AI 可用，请先切换到云端 AI", Toast.LENGTH_SHORT).show()
+                        } else {
+                            scope.launch {
+                                settings.setGroupChatConfig(config.copy(enabled = on))
+                                if (on && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                                GroupChatScheduler.reschedule(context, settings)
+                            }
+                        }
+                    },
+                )
+            },
+            showDivider = isCloud && config.enabled,
+        )
+        if (isCloud) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = {
+                        GroupChatScheduler.scheduleTest(context)
+                        testScheduled = true
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = scheme.primary.copy(alpha = 0.16f)),
+                    contentPadding = PaddingValues(vertical = 8.dp),
+                ) {
+                    Text("测试群聊（10 秒后）", color = scheme.primary, fontSize = 13.sp)
+                }
+                if (testScheduled) {
+                    Text("✓ 已触发，约 10 秒后收到群聊通知", color = scheme.tertiary, fontSize = 11.sp)
+                }
+                if (config.enabled) {
+                    // 多群聊：成员在「群聊列表 → 新建群聊 / 群信息」里按群设置，设置页不再重复选人
+                    Text(
+                        "群成员到首页「群聊」的群列表里按群设置（新建群聊时勾选）。",
+                        color = scheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("空闲自动聊天", color = scheme.onSurface, fontSize = 13.sp)
+                            Text("成员空闲时自动互相聊，并主动向你提问", color = scheme.onSurfaceVariant, fontSize = 10.sp)
+                        }
+                        Switch(
+                            checked = config.autoChat,
+                            onCheckedChange = { on ->
+                                scope.launch {
+                                    settings.setGroupChatConfig(config.copy(autoChat = on))
+                                    GroupChatScheduler.reschedule(context, settings)
+                                }
+                            },
+                        )
+                    }
+                    Text("每日自动聊天轮次：${roundsValue.toInt()}", color = scheme.onSurface, fontSize = 12.sp)
+                    Slider(
+                        value = roundsValue,
+                        onValueChange = { roundsValue = it },
+                        onValueChangeFinished = {
+                            val v = roundsValue.toInt().coerceIn(
+                                AppConfig.GroupChat.MIN_DAILY_ROUNDS,
+                                AppConfig.GroupChat.MAX_DAILY_ROUNDS,
+                            )
+                            scope.launch {
+                                settings.setGroupDailyRounds(v)
+                                GroupChatScheduler.reschedule(context, settings)
+                            }
+                        },
+                        valueRange = AppConfig.GroupChat.MIN_DAILY_ROUNDS.toFloat()..
+                            AppConfig.GroupChat.MAX_DAILY_ROUNDS.toFloat(),
+                        steps = AppConfig.GroupChat.MAX_DAILY_ROUNDS - AppConfig.GroupChat.MIN_DAILY_ROUNDS - 1,
+                    )
+                    Text(
+                        "部分国产 ROM 需手动允许后台运行 / 自启动，否则收不到自动聊天提醒（同「角色问候」）。",
+                        color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun UserProfileSection(container: AppContainer, scope: CoroutineScope) {
+    val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val settings = container.settingsRepository
+
+    // 表单语义：头像选择/清除先挂起（pending），人设/关系文本本地编辑，全部在「保存」时原子落盘（仿 Seedance 分区）。
+    var avatarUri by remember { mutableStateOf("") }
+    var persona by remember { mutableStateOf("") }
+    var relationship by remember { mutableStateOf("") }
+    var pendingAvatarUri by remember { mutableStateOf<Uri?>(null) }
+    var avatarCleared by remember { mutableStateOf(false) }
+    var avatarError by remember { mutableStateOf<String?>(null) }
+    var saved by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val p = settings.getUserProfileNow()
+        avatarUri = p.avatarPath
+        persona = p.persona
+        relationship = p.relationship
+    }
+    LaunchedEffect(saved) {
+        if (saved) { delay(2000); saved = false }
+    }
+
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            pendingAvatarUri = uri
+            avatarCleared = false
+            avatarError = null
+        }
+    }
+
+    GlassListSection(title = "我的形象（选填）") {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                "以下全部为选填：留空则使用默认身份、不注入额外设定；填写后会把设定带进群聊、单聊与角色主动消息。",
+                color = scheme.onSurfaceVariant, fontSize = 11.sp,
+            )
+            FieldLabel("头像")
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val preview: Any? = when {
+                    pendingAvatarUri != null -> pendingAvatarUri
+                    avatarCleared -> null
+                    else -> avatarUri.takeIf { it.isNotBlank() }
+                }
+                if (preview != null) {
+                    Box(modifier = Modifier.size(64.dp).clip(androidx.compose.foundation.shape.CircleShape)) {
+                        AsyncImage(
+                            model = preview,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop,
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clip(androidx.compose.foundation.shape.CircleShape)
+                        .background(scheme.primary.copy(alpha = 0.12f))
+                        .border(1.dp, scheme.primary.copy(alpha = 0.4f), androidx.compose.foundation.shape.CircleShape)
+                        .clickable { imagePicker.launch(arrayOf("image/*")) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(if (preview == null) "＋ 选择" else "更换", color = scheme.primary, fontSize = 11.sp)
+                }
+                if (preview != null) {
+                    TextButton(onClick = {
+                        pendingAvatarUri = null
+                        avatarCleared = true
+                        avatarError = null
+                    }) { Text("清除", color = scheme.error, fontSize = 12.sp) }
+                }
+            }
+            avatarError?.let { Text(it, color = scheme.error, fontSize = 10.sp) }
+            FieldLabel("人设（我是谁）")
+            GlassInputField(
+                value = persona,
+                onValueChange = { persona = it },
+                placeholder = "如「使用本应用与我聊天的人，温和可靠，战斗与战术都值得信赖」",
+                singleLine = false,
+            )
+            FieldLabel("与角色之间的关系")
+            GlassInputField(
+                value = relationship,
+                onValueChange = { relationship = it },
+                placeholder = "如「我们是一起经历过许多的老朋友」",
+                singleLine = false,
+            )
+        }
+    }
+
+    SaveButton(
+        text = "保存我的形象",
+        saved = saved,
+        onClick = {
+            scope.launch {
+                var finalAvatar = avatarUri
+                val chosen = pendingAvatarUri
+                if (chosen != null) {
+                    val installed = withContext(Dispatchers.IO) { UserProfileImageStore.save(context, chosen) }
+                    if (installed == null) {
+                        avatarError = "头像保存失败"
+                        return@launch
+                    }
+                    finalAvatar = installed
+                    avatarUri = installed
+                    pendingAvatarUri = null
+                    avatarCleared = false
+                    avatarError = null
+                } else if (avatarCleared) {
+                    withContext(Dispatchers.IO) { UserProfileImageStore.remove(context) }
+                    finalAvatar = ""
+                    avatarUri = ""
+                    avatarCleared = false
+                    avatarError = null
+                }
+                settings.setUserProfileConfig(
+                    UserProfileConfig(
+                        avatarPath = finalAvatar,
+                        persona = persona.trim(),
+                        relationship = relationship.trim(),
+                    )
+                )
+                saved = true
+            }
+        },
+    )
+}
+
+@Composable
+private fun StorageSection(container: AppContainer, scope: CoroutineScope) {
+    val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+
+    var items by remember { mutableStateOf<List<AppStorageUsage.StorageItem>>(emptyList()) }
+    var refreshing by remember { mutableStateOf(false) }
+    var confirmKey by remember { mutableStateOf<String?>(null) }
+
+    fun refresh() {
+        scope.launch {
+            refreshing = true
+            items = withContext(Dispatchers.IO) { AppStorageUsage.computeItems(context) }
+            refreshing = false
+        }
+    }
+    LaunchedEffect(Unit) { refresh() }
+
+    GlassListSection(title = "存储管理") {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                "统计聊天数据 / 图片缓存 / 视频 / 导入图片占用；模型文件请到「模型」页管理。",
+                color = scheme.onSurfaceVariant,
+                fontSize = 10.sp,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text(
+                        "总占用：${AppStorageUsage.formatBytes(items.sumOf { it.sizeBytes })}",
+                        color = scheme.onSurface,
+                        fontSize = 14.sp,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                    )
+                    Text("不含模型文件", color = scheme.onSurfaceVariant, fontSize = 10.sp)
+                }
+                TextButton(onClick = { refresh() }) {
+                    Text(if (refreshing) "统计中…" else "刷新", color = scheme.primary, fontSize = 12.sp)
+                }
+            }
+            items.forEach { item ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(item.name, color = scheme.onSurface, fontSize = 13.sp)
+                        Text(item.description, color = scheme.onSurfaceVariant, fontSize = 10.sp)
+                    }
+                    Text(
+                        AppStorageUsage.formatBytes(item.sizeBytes),
+                        color = scheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                        // 定宽右对齐：各行大小数字纵向对齐，按钮列不随文案长度错位
+                        textAlign = androidx.compose.ui.text.style.TextAlign.End,
+                        modifier = Modifier.width(76.dp).padding(end = 6.dp),
+                    )
+                    TextButton(
+                        onClick = { confirmKey = item.key },
+                        enabled = item.sizeBytes > 0,
+                        modifier = Modifier.width(64.dp),
+                    ) {
+                        Text(
+                            if (item.key == "cache" || item.key == "chatRecords") "清空" else "删除",
+                            color = scheme.error,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    confirmKey?.let { key ->
+        val meta = when (key) {
+            "cache" -> Triple(
+                "清空缓存",
+                "确定清空图片与临时缓存？聊天内容与文件不受影响。",
+                "清空",
+            )
+            "videos" -> Triple(
+                "删除视频",
+                "确定删除全部 Seedance 视频文件与任务快照？任务记录保留，视频卡片将显示「尚未就绪」。",
+                "删除",
+            )
+            "backgrounds" -> Triple(
+                "删除聊天背景",
+                "确定删除全部自定义聊天背景？将恢复内置背景轮播。",
+                "删除",
+            )
+            "portraits" -> Triple(
+                "删除自定义立绘",
+                "确定删除全部自定义角色立绘？自定义角色将恢复无立绘状态，可重新上传。",
+                "删除",
+            )
+            "chatRecords" -> Triple(
+                "清空聊天记录",
+                "确定清空全部聊天记录（单聊与群聊）？此操作不可恢复；Seedance 任务记录保留。",
+                "清空",
+            )
+            else -> Triple("", "", "")
+        }
+        AlertDialog(
+            onDismissRequest = { confirmKey = null },
+            containerColor = scheme.surfaceContainerHigh,
+            title = { Text(meta.first, color = scheme.onSurface) },
+            text = { Text(meta.second, color = scheme.onSurfaceVariant) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmKey = null
+                    scope.launch {
+                        when (key) {
+                            "cache" -> withContext(Dispatchers.IO) {
+                                context.cacheDir.listFiles()?.forEach { runCatching { it.deleteRecursively() } }
+                            }
+                            "videos" -> withContext(Dispatchers.IO) {
+                                File(context.filesDir, "seedance/tasks").deleteRecursively()
+                            }
+                            "backgrounds" -> container.chatBackgroundRepository.clearAll()
+                            "portraits" -> withContext(Dispatchers.IO) {
+                                File(context.filesDir, "character_images").deleteRecursively()
+                            }
+                            "chatRecords" -> {
+                                container.conversationRepository.clearAll()
+                                container.settingsRepository.clearAllActiveConversations()
+                            }
+                        }
+                        refresh()
+                    }
+                }) { Text(meta.third, color = scheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmKey = null }) { Text("取消", color = scheme.onSurfaceVariant) }
+            },
+        )
     }
 }

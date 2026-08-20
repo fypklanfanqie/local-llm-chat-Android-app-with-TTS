@@ -28,6 +28,22 @@ data class ConversationEntity(
      * v4->v5 迁移新增列，旧行默认关闭；新会话由 Repository 落默认值。
      */
     val autoVideoEnabled: Boolean = false,
+    /**
+     * 是否群聊会话（0/1，默认 0）。群聊 = 一行 `characterId = "group_chat"` 的 conversation，
+     * 消息复用 chat_history（每行 characterId 记发言人）。
+     * v5->v6 迁移新增列，旧行默认 0。
+     */
+    val isGroup: Boolean = false,
+    /**
+     * 群成员角色 id 列表（JSON 数组字符串；非群聊恒为空串）。
+     * v5->v6 迁移新增列，旧行默认空串。
+     */
+    val memberIdsJson: String = "",
+    /**
+     * 群封面图 `file://` 路径（仅群聊有意义；null=未设置）。
+     * 多群聊（v7）引入：一个群 = 一行带 isGroup=1 的 conversation，可设名称（title）与封面。
+     */
+    val coverImagePath: String? = null,
 )
 
 /**
@@ -71,6 +87,10 @@ interface ChatDao {
 
     @Query("SELECT * FROM chat_history WHERE conversationId = :conversationId ORDER BY timestamp DESC LIMIT ${AppConfig.MAX_HISTORY_PER_CONVERSATION}")
     suspend fun getHistoryList(conversationId: Long): List<ChatHistoryEntity>
+
+    /** 导出使用：按时间正序读取该会话全部仍保存在数据库中的消息，不受 UI 历史窗口限制。 */
+    @Query("SELECT * FROM chat_history WHERE conversationId = :conversationId ORDER BY timestamp ASC")
+    suspend fun getAllHistoryList(conversationId: Long): List<ChatHistoryEntity>
 
     @Insert
     suspend fun insert(entity: ChatHistoryEntity): Long
@@ -131,6 +151,25 @@ interface ConversationDao {
     @Query("SELECT * FROM conversation WHERE id = :id")
     suspend fun getById(id: Long): ConversationEntity?
 
+    /** 全部群聊会话（多群聊，最近活跃在前）。 */
+    @Query("SELECT * FROM conversation WHERE isGroup = 1 ORDER BY updatedAt DESC")
+    suspend fun listGroups(): List<ConversationEntity>
+
+    @Query("SELECT * FROM conversation WHERE isGroup = 1 ORDER BY updatedAt DESC")
+    fun observeGroups(): Flow<List<ConversationEntity>>
+
+    /** 标记某会话为群聊（create 后再调用，因为 create 只落普通字段）。 */
+    @Query("UPDATE conversation SET isGroup = 1 WHERE id = :id")
+    suspend fun markGroup(id: Long)
+
+    /** 更新群成员列表（JSON 数组字符串）并刷新 updatedAt。 */
+    @Query("UPDATE conversation SET memberIdsJson = :json, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateGroupMembers(id: Long, json: String, updatedAt: Long)
+
+    /** 更新群封面路径并刷新 updatedAt（null=清除封面）。 */
+    @Query("UPDATE conversation SET coverImagePath = :coverPath, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateGroupCover(id: Long, coverPath: String?, updatedAt: Long)
+
     @Query("SELECT COUNT(*) FROM conversation WHERE characterId = :characterId")
     suspend fun count(characterId: String): Int
 
@@ -149,17 +188,45 @@ interface ConversationDao {
         deleteMessages(id)
         delete(id)
     }
+
+    /** 清空全部聊天记录（事务：先删全部消息再删全部会话），供设置页「存储管理」使用。 */
+    @Transaction
+    suspend fun clearAllConversations() {
+        deleteAllMessages()
+        deleteAllConversations()
+    }
+
+    @Query("DELETE FROM chat_history")
+    suspend fun deleteAllMessages()
+
+    @Query("DELETE FROM conversation")
+    suspend fun deleteAllConversations()
 }
 
 @Database(
-    entities = [ChatHistoryEntity::class, ConversationEntity::class, SeedanceVideoEntity::class],
-    version = 5,
+    entities = [
+        ChatHistoryEntity::class,
+        ConversationEntity::class,
+        SeedanceVideoEntity::class,
+        CharacterAffinityEntity::class,
+        CompanionWalletEntity::class,
+        DailyCheckinEntity::class,
+        DailyCheckinPromptEntity::class,
+        GiftDefinitionEntity::class,
+        GiftInventoryEntity::class,
+        GiftHistoryEntity::class,
+        SpecialEventEntity::class,
+        AffinityRewardEntity::class,
+        SpecialEventScriptEntity::class,
+    ],
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
     abstract fun conversationDao(): ConversationDao
     abstract fun seedanceVideoDao(): SeedanceVideoDao
+    abstract fun affinityDao(): AffinityDao
 
     companion object {
         @Volatile
@@ -285,6 +352,96 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v5 -> v6：群聊（Task：多人角色同群聊天，仅云端可用）。
+         *
+         * - conversation 新增非空列 isGroup（默认 0）与 memberIdsJson（默认空串，JSON 数组）。
+         *   群聊 = 一行 characterId = "group_chat" 的 conversation + 复用 chat_history（每行
+         *   characterId 记发言人），故无需新表。
+         * - 不声明级联外键（与 seedance_video 一致：删除普通会话不清群聊消息）。
+         *
+         * 不使用破坏性回退：聊天历史与既有会话数据必须原样保留。
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE conversation ADD COLUMN isGroup INTEGER NOT NULL DEFAULT 0"
+                )
+                database.execSQL(
+                    "ALTER TABLE conversation ADD COLUMN memberIdsJson TEXT NOT NULL DEFAULT ''"
+                )
+            }
+        }
+
+        /**
+         * v6 -> v7：多群聊（群列表 + 群封面）。
+         *
+         * - conversation 新增可空列 coverImagePath（群封面 file:// 路径；旧群行 null=无封面）。
+         * - 多群 = 多行 isGroup=1 的 conversation（名称复用 title 列）。
+         * 不使用破坏性回退。
+         */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE conversation ADD COLUMN coverImagePath TEXT"
+                )
+            }
+        }
+
+        /**
+         * v7 -> v8：好感度/羁绊系统（签到钱包、礼物经济、特殊邂逅、奖励账本、自定义剧情脚本）。
+         *
+         * 全部为新建表（非破坏），不触碰 conversation / chat_history / seedance_video。
+         * 目标版此前从未有这些表，把源增量迁移链（7→11）合并为单条迁移：
+         * 含 thankYouText（源 8→9）、openingMessageId（源 10→11）字段的最终形态。
+         */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `character_affinity` (`characterId` TEXT NOT NULL, `value` REAL NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`characterId`))"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `companion_wallet` (`id` INTEGER NOT NULL, `balance` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `daily_checkin` (`dayKey` TEXT NOT NULL, `claimedAt` INTEGER NOT NULL, PRIMARY KEY(`dayKey`))"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `daily_checkin_prompt` (`dayKey` TEXT NOT NULL, `shownAt` INTEGER NOT NULL, PRIMARY KEY(`dayKey`))"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `gift_definition` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `description` TEXT NOT NULL, `imagePath` TEXT NOT NULL, `price` INTEGER NOT NULL, `affinityGain` REAL NOT NULL, `createdAt` INTEGER NOT NULL)"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `gift_inventory` (`giftId` INTEGER NOT NULL, `quantity` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`giftId`))"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `gift_history` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `characterId` TEXT NOT NULL, `giftId` INTEGER NOT NULL, `giftName` TEXT NOT NULL, `giftDescription` TEXT NOT NULL, `giftImagePath` TEXT NOT NULL, `price` INTEGER NOT NULL, `affinityGain` REAL NOT NULL, `sentAt` INTEGER NOT NULL, `conversationId` INTEGER NOT NULL, `thankYouText` TEXT NOT NULL)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_gift_history_characterId_sentAt` ON `gift_history` (`characterId`, `sentAt`)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_gift_history_giftId` ON `gift_history` (`giftId`)"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `special_event` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `characterId` TEXT NOT NULL, `threshold` INTEGER NOT NULL, `title` TEXT NOT NULL, `sceneKey` TEXT NOT NULL, `unlockedAt` INTEGER NOT NULL, `startedAt` INTEGER, `conversationId` INTEGER, `isRead` INTEGER NOT NULL, `openingMessageId` INTEGER)"
+                )
+                database.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_special_event_characterId_threshold` ON `special_event` (`characterId`, `threshold`)"
+                )
+                database.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_special_event_conversationId` ON `special_event` (`conversationId`)"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `affinity_reward` (`sourceKey` TEXT NOT NULL, `characterId` TEXT NOT NULL, `amount` REAL NOT NULL, `source` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`sourceKey`))"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `special_event_script` (`characterId` TEXT NOT NULL, `threshold` INTEGER NOT NULL, `title` TEXT NOT NULL, `scene` TEXT NOT NULL, `opening` TEXT NOT NULL, `systemPrompt` TEXT NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`characterId`, `threshold`))"
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 // 双重检查锁定：避免两个并发首次调用各建一个 RoomDatabase 实例，
@@ -293,7 +450,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "rhodes_chat.db"
-                ).addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8).build().also { INSTANCE = it }
             }
         }
     }

@@ -30,6 +30,10 @@ class ChatRepository(private val dao: ChatDao) {
     suspend fun getHistory(conversationId: Long): List<ChatMessage> =
         dao.getHistoryList(conversationId).map { it.toMessage() }.asReversed()
 
+    /** 导出使用：按时间正序读取该会话全部仍保存在数据库中的消息，不受 UI 历史窗口限制。 */
+    suspend fun getAllHistoryForExport(conversationId: Long): List<ChatMessage> =
+        dao.getAllHistoryList(conversationId).map { it.toMessage() }
+
     suspend fun addMessage(characterId: String, conversationId: Long, message: ChatMessage): Long {
         // 事务性插入 + 修剪，避免 Flow 在中间状态 emit（详见 ChatDao.insertAndTrim）
         return dao.insertAndTrim(conversationId, message.toEntity(characterId, conversationId))
@@ -61,6 +65,8 @@ internal fun ChatHistoryEntity.toMessage(): ChatMessage = ChatMessage(
     modelContent = modelContent,
     // 回填 Room 自增主键：持久消息的稳定标识（Compose key + 完成消息协调）。
     databaseId = id,
+    // 回填发言人角色 id：群聊按条渲染头像/名字用；1:1 下为会话角色。
+    characterId = characterId,
     completionState = MessageCompletionState.fromStorageKey(completionState),
 )
 

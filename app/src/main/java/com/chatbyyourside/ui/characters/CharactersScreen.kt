@@ -21,13 +21,16 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Redeem
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -40,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import com.chatbyyourside.AppContainer
 import com.chatbyyourside.config.Characters
 import com.chatbyyourside.data.model.Character
+import com.chatbyyourside.data.model.CharacterAffinity
 import com.chatbyyourside.ui.glass.GlassLargeTitle
 import com.chatbyyourside.ui.glass.GlassSheet
 import com.chatbyyourside.ui.glass.frostedGlass
@@ -57,6 +61,8 @@ import kotlinx.serialization.json.Json
 fun CharactersScreen(
     container: AppContainer,
     onNavigateToChat: () -> Unit,
+    onOpenCheckinShop: () -> Unit = {},
+    onOpenAffinity: (String) -> Unit = {},
 ) {
     val characters by container.characterRepository.characters.collectAsState(
         initial = Characters.getOrderedList(),
@@ -66,6 +72,7 @@ fun CharactersScreen(
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
+    val unreadAffinityCharacterIds by container.affinityRepository.observeUnreadEventCharacterIds().collectAsState(initial = emptySet())
 
     var showCreate by remember { mutableStateOf(false) }
     var showImport by remember { mutableStateOf(false) }
@@ -97,6 +104,11 @@ fun CharactersScreen(
                         }
                     }
                 }) { Text("导出", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                TextButton(onClick = onOpenCheckinShop) {
+                    Icon(Icons.Filled.Redeem, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(2.dp))
+                    Text("签到", color = MaterialTheme.colorScheme.primary)
+                }
             }
 
             LazyVerticalGrid(
@@ -107,6 +119,8 @@ fun CharactersScreen(
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
                 items(characters) { char ->
+                    val affinityValue by container.affinityRepository.observeAffinity(char.id)
+                        .collectAsState(initial = CharacterAffinity(char.id, 0f, 0L))
                     CharacterCard(
                         character = char,
                         isActive = char.id == activeCharacter,
@@ -134,6 +148,9 @@ fun CharactersScreen(
                             }
                         } else null,
                         onViewPersona = { showPersona = char },
+                        onViewAffinity = { onOpenAffinity(char.id) },
+                        hasUnreadAffinityEvent = char.id in unreadAffinityCharacterIds,
+                        affinityValue = affinityValue.value,
                     )
                 }
             }
@@ -195,6 +212,9 @@ private fun CharacterCard(
     onVoiceClick: () -> Unit,
     onDelete: (() -> Unit)?,
     onViewPersona: () -> Unit,
+    onViewAffinity: () -> Unit,
+    hasUnreadAffinityEvent: Boolean = false,
+    affinityValue: Float? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     Box(
@@ -206,6 +226,36 @@ private fun CharacterCard(
             .clickable(onClick = onSelect)
             .padding(12.dp),
     ) {
+        // 好感 pill：点击进入关系档案；有未读特殊邂逅时右上角加红点。
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .clip(RoundedCornerShape(50))
+                .clickable(onClick = onViewAffinity)
+                .background(scheme.primary.copy(alpha = 0.16f))
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Favorite, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(11.dp))
+                Spacer(Modifier.width(3.dp))
+                Text(
+                    "好感 ${affinityValue?.let { if (it % 1f == 0f) it.toInt() else it } ?: 0} / 200",
+                    color = scheme.primary,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+        if (hasUnreadAffinityEvent) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = 14.dp, y = (-6).dp)
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFFE36B5D)),
+            )
+        }
         Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,

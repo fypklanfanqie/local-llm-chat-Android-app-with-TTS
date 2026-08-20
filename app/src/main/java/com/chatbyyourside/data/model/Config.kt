@@ -56,6 +56,22 @@ enum class TtsEngine(val storageKey: String, val label: String) {
 }
 
 /**
+ * 云端 TTS 接入端点：
+ *  - [PROXY]：CloudBase 透明代理（默认，支持新版 apiKey 或旧版 appId+accessKey）；
+ *  - [DIRECT]：直连火山引擎官方 Chunked endpoint（仅新版 apiKey）。
+ */
+enum class TtsEndpointMode(val storageKey: String, val label: String) {
+    PROXY("proxy", "代理"),
+    DIRECT("direct", "直连火山引擎");
+
+    companion object {
+        val DEFAULT: TtsEndpointMode = PROXY
+        fun fromStorageKey(value: String?): TtsEndpointMode =
+            entries.firstOrNull { it.storageKey == value } ?: DEFAULT
+    }
+}
+
+/**
  * 系统引擎声音模板：语速（1.0 标准，>1 快）/ 音调（1.0 标准，>1 高）+ 设备语音名匹配关键词。
  *
  * 匹配在 [com.chatbyyourside.tts.matchSystemVoiceForTemplate] 中完成：

@@ -6,6 +6,7 @@ import android.util.Log
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.GenerationExecutionControl
+import com.chatbyyourside.llm.InferenceSessionController
 import com.chatbyyourside.llm.backend.MnnBackend.MnnMode
 import com.chatbyyourside.llm.metrics.CompletionReason
 import com.chatbyyourside.llm.profile.BackendAttempt
@@ -47,6 +48,8 @@ class BackendManager(
     },
 ) {
     private val selector = BackendSelector(context)
+    /** 本地推理保活：生成期间启动前台服务 + WakeLock，防国产 ROM 杀进程/冻结（见 InferenceSessionController）。 */
+    private val inferenceSession = InferenceSessionController(context)
     /** 整次请求（加载 + fallback + JNI）串行，防新请求改写旧请求共享的 abort/lifecycle 状态。 */
     private val generationMutex = Mutex()
     private val mnnCpuBackend: InferenceBackend = backendFactory(MnnMode.CPU)
@@ -267,6 +270,8 @@ class BackendManager(
             // LocalChatProvider 在调用本方法前已注册 request control：提前取消体现在 reason；否则清上轮残留 abort。
             MnnBridge.abort = executionControl?.reason() != null
         }
+        // 本地推理保活：前台服务 + WakeLock 覆盖「模型加载 + prefill + 生成」全程。
+        inferenceSession.begin(attempts.first().variant.name)
         try {
             for ((attemptIndex, attempt) in attempts.withIndex()) {
                 if (executionControl?.canTryNextBackend() == false) break
@@ -473,6 +478,8 @@ class BackendManager(
             Log.e(TAG, detail)
             throw lastError?.let { IllegalStateException(detail, it) } ?: IllegalStateException(detail)
         } finally {
+            // 本地推理保活收尾：结束前台服务 + 释放 WakeLock（幂等；异常吞掉，不影响生成结果返回）。
+            runCatching { inferenceSession.end() }
             // 与 [release] 互斥：原子地清 generating 并取走 releasePending，决定是否本轮释放。
             val pending: Boolean
             synchronized(lifecycleLock) {

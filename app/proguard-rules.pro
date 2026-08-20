@@ -61,3 +61,16 @@
 -dontwarn org.slf4j.**
 -dontwarn okhttp3.internal.**
 -dontwarn androidx.compose.material3.**
+
+# ===== OPPO/鸿蒙闪退排查加固：release 防 R8 反射剥离 =====
+# WorkManager 按 WorkData 里的类名字符串反射实例化自定义 Worker（不引用 manifest），
+# 漏 keep 会被 R8 改名/裁剪。GroupChatWorker 曾漏 keep，release 群聊实际已受影响。
+-keep class com.chatbyyourside.work.** { *; }
+# 清单组件 / 前台服务 / 隔离探测进程（框架按清单类名反射实例化 + JNI）
+-keep class com.chatbyyourside.llm.backend.OpenClProbeService { *; }
+-keep class com.chatbyyourside.service.** { *; }
+-keep public class * extends android.app.Service
+-keep public class * extends android.content.BroadcastReceiver
+# 玻璃 UI / 三方液态玻璃库（Compose 反射 + 图形栈）
+-keep class com.chatbyyourside.ui.glass.** { *; }
+-keep class com.qmdeve.liquidglass.** { *; }

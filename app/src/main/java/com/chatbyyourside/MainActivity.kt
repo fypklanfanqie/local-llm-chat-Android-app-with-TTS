@@ -28,11 +28,14 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import com.chatbyyourside.data.model.ThemeMode
 import com.chatbyyourside.notification.GreetingNotificationManager
+import com.chatbyyourside.notification.GroupChatNotificationManager
 import com.chatbyyourside.ui.LoadingScreen
 import com.chatbyyourside.ui.glass.GlassBackdrop
 import com.chatbyyourside.ui.glass.MeshBackground
+import com.chatbyyourside.ui.groupchat.GroupNavigationBus
 import com.chatbyyourside.ui.navigation.AppNavGraph
 import com.chatbyyourside.ui.theme.ChatTheme
+import com.chatbyyourside.util.CrashWatchdog
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -49,10 +52,26 @@ class MainActivity : ComponentActivity() {
 
         val app = application as ChatApp
 
+        // 启动存活日志（Track A2）：检查上次启动是否在加载窗口内异常退出。Java handler
+        // 拦不住原生 SIGSEGV，靠 started/loaded 标记间接判定；若成立，首页弹提示引导用户
+        // 去 设置 → 崩溃日志 分享日志。随后 markStarted 重置标记，开始本轮启动。
+        val crashedLastLaunch = CrashWatchdog.hasCrashedLastLaunch(this)
+        if (crashedLastLaunch) {
+            android.util.Log.w("MainActivity", "上次启动在加载窗口内异常退出（可能为原生崩溃）")
+        }
+        CrashWatchdog.markStarted(this)
+
         // 同步读取当前主题模式，用于初始化系统栏样式（避免冷启动时系统栏图标与主题错位）。
-        // DataStore 读取通常很快，加 1s 超时防止国产 ROM 文件 I/O 被拦截时阻塞 onCreate。
+        // DataStore 读取通常很快，加 1s 超时防止国产 ROM 文件 I/O 被拦截时阻塞 onCreate；
+        // 超时不兜异常——DataStore 文件损坏时 .first() 抛 CorruptionException，需 try/catch 兜底，
+        // 否则冷启动主线程直接崩（闪退）。
         val initialThemeMode = runBlocking {
-            withTimeoutOrNull(1000L) { app.container.settingsRepository.themeMode.first() }
+            try {
+                withTimeoutOrNull(1000L) { app.container.settingsRepository.themeMode.first() }
+            } catch (e: Exception) {
+                android.util.Log.w("MainActivity", "读取主题模式失败，回退系统主题：${e.message}")
+                null
+            }
         } ?: ThemeMode.SYSTEM
         val initialDarkTheme = when (initialThemeMode) {
             ThemeMode.LIGHT -> false
@@ -99,6 +118,8 @@ class MainActivity : ComponentActivity() {
         // 冷启动在 setContent 前写入，配合启动 Loading 画面让 DataStore 写入完成，避免先闪默认角色。
         // 返回是否来自问候通知：若是则卡片流首页直接落到该角色的聊天页，而不是停在卡片流。
         val initialChatOpen = handleGreetingIntent(intent, app)
+        // 群聊通知点按跳转：把目标群会话 id 交给群导航总线，由 AppNavGraph 消费落到对应群聊页。
+        handleGroupIntent(intent)
 
         // CPU 提频（非 root 路线，Task 8）：sustained mode 改为**生成级**——仅 MAXIMUM_SPEED 本地推理
         // 期间经 CpuBoostController 开启，finally/close 恢复；Balanced 永不开启。此处只注入 window setter。
@@ -136,7 +157,11 @@ class MainActivity : ComponentActivity() {
                                 enter = fadeIn(),
                                 exit = fadeOut(animationSpec = tween(500)),
                             ) {
-                                LoadingScreen(onFinished = { showLoading = false })
+                                LoadingScreen(onFinished = {
+                                    showLoading = false
+                                    // 加载画面正常走完：记录 loaded 标记，本轮启动窗口安全通过。
+                                    CrashWatchdog.markLoaded(app)
+                                })
                             }
 
                             // 主应用，Loading 结束后淡入
@@ -145,7 +170,11 @@ class MainActivity : ComponentActivity() {
                                 enter = fadeIn(animationSpec = tween(600)),
                                 exit = fadeOut(),
                             ) {
-                                AppNavGraph(container = app.container, initialChatOpen = initialChatOpen)
+                                AppNavGraph(
+                                    container = app.container,
+                                    initialChatOpen = initialChatOpen,
+                                    crashNotice = crashedLastLaunch,
+                                )
                             }
                         }
                     }
@@ -179,6 +208,15 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleGreetingIntent(intent, application as ChatApp)
+        handleGroupIntent(intent)
+    }
+
+    /** 群聊通知点按跳转：从 PendingIntent extra 取群会话 id，交给 [GroupNavigationBus] 让导航消费。 */
+    private fun handleGroupIntent(intent: Intent?) {
+        val convId = intent?.getLongExtra(GroupChatNotificationManager.EXTRA_GROUP_CONVERSATION_ID, -1L) ?: return
+        if (convId <= 0L) return
+        intent.removeExtra(GroupChatNotificationManager.EXTRA_GROUP_CONVERSATION_ID)
+        GroupNavigationBus.requestOpen(convId)
     }
 
     /**

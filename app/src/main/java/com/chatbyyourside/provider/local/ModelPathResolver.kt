@@ -26,7 +26,10 @@ object ModelPathResolver {
      * Android/data/com.chatbyyourside/files/models/
      */
     fun getModelsDirectory(context: Context): File {
-        val dir = File(context.getExternalFilesDir(null), "models")
+        // getExternalFilesDir(null) 在共享存储不可用（USB 大容量模式/部分电视盒/平板/早期启动）时可能返回 null；
+        // File(null, "models") 会静默落成相对路径 "/models"，导致下载/扫描/加载全部失败。兜底到内部 filesDir。
+        val base = context.getExternalFilesDir(null) ?: context.filesDir
+        val dir = File(base, "models")
         if (!dir.exists()) dir.mkdirs()
         return dir
     }

@@ -9,6 +9,7 @@ import com.chatbyyourside.AppContainer
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.config.AssetPaths
 import com.chatbyyourside.config.Characters
+import com.chatbyyourside.conversationexport.ConversationExportDocument
 import com.chatbyyourside.data.model.*
 import com.chatbyyourside.data.remote.ChatMessageDto
 import com.chatbyyourside.data.repository.AutoVideoOutboxDraft
@@ -96,6 +97,17 @@ class ChatViewModel(
             catch (e: Exception) {
                 Log.e(TAG, "activeCharacter flow 异常", e)
                 _uiState.update { it.copy(errorMessage = "角色数据加载失败：${e.message}", showWelcome = false) }
+            }
+        }
+        // 我的形象（设置「我的形象」）：用户头像 -> 用户气泡显示。
+        viewModelScope.launch {
+            try {
+                container.settingsRepository.userProfile.collect { profile ->
+                    _uiState.update { it.copy(userImage = profile.avatarPath) }
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                Log.w(TAG, "userProfile flow 异常", e)
             }
         }
         // 监听角色 + 活跃会话映射：确定该角色的活跃会话；无（或已被删除）则自动新建「新对话」。
@@ -220,6 +232,13 @@ class ChatViewModel(
                 activeConversationTitle = active?.title ?: ConversationRepository.DEFAULT_TITLE,
                 activeConversationAutoVideoEnabled = active?.autoVideoEnabled ?: false,
             )
+        }
+        viewModelScope.launch {
+            val event = id?.let { container.database.affinityDao().getSpecialEventByConversation(it) }
+            _uiState.update { state -> state.copy(activeSpecialEventId = event?.id) }
+            if (event != null && container.settingsRepository.getActiveProviderNow() != ChatProviderType.CLOUD) {
+                container.chatProviderManager.switchProvider(ChatProviderType.CLOUD)
+            }
         }
     }
 
@@ -377,6 +396,50 @@ class ChatViewModel(
     }
 
     /**
+     * 准备导出指定会话：读全量消息组装成导出文档，就绪回调 [onReady]，失败回调 [onError]。
+     */
+    fun prepareConversationExport(
+        conversationId: Long,
+        onReady: (ConversationExportDocument) -> Unit,
+        onError: (String) -> Unit,
+    ) {
+        viewModelScope.launch {
+            runCatching { container.conversationExportService.prepare(conversationId) }
+                .onSuccess(onReady)
+                .onFailure { onError(it.message ?: "无法准备对话导出") }
+        }
+    }
+
+    /**
+     * 赠送礼物后让角色 AI 生成一段自然道谢，落库为礼物的 thankYouText 并追加进聊天。
+     */
+    fun sendGiftThanks(gift: GiftHistory) {
+        val convId = _activeConversationId.value ?: return
+        if (_uiState.value.isStreaming || convId != gift.conversationId) return
+        viewModelScope.launch {
+            val char = container.characterRepository.getNow(_uiState.value.characterId) ?: return@launch
+            val history = container.chatRepository.getHistory(convId)
+            val provider = container.chatProviderManager.getActiveProvider()
+            val userDirective = container.settingsRepository.getUserProfileNow().toDirectiveText()
+            val prompt = """你的朋友刚刚赠送了你一件礼物：${gift.giftName}${gift.giftDescription.takeIf { it.isNotBlank() }?.let { "（$it）" } ?: ""}。
+请以角色身份自然、真诚地感谢对方，保持简短，不提及好感度、价格、金币、系统或游戏机制。"""
+            val messages = buildList {
+                add(ChatMessage(role = "system", content = char.systemPrompt + userDirective))
+                addAll(history.takeLast(AppConfig.MAX_CONTEXT_MESSAGES).map { ChatMessage(role = it.role, content = it.content) })
+                add(ChatMessage(role = "user", content = prompt))
+            }
+            runCatching { provider.chat(messages) {} }.onSuccess { response ->
+                container.affinityRepository.saveGiftThankYouText(gift.id, response)
+                val rowId = container.chatRepository.addMessage(char.id, convId, ChatMessage(role = "assistant", content = response))
+                container.conversationRepository.touch(convId)
+                // Room Flow 会回填该消息。不要再手动 append 同一 databaseId，否则 LazyColumn key 重复并崩溃。
+            }.onFailure { error ->
+                _uiState.update { it.copy(errorMessage = "礼物已送出，感谢回复生成失败：${error.message ?: "请稍后重试"}") }
+            }
+        }
+    }
+
+    /**
      * 开启/关闭当前会话的 Seedance 自动视频（Task 7）。
      *
      * 关闭直接生效；开启时先做准入检查（Seedance API Key 非空、角色立绘存在），
@@ -384,6 +447,10 @@ class ChatViewModel(
      * （显示「仅云端可用」，不清空已存储的开关值），此处不拦截。
      */
     fun setAutoVideoEnabled(conversationId: Long, enabled: Boolean) {
+        if (_uiState.value.activeSpecialEventId != null) {
+            _uiState.update { it.copy(errorMessage = "特殊邂逅中不可生成视频") }
+            return
+        }
         if (!enabled) {
             viewModelScope.launch { container.conversationRepository.setAutoVideoEnabled(conversationId, false) }
             return
@@ -515,6 +582,10 @@ class ChatViewModel(
     }
 
     fun switchProvider(type: ChatProviderType) {
+        if (_uiState.value.activeSpecialEventId != null && type != ChatProviderType.CLOUD) {
+            _uiState.update { it.copy(errorMessage = "特殊邂逅中仅支持云端对话") }
+            return
+        }
         viewModelScope.launch {
             // 与 switchConversation/newConversation 一致：切换前取消当前推理，避免旧 provider
             // 的 onToken 回调继续更新 UI 造成状态混乱。
@@ -672,8 +743,19 @@ class ChatViewModel(
                     }
                 }
                 val isCloudProvider = container.settingsRepository.getActiveProviderNow() == ChatProviderType.CLOUD
+                // 我的形象（人设/关系）注入 system：云端与本地共用同一消息列表，一处注入两端生效
+                val userDirective = container.settingsRepository.getUserProfileNow().toDirectiveText()
+                // 特殊邂逅追加离线场景背景，保证后续对话持续围绕解锁的事件；自定义角色采用其编辑后的脚本。
+                val specialEvent = container.database.affinityDao().getSpecialEventByConversation(convId)
+                if (specialEvent != null && !isCloudProvider) {
+                    container.chatProviderManager.switchProvider(ChatProviderType.CLOUD)
+                }
+                val eventDirective = specialEvent?.let { event ->
+                    val script = container.specialEventScriptStore.resolve(char, event.threshold)
+                    "\n\n【特殊邂逅背景】\n${script.scene}\n${script.systemPrompt}\n请延续这个场景，不要跳出场景或提及好感度、事件机制。"
+                }.orEmpty()
                 val apiMessages = buildList {
-                    add(ChatMessage(role = "system", content = char.systemPrompt))
+                    add(ChatMessage(role = "system", content = char.systemPrompt + eventDirective + userDirective))
                     addAll(resolvedHistory.map {
                         if (isCloudProvider) {
                             // 云端历史含 <think>（注入的推理），回传前剥离（reasoning 不应回传给对话商）。
@@ -760,6 +842,8 @@ class ChatViewModel(
                 } else {
                     MessageCompletionState.COMPLETE
                 }
+                // 用户消息已落库且后续生成成功时才授予 +0.5；失败路径会删除该消息，不能奖励。
+                container.affinityRepository.addChatAffinity(charId, userMsgId)
                 // 统一完成/停止落库：插入 assistant（+自动视频 outbox 同事务）、touch、乐观显示、清理流式状态。
                 finalizeAssistant(
                     charId = charId,
@@ -782,6 +866,8 @@ class ChatViewModel(
                 if (stoppedByUser) {
                     // 云端显式停止：HTTP 调用被取消表现为 IOException。此时不是错误——保留部分输出，
                     // 不删除已落库的用户消息，不展示错误横幅。
+                    // 用户主动停止仍保留并完成本轮对话，给予该条已落库用户消息的好感。
+                    if (userMsgId != 0L) container.affinityRepository.addChatAffinity(charId, userMsgId)
                     termReason = "已停止（保留部分输出）"
                     val partial = latestAccumulated
                     finalizeAssistant(

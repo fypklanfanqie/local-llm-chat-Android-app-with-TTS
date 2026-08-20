@@ -42,6 +42,12 @@ data class ChatMessage(
      * 独立于 `content`/`modelContent` 持久化，仅用于 UI 停止 badge。
      */
     val completionState: MessageCompletionState = MessageCompletionState.COMPLETE,
+    /**
+     * 发言人角色 id（群聊用）。1:1 聊天下为 null（发言人由会话的单一 character 决定）。
+     * 群聊写路径由 ChatRepository.addMessage 的 characterId 参数决定（单事实源）；读路径由
+     * toMessage 从行回填，供群聊按条渲染头像/名字。
+     */
+    val characterId: String? = null,
 )
 
 @Serializable
@@ -129,4 +135,9 @@ data class DisplayMessage(
      * 供气泡「删除」操作按行 ID 精确删除（[com.chatbyyourside.ui.chat.ChatViewModel.deleteMessage]）。
      */
     val databaseId: Long? = null,
+    /**
+     * 发言人角色 id（群聊用；1:1 下为 null）。由 GroupChatTimelineReconciler 从持久行回填，
+     * 群聊气泡据此定位成员头像/名字；未知 id 由 UI 层回退「群聊成员」占位。
+     */
+    val characterId: String? = null,
 )

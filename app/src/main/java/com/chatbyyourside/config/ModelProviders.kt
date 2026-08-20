@@ -32,6 +32,10 @@ data class ModelProvider(
 const val FREE_PROVIDER_ID = "siliconflow-free"
 const val FREE_PROVIDER_BASE_URL = "https://siliconflow-free-proxy.lanfanqie.workers.dev/v1"
 
+/** 判断 baseUrl 是否为内置「免费对话」代理地址（空 key 豁免用；忽略尾斜杠与大小写）。 */
+fun isFreeProxyBaseUrl(baseUrl: String): Boolean =
+    baseUrl.trimEnd('/').equals(FREE_PROVIDER_BASE_URL.trimEnd('/'), ignoreCase = true)
+
 val PRESET_PROVIDERS: List<ModelProvider> = listOf(
     ModelProvider(
         id = FREE_PROVIDER_ID,
@@ -43,6 +47,11 @@ val PRESET_PROVIDERS: List<ModelProvider> = listOf(
                 "Qwen/Qwen2.5-7B-Instruct",
                 "Qwen2.5-7B（免费）",
                 "硅基流动免费共享 7B 模型，人多时可能稍慢，出错稍等重试即可",
+            ),
+            PresetModel(
+                "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+                "DeepSeek-R1-7B（免费）",
+                "免费 7B 推理模型",
             ),
         ),
         requiresApiKey = false,

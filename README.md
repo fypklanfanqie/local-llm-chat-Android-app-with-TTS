@@ -29,6 +29,10 @@
   No OOM: context auto-downgrades to fit memory. Experimental accelerations only turn on after on-device benchmarks certify them.
 - **💬 聊天可靠性重构 · Chat reliability** — 思考流渲染、用户控制底部跟随、「停止」保留部分输出、首答不再闪烁消失。
   Thinking-stream rendering, user-controlled bottom-following, stop preserves partial output, first answer never flickers away.
+- **💝 好感度 / 羁绊系统 · Affinity system** — 每日签到领金币 + 自定义礼物经济（造礼物 → 采购 → 聊天中赠送 → 角色 AI 当面道谢）+ 每角色好感度 0–200 + 好感阈值解锁「特殊邂逅」剧情（50 / 100 / 150 / 200，桥接为真实聊天会话）；自定义角色的特殊邂逅可自编辑文案。
+  Daily check-in coins, a user-authored gift economy with in-chat AI thank-yous, per-character affinity 0–200, and affinity-threshold special events bridged into real conversations — custom characters' event scripts are editable.
+- **📤 对话导出 · Conversation export** — 把聊天记录导出为 TXT 或 PNG 长图 / 自动分页图片（系统 SAF 保存）。
+  Export a conversation as TXT or PNG (single long image or auto-paginated pages) via the system Storage Access Framework.
 
 ---
 
@@ -137,16 +141,16 @@
   Switch between a cloud OpenAI-compatible API (SSE streaming) and on-device MNN offline inference. Conversations are saved per character.
 
 - **内置免费云端 · Built-in free cloud**
-  内置「免费对话」供应商（硅基流动免费 7B 模型），开箱即用、无需 API Key；Key 由 Cloudflare 云端代理注入，App 端与仓库均不含明文 Key。
-  Built-in "Free Chat" provider (SiliconFlow free 7B) — works out of the box with no API key; the key is injected by a Cloudflare server-side proxy, never embedded in the app or repo.
+  内置「免费对话」供应商（硅基流动免费 7B 模型，含 DeepSeek-R1-7B 免费推理模型），开箱即用、无需 API Key；Key 由 Cloudflare 云端代理注入，App 端与仓库均不含明文 Key。
+  Built-in "Free Chat" provider (SiliconFlow free 7B, incl. a free DeepSeek-R1-7B reasoning model) — works out of the box with no API key; the key is injected by a Cloudflare server-side proxy, never embedded in the app or repo.
 
 - **🎬 角色视频生成 · Character video generation**
   对话回复完成后自动触发 Seedance 2.0 短片生成：LLM 生成导演级分镜提示词 → 角色立绘 / 背景参考图快照 → 提交 / 轮询 / 下载 → 校验后「邂逅」时间线播放与导出。同时支持火山方舟与媒体中继协议；失败自动有界重试，**计费 POST 永不自动重发**，重试前需二次确认。
   Auto-generate a Seedance 2.0 video of your character after a reply — director-style prompt generation, reference snapshots, submit/query/download pipeline, playback & export. Volcengine Ark and media-relay protocols; bounded retries with cost-confirmation before fee-bearing regeneration.
 
 - **🔊 双 TTS 语音合成 · Dual TTS engines**
-  **系统离线 TTS**（默认，免配置，按语言 + 音色模板选声）+ **火山引擎豆包云端声音复刻**（每角色独立音色，支持中/日文，日文经 LLM 翻译后合成）。朗读时自动剥离 `<think>` 思考块；视频播放时自动暂停 / 恢复 TTS。
-  Offline system TTS (default) + Volcengine Doubao cloud voice cloning (per-character voices, zh/ja). `<think>` blocks are stripped before reading; video playback pauses/resumes TTS.
+  **系统离线 TTS**（默认，免配置，按语言 + 音色模板选声）+ **火山引擎豆包云端声音复刻**（每角色独立音色，支持中/日文，日文经 LLM 翻译后合成）。云端接入可选 **CloudBase 代理**（默认，支持新版 API Key / 旧版 App ID+Access Key）或**直连火山官方接口**。朗读时自动剥离 `<think>` 思考块；视频播放时自动暂停 / 恢复 TTS。
+  Offline system TTS (default) + Volcengine Doubao cloud voice cloning (per-character voices, zh/ja). Cloud TTS can route through the default CloudBase proxy or connect directly to the official Volcengine endpoint (new-style API Key). `<think>` blocks are stripped before reading; video playback pauses/resumes TTS.
   
 - **🚀 深度思考 / 推理过程** · **Deep thinking / reasoning trace**
   展示并折叠模型推理过程（本地与云端均可）；本地端支持思考分级与预算控制。
@@ -172,6 +176,14 @@
 - **聊天体验打磨** · **Chat polish**
   思考流 30fps 节流渲染、用户控制底部跟随（上滑暂停 + 回到底部按钮）、停止生成保留部分输出并标注状态、首答 Room 行号对账不再闪烁消失。
   Throttled thinking-stream rendering, user-controlled bottom-following, stop preserves partial output, first-answer row-ID reconciliation.
+
+- **💝 好感度 / 羁绊系统** · **Affinity / bond system**
+  每日签到领金币（冷启动自动弹窗）；用户自制礼物档案 → 金币采购 → 聊天中赠送 → 角色 AI 生成当面道谢并记入礼物墙；每角色好感度 0–200（聊天 / 视频 / 送礼累加，幂等账本防重复刷分）；好感跨档解锁「特殊邂逅」剧情并桥接为真实聊天会话（仅云端、禁视频）。**内置 50 角色各配 4 档原创剧情文案；自定义角色的剧情文案可在档案页自编辑。**
+  Daily check-in coins, a user-authored gift shop (create → buy → send in chat → AI thank-you on the gift wall), per-character affinity 0–200 with an idempotent ledger, and affinity-threshold special events that launch real cloud-only conversations. Built-in characters ship with 4 original scripts each; custom characters' scripts are editable.
+
+- **📤 对话导出** · **Conversation export**
+  把任意会话导出为 TXT 完整记录，或渲染成 PNG（自动分页多张 / 单张超长图，Canvas 直绘聊天壁纸风），经系统 SAF 保存到任意位置。
+  Export any conversation as a full TXT log or a chat-wallpaper-style PNG (auto-paginated or single tall image), saved anywhere via the system Storage Access Framework.
 
 ## 技术栈 · Tech Stack
 

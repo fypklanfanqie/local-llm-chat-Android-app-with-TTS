@@ -151,6 +151,9 @@ dependencies {
     // DataStore
     implementation(libs.androidx.datastore.preferences)
 
+    // SAF（对话导出：OpenDocumentTree 分页写图）
+    implementation(libs.androidx.documentfile)
+
     // Coil
     implementation(libs.coil.compose)
 

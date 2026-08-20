@@ -16,6 +16,8 @@ data class ChatUiState(
     val characterName: String = "",
     val characterRole: String = "",
     val characterImage: String = "",
+    /** 用户（我）的头像路径（设置「我的形象」；空=用 monogram「我」占位）。 */
+    val userImage: String = "",
     val watermarkName: String = "",
     val ttsEnabled: Boolean = false,
     val messages: List<DisplayMessage> = emptyList(),
@@ -52,4 +54,6 @@ data class ChatUiState(
     val activeConversationAutoVideoEnabled: Boolean = false,
     /** 是否展开对话管理抽屉 */
     val showConversationSheet: Boolean = false,
+    /** 活动特殊邂逅事件 id（非空=当前在特殊邂逅中：仅云端 + 禁视频）。 */
+    val activeSpecialEventId: Long? = null,
 )

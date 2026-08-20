@@ -27,6 +27,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,17 +39,28 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import androidx.navigation.NavDestination.Companion.hierarchy
+import androidx.navigation.NavType
+import androidx.navigation.navArgument
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.chatbyyourside.AppContainer
+import com.chatbyyourside.ui.affinity.AffinityEventsScreen
+import com.chatbyyourside.ui.affinity.AffinityGiftsScreen
+import com.chatbyyourside.ui.affinity.AffinityScreen
+import com.chatbyyourside.ui.affinity.CheckinShopScreen
+import com.chatbyyourside.ui.affinity.DailyCheckinBus
+import com.chatbyyourside.ui.affinity.DailyCheckinDialog
 import com.chatbyyourside.ui.characters.CharactersScreen
 import com.chatbyyourside.ui.chat.ChatScreen
 import com.chatbyyourside.ui.feed.CharacterFeedScreen
 import com.chatbyyourside.ui.feed.FeedRoute
 import com.chatbyyourside.ui.glass.GlassNavBar
 import com.chatbyyourside.ui.glass.GlassNavItem
+import com.chatbyyourside.ui.groupchat.GroupChatScreen
+import com.chatbyyourside.ui.groupchat.GroupListScreen
+import com.chatbyyourside.ui.groupchat.GroupNavigationBus
 import com.chatbyyourside.ui.models.ModelManagerScreen
 import com.chatbyyourside.ui.music.MusicScreen
 import com.chatbyyourside.ui.settings.BackendSettingsScreen
@@ -72,14 +84,34 @@ sealed class BottomTab(val route: String, val label: String, val icon: ImageVect
     object Settings : BottomTab("settings", "设置", Icons.Outlined.Settings, Icons.Filled.Settings)
 }
 
+// ===== 好感度/签到路由（隐藏底部栏的全屏档案页）=====
+private const val CHECKIN_SHOP_ROUTE = "checkin_shop"
+private const val AFFINITY_ROUTE = "affinity/{characterId}"
+private const val AFFINITY_GIFTS_ROUTE = "affinity_gifts/{characterId}"
+private const val AFFINITY_EVENTS_ROUTE = "affinity_events/{characterId}"
+private fun affinityRoute(characterId: String): String = "affinity/${android.net.Uri.encode(characterId)}"
+private fun affinityGiftsRoute(characterId: String): String = "affinity_gifts/${android.net.Uri.encode(characterId)}"
+private fun affinityEventsRoute(characterId: String): String = "affinity_events/${android.net.Uri.encode(characterId)}"
+private val affinityDestinations = setOf(CHECKIN_SHOP_ROUTE, AFFINITY_ROUTE, AFFINITY_GIFTS_ROUTE, AFFINITY_EVENTS_ROUTE)
+
 @Composable
-fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false) {
+fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false, crashNotice: Boolean = false) {
     val navController = rememberNavController()
     // 聊天 Tab 的内嵌导航控制器：提升到 AppNavGraph 作用域，跨 Tab 切换存活，
     // 保证「feed → chat」的嵌套栈在切走再切回时不丢（否则每次回来都重置回 feed）。
     val feedNavController = rememberNavController()
     // 冷启动来自问候通知时只消费一次，避免每次从其他 Tab 切回通讯都重复跳转到聊天页。
     var hasHandledInitialChat by rememberSaveable { mutableStateOf(false) }
+    // 每日签到：ChatApp 冷启动触发 DailyCheckinBus；nonce 幂等，弹窗只弹一次。
+    val dailyCheckinNonce by DailyCheckinBus.requests.collectAsState()
+    var handledDailyCheckinNonce by remember { mutableStateOf(0L) }
+    var showDailyCheckin by remember { mutableStateOf(false) }
+    LaunchedEffect(dailyCheckinNonce) {
+        if (dailyCheckinNonce > handledDailyCheckinNonce) {
+            handledDailyCheckinNonce = dailyCheckinNonce
+            showDailyCheckin = true
+        }
+    }
     val tabs = listOf(BottomTab.Chat, BottomTab.Characters, BottomTab.Music, BottomTab.Models, BottomTab.Settings)
 
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -98,6 +130,23 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false) {
         }
     }
 
+    // 群聊通知点按（冷启动 + 运行中 onNewIntent 统一走 GroupNavigationBus）：切到通讯 Tab 并直达对应群聊。
+    // nonce 计数 + remember 已处理 nonce，消费一次即幂等，重组/切 Tab 不重复跳转。
+    val groupRequest by GroupNavigationBus.requests.collectAsState()
+    var lastHandledGroupNonce by remember { mutableStateOf(0L) }
+    LaunchedEffect(groupRequest) {
+        val req = groupRequest ?: return@LaunchedEffect
+        if (req.nonce > lastHandledGroupNonce) {
+            lastHandledGroupNonce = req.nonce
+            navController.navigate(BottomTab.Chat.route) {
+                popUpTo(BottomTab.Chat.route) { saveState = true }
+                launchSingleTop = true
+                restoreState = true
+            }
+            feedNavController.navigate(FeedRoute.groupChatRoute(req.groupId)) { launchSingleTop = true }
+        }
+    }
+
     // 通讯页立绘主题色：由通讯页上报，在此为整个 Scaffold（含 dock 栏）提供，
     // 仅在通讯页可见时非空，其它 Tab 自动复位为默认紫罗兰。
     var accentColor by remember { mutableStateOf<Color?>(null) }
@@ -112,6 +161,9 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false) {
         // 置 0 交由各页自处理；底部 NavigationBar 自带 navigationBars inset，行为不变。
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
+            // 好感度/签到档案页：全屏沉浸，隐藏底部导航栏。
+            val isAffinityDestination = currentDestination?.route in affinityDestinations
+            if (!isAffinityDestination) {
             val currentTabRoute = tabs.firstOrNull { tab ->
                 currentDestination?.hierarchy?.any { it.route == tab.route } == true
             }?.route
@@ -138,6 +190,7 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false) {
                     }
                 },
             )
+            }
         }
     ) { padding ->
         // Scaffold 内容底部 padding（= 底栏高度）作为 bottomBarHeight 传入：通讯 Tab 全屏铺背景、
@@ -179,6 +232,7 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false) {
                         CharacterFeedScreen(
                             container = container,
                             bottomBarHeight = bottomBarHeight,
+                            crashNotice = crashNotice,
                             onAccent = { accentColor = it },
                             onOpenChat = { charId ->
                                 feedNavController.navigate(FeedRoute.CHAT) { launchSingleTop = true }
@@ -188,6 +242,9 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false) {
                             },
                             onOpenEncounter = {
                                 feedNavController.navigate(FeedRoute.ENCOUNTER) { launchSingleTop = true }
+                            },
+                            onOpenGroupChat = {
+                                feedNavController.navigate(FeedRoute.GROUP_LIST) { launchSingleTop = true }
                             },
                         )
                     }
@@ -207,6 +264,29 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false) {
                             container = container,
                             // 底栏高度：浮层 dock 之上预留交互内容空间（背景层全屏铺满）。
                             bottomBarHeight = bottomBarHeight,
+                            onBack = { feedNavController.popBackStack() },
+                        )
+                    }
+                    composable(FeedRoute.GROUP_LIST) {
+                        GroupListScreen(
+                            container = container,
+                            bottomBarHeight = bottomBarHeight,
+                            onBack = { feedNavController.popBackStack() },
+                            onOpenGroup = { groupId ->
+                                feedNavController.navigate(FeedRoute.groupChatRoute(groupId)) { launchSingleTop = true }
+                            },
+                        )
+                    }
+                    composable(
+                        route = FeedRoute.GROUP_CHAT,
+                        arguments = listOf(navArgument("groupId") { type = NavType.LongType }),
+                    ) { entry ->
+                        val groupId = entry.arguments?.getLong("groupId") ?: 0L
+                        GroupChatScreen(
+                            container = container,
+                            // 底栏高度：输入栏抬起到底栏之上（背景层全屏铺满）。
+                            bottomBarHeight = bottomBarHeight,
+                            groupId = groupId,
                             onBack = { feedNavController.popBackStack() },
                         )
                     }
@@ -236,7 +316,65 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false) {
                             launchSingleTop = true
                         }
                     },
+                    onOpenCheckinShop = { navController.navigate(CHECKIN_SHOP_ROUTE) },
+                    onOpenAffinity = { characterId -> navController.navigate(affinityRoute(characterId)) },
                 ) }
+            }
+            composable(CHECKIN_SHOP_ROUTE) {
+                CheckinShopScreen(container = container, onBack = { navController.popBackStack() })
+            }
+            composable(
+                route = AFFINITY_ROUTE,
+                arguments = listOf(navArgument("characterId") { type = NavType.StringType }),
+            ) { entry ->
+                val characterId = entry.arguments?.getString("characterId").orEmpty()
+                val character by container.characterRepository.characters.collectAsState(initial = emptyList())
+                val selected = character.firstOrNull { it.id == characterId }
+                if (selected != null) {
+                    AffinityScreen(
+                        container = container,
+                        character = selected,
+                        imageUrl = if (selected.isCustom && selected.image.isNotBlank()) selected.image else container.assetRepository.getSelectionPicture(selected.id),
+                        onBack = { navController.popBackStack() },
+                        onOpenGifts = { navController.navigate(affinityGiftsRoute(selected.id)) },
+                        onOpenEvents = { navController.navigate(affinityEventsRoute(selected.id)) },
+                    )
+                }
+            }
+            composable(
+                route = AFFINITY_GIFTS_ROUTE,
+                arguments = listOf(navArgument("characterId") { type = NavType.StringType }),
+            ) { entry ->
+                val characterId = entry.arguments?.getString("characterId").orEmpty()
+                val character by container.characterRepository.characters.collectAsState(initial = emptyList())
+                character.firstOrNull { it.id == characterId }?.let { selected ->
+                    AffinityGiftsScreen(container, selected, onBack = { navController.popBackStack() })
+                }
+            }
+            composable(
+                route = AFFINITY_EVENTS_ROUTE,
+                arguments = listOf(navArgument("characterId") { type = NavType.StringType }),
+            ) { entry ->
+                val characterId = entry.arguments?.getString("characterId").orEmpty()
+                val character by container.characterRepository.characters.collectAsState(initial = emptyList())
+                character.firstOrNull { it.id == characterId }?.let { selected ->
+                    AffinityEventsScreen(
+                        container,
+                        selected,
+                        onBack = { navController.popBackStack() },
+                        onOpenEventConversation = {
+                            navController.navigate(BottomTab.Chat.route) {
+                                popUpTo(BottomTab.Chat.route) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                            feedNavController.navigate(FeedRoute.CHAT) {
+                                popUpTo(FeedRoute.FEED)
+                                launchSingleTop = true
+                            }
+                        },
+                    )
+                }
             }
             composable(BottomTab.Music.route) {
                 Box(tabBottomPadding) { MusicScreen(container = container) }
@@ -262,6 +400,10 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false) {
                     )
                 }
             }
+        }
+        if (showDailyCheckin) {
+            DailyCheckinDialog(container = container, onDismiss = { showDailyCheckin = false })
+        }
     }
 }
 }

@@ -5,6 +5,7 @@ import android.media.MediaPlayer
 import android.util.Log
 import com.chatbyyourside.data.model.SystemVoiceTemplate
 import com.chatbyyourside.data.model.TtsConfig
+import com.chatbyyourside.data.model.TtsEndpointMode
 import com.chatbyyourside.data.model.TtsEngine
 import com.chatbyyourside.data.model.TtsLanguage
 import com.chatbyyourside.data.repository.SettingsRepository
@@ -106,7 +107,14 @@ class TtsManager(
         val cleanText = cleanTtsText(text)
 
         // 合成（网络 IO，由 Retrofit 调度）
-        val audioBytes = client.synthesize(cleanText, language.code, characterId, ttsConfig, voice)
+        val audioBytes = client.synthesize(
+            cleanText,
+            language.code,
+            characterId,
+            ttsConfig,
+            voice,
+            useDirect = settings.getTtsEndpointModeNow() == TtsEndpointMode.DIRECT,
+        )
 
         // 写入临时文件（磁盘 IO，切到 IO 调度器）
         val tempFile = File(context.cacheDir, "tts_${System.currentTimeMillis()}.mp3")

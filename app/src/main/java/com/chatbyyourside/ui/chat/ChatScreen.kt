@@ -33,6 +33,7 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Videocam
+import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -70,7 +71,17 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.chatbyyourside.data.model.TtsLanguage
 import coil.compose.AsyncImage
+import android.net.Uri
 import com.chatbyyourside.AppContainer
+import com.chatbyyourside.affinity.GiftSendResult
+import com.chatbyyourside.affinity.OwnedGift
+import com.chatbyyourside.conversationexport.ConversationExportDocument
+import com.chatbyyourside.conversationexport.ConversationExportWriter
+import com.chatbyyourside.conversationexport.ConversationImageLayout
+import com.chatbyyourside.conversationexport.ConversationImageMode
+import com.chatbyyourside.conversationexport.ConversationImageRenderer
+import com.chatbyyourside.conversationexport.ConversationTextExporter
+import com.chatbyyourside.conversationexport.suggestedExportBaseName
 import com.chatbyyourside.data.model.AttachedFile
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.Conversation
@@ -80,6 +91,7 @@ import com.chatbyyourside.data.model.MessageSegment
 import com.chatbyyourside.data.model.SeedanceVideo
 import com.chatbyyourside.data.repository.ChatBackgroundConfig
 import com.chatbyyourside.perfmon.PerformanceGlassOverlay
+import com.chatbyyourside.ui.affinity.GiftInventorySheet
 import com.chatbyyourside.ui.glass.GlassSegmented
 import com.chatbyyourside.ui.navigation.ClampedImeBottomPadding
 import com.chatbyyourside.ui.video.BgmDuck
@@ -170,7 +182,8 @@ fun ChatScreen(
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
-        uris.forEach { uri ->
+        // 部分 OEM 文档提供方可能返回含 null 的列表，过滤后再逐个处理，避免 NPE
+        uris.filterNotNull().forEach { uri ->
             runCatching {
                 context.contentResolver.takePersistableUriPermission(
                     uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
@@ -195,7 +208,100 @@ fun ChatScreen(
     }
 
     val isLocal = state.activeProvider == ChatProviderType.LOCAL
+
+    // ===== 对话导出（TXT / PNG）=====
+    val exportScope = rememberCoroutineScope()
+    val conversationExportWriter = remember { ConversationExportWriter(context.applicationContext) }
+    var pendingConversationExport by remember { mutableStateOf<ConversationExportDocument?>(null) }
+    var pendingImageMode by remember { mutableStateOf<ConversationImageMode?>(null) }
+    var exportBusy by remember { mutableStateOf(false) }
+    var showExportConversationPicker by remember { mutableStateOf(false) }
+    var showExportFormatPicker by remember { mutableStateOf(false) }
+    var showExportImageModePicker by remember { mutableStateOf(false) }
+
+    fun exportTextTo(uri: Uri) {
+        val document = pendingConversationExport ?: return
+        pendingConversationExport = null
+        exportBusy = true
+        exportScope.launch {
+            conversationExportWriter.writeText(uri, ConversationTextExporter.render(document))
+                .onSuccess { Toast.makeText(context, "聊天记录已导出", Toast.LENGTH_SHORT).show() }
+                .onFailure { Toast.makeText(context, "导出失败：${it.message ?: "无法写入文件"}", Toast.LENGTH_SHORT).show() }
+            exportBusy = false
+        }
+    }
+
+    fun exportImageTo(uri: Uri) {
+        val document = pendingConversationExport ?: return
+        val mode = pendingImageMode ?: return
+        pendingConversationExport = null
+        pendingImageMode = null
+        exportBusy = true
+        exportScope.launch {
+            runCatching { ConversationImageRenderer.render(ConversationImageLayout.plan(document, mode)).single() }
+                .onSuccess { png ->
+                    conversationExportWriter.writePng(uri, png)
+                        .onSuccess { Toast.makeText(context, "聊天记录图片已导出", Toast.LENGTH_SHORT).show() }
+                        .onFailure { Toast.makeText(context, "导出失败：${it.message ?: "无法写入图片"}", Toast.LENGTH_SHORT).show() }
+                }
+                .onFailure { Toast.makeText(context, it.message ?: "图片生成失败，请尝试分页导出或 TXT", Toast.LENGTH_SHORT).show() }
+            exportBusy = false
+        }
+    }
+
+    val exportTextLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri -> if (uri != null) exportTextTo(uri) else { pendingConversationExport = null } }
+    val exportLongImageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("image/png"),
+    ) { uri -> if (uri != null) exportImageTo(uri) else { pendingConversationExport = null; pendingImageMode = null } }
+    val exportPagedImagesLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { treeUri ->
+        val document = pendingConversationExport
+        pendingConversationExport = null
+        pendingImageMode = null
+        if (treeUri != null && document != null) {
+            exportBusy = true
+            exportScope.launch {
+                runCatching { ConversationImageRenderer.render(ConversationImageLayout.plan(document, ConversationImageMode.PAGINATED)) }
+                    .fold(
+                        onSuccess = { pngs ->
+                            conversationExportWriter.writePngPages(treeUri, suggestedExportBaseName(document.ownerName, document.title, document.exportedAt), pngs)
+                                .onSuccess { count -> Toast.makeText(context, "已导出 $count 张聊天记录图片", Toast.LENGTH_SHORT).show() }
+                                .onFailure { Toast.makeText(context, "导出失败：${it.message ?: "无法写入图片"}", Toast.LENGTH_SHORT).show() }
+                        },
+                        onFailure = { Toast.makeText(context, it.message ?: "图片生成失败，请尝试 TXT", Toast.LENGTH_SHORT).show() },
+                    )
+                exportBusy = false
+            }
+        }
+    }
+
     val liquidGlassEnabled by container.settingsRepository.liquidGlass.collectAsState(initial = true)
+
+    // ===== 赠送礼物（好感度）=====
+    var showGiftSheet by remember { mutableStateOf(false) }
+    var giftSendBusy by remember { mutableStateOf(false) }
+    val ownedGifts by container.affinityRepository.observeOwnedGifts().collectAsState(initial = emptyList())
+
+    fun sendGift(gift: OwnedGift) {
+        val conversationId = state.activeConversationId ?: return
+        if (giftSendBusy || state.isStreaming) return
+        giftSendBusy = true
+        exportScope.launch {
+            when (val result = container.affinityRepository.sendGift(state.characterId, gift.definition.id, conversationId)) {
+                is GiftSendResult.Sent -> {
+                    viewModel.sendGiftThanks(result.history)
+                    Toast.makeText(context, "已赠送 ${gift.definition.name}，好感度 +${result.history.affinityGain}", Toast.LENGTH_SHORT).show()
+                    showGiftSheet = false
+                }
+                GiftSendResult.InventoryEmpty -> Toast.makeText(context, "该礼物库存不足", Toast.LENGTH_SHORT).show()
+                GiftSendResult.GiftMissing -> Toast.makeText(context, "礼物已不存在", Toast.LENGTH_SHORT).show()
+            }
+            giftSendBusy = false
+        }
+    }
 
     val bgConfig by container.chatBackgroundRepository.config.collectAsState(
         initial = ChatBackgroundConfig(enabled = false, paths = emptyList())
@@ -433,6 +539,7 @@ fun ChatScreen(
                 onStop = { viewModel.stopGeneration() },
                 onPickImage = { imagePicker.launch(arrayOf("image/*")) },
                 onPickFile = { filePicker.launch(arrayOf("*/*")) },
+                onOpenGifts = { showGiftSheet = true },
                 onRemoveImage = { viewModel.removeImage(it) },
                 onRemoveFile = { viewModel.removeFile(it) },
             )
@@ -454,7 +561,91 @@ fun ChatScreen(
                 onSwitch = { viewModel.switchConversation(it) },
                 onRename = { id, title -> viewModel.renameConversation(id, title) },
                 onDelete = { viewModel.deleteConversation(it) },
+                onStartExport = { showExportConversationPicker = true },
+                exportEnabled = !exportBusy,
                 onDismiss = { viewModel.toggleConversationSheet(false) },
+            )
+        }
+
+        if (showExportConversationPicker) {
+            ConversationExportSelectionDialog(
+                conversations = state.conversations,
+                activeConversationId = state.activeConversationId,
+                onSelect = { conversationId ->
+                    showExportConversationPicker = false
+                    exportBusy = true
+                    viewModel.prepareConversationExport(
+                        conversationId,
+                        onReady = { document ->
+                            pendingConversationExport = document
+                            exportBusy = false
+                            showExportFormatPicker = true
+                        },
+                        onError = { message ->
+                            exportBusy = false
+                            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                },
+                onDismiss = { showExportConversationPicker = false },
+            )
+        }
+
+        if (showExportFormatPicker) {
+            ConversationExportFormatDialog(
+                onText = {
+                    val document = pendingConversationExport ?: return@ConversationExportFormatDialog
+                    showExportFormatPicker = false
+                    exportTextLauncher.launch("${suggestedExportBaseName(document.ownerName, document.title, document.exportedAt)}.txt")
+                },
+                onImage = {
+                    showExportFormatPicker = false
+                    showExportImageModePicker = true
+                },
+                onDismiss = {
+                    showExportFormatPicker = false
+                    pendingConversationExport = null
+                },
+            )
+        }
+
+        if (showExportImageModePicker) {
+            ConversationExportImageModeDialog(
+                onPaged = {
+                    val document = pendingConversationExport ?: return@ConversationExportImageModeDialog
+                    showExportImageModePicker = false
+                    exportPagedImagesLauncher.launch(null)
+                },
+                onLong = {
+                    val document = pendingConversationExport ?: return@ConversationExportImageModeDialog
+                    // 长图先预检高度，超限提示改用分页/TXT，避免生成失败
+                    runCatching { ConversationImageLayout.plan(document, ConversationImageMode.LONG_IMAGE) }
+                        .onSuccess {
+                            showExportImageModePicker = false
+                            pendingImageMode = ConversationImageMode.LONG_IMAGE
+                            exportLongImageLauncher.launch("${suggestedExportBaseName(document.ownerName, document.title, document.exportedAt)}.png")
+                        }
+                        .onFailure { error ->
+                            showExportImageModePicker = false
+                            Toast.makeText(context, error.message ?: "对话过长，请改用分页导出或 TXT", Toast.LENGTH_LONG).show()
+                            pendingConversationExport = null
+                            pendingImageMode = null
+                        }
+                },
+                onDismiss = {
+                    showExportImageModePicker = false
+                    pendingConversationExport = null
+                    pendingImageMode = null
+                },
+            )
+        }
+
+        if (showGiftSheet) {
+            GiftInventorySheet(
+                gifts = ownedGifts,
+                onSend = ::sendGift,
+                onPickAttachment = { imagePicker.launch(arrayOf("image/*")) },
+                onDismiss = { if (!giftSendBusy) showGiftSheet = false },
             )
         }
 
@@ -473,9 +664,9 @@ fun ChatScreen(
     }
 }
 
-/** 聊天头像：有立绘用图，否则 monogram 渐变首字。 */
+/** 聊天头像：有立绘用图，否则 monogram 渐变首字。（internal：群聊逐条复用） */
 @Composable
-private fun ChatAvatar(
+internal fun ChatAvatar(
     imageUrl: String,
     name: String,
     modifier: Modifier = Modifier,
@@ -818,6 +1009,8 @@ internal fun MessageBubble(
     state: ChatUiState,
     characterImage: String,
     characterName: String,
+    /** 用户（我）的头像（设置「我的形象」）；空串回落 monogram「我」。 */
+    userImage: String = "",
     onTts: () -> Unit,
     onDelete: () -> Unit = {},
     onPlayVideo: (() -> Unit)? = null,
@@ -1012,7 +1205,8 @@ internal fun MessageBubble(
 
             if (isUser) {
                 Spacer(Modifier.width(8.dp))
-                MonogramAvatar(text = "我", size = UserAvatarSize)
+                // 我的头像（设置「我的形象」）；未设置时 ChatAvatar 自动回落 monogram「我」
+                ChatAvatar(imageUrl = userImage, name = "我", size = UserAvatarSize)
             }
         }
     }
@@ -1296,6 +1490,7 @@ internal fun ChatInputBar(
     onStop: () -> Unit,
     onPickImage: () -> Unit,
     onPickFile: () -> Unit,
+    onOpenGifts: () -> Unit,
     onRemoveImage: (Int) -> Unit,
     onRemoveFile: (Int) -> Unit,
 ) {
@@ -1387,6 +1582,12 @@ internal fun ChatInputBar(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(Icons.Outlined.AttachFile, contentDescription = "添加文件", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            }
+            Box(
+                modifier = Modifier.size(40.dp).clickable(onClick = onOpenGifts),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.CardGiftcard, contentDescription = "赠送礼物", tint = scheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
             }
             BasicTextField(
                 value = text,
@@ -1509,6 +1710,8 @@ private fun ConversationSheet(
     onSwitch: (Long) -> Unit,
     onRename: (Long, String) -> Unit,
     onDelete: (Long) -> Unit,
+    onStartExport: () -> Unit,
+    exportEnabled: Boolean,
     onDismiss: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -1537,10 +1740,17 @@ private fun ConversationSheet(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("对话记录", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = scheme.onSurface)
-                TextButton(onClick = onNew) {
-                    Icon(Icons.Outlined.Add, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("新建对话", color = scheme.primary)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = onStartExport, enabled = exportEnabled) {
+                        Icon(Icons.Outlined.Description, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (exportEnabled) "导出记录" else "导出中…", color = scheme.primary)
+                    }
+                    TextButton(onClick = onNew, enabled = exportEnabled) {
+                        Icon(Icons.Outlined.Add, contentDescription = null, tint = scheme.primary, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("新建对话", color = scheme.primary)
+                    }
                 }
             }
             if (conversations.isEmpty()) {
