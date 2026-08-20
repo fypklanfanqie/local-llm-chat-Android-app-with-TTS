@@ -4,15 +4,10 @@ package com.chatbyyourside.config
  * 应用全局配置
  */
 object AppConfig {
-    // ===== TTS 代理 =====
-    // 火山引擎 TTS 透明代理（CloudBase Web 函数），对齐网页版 workers/cloudbase-tts-fn。
-    // 代理直接透传 header + body 到火山引擎 V3 API，不做请求格式转换。
-    const val TTS_PROXY_URL = "https://lanfanqie-d8go1l51d56f44d20.service.tcloudbase.com/tts"
-
-    // ===== TTS 直连（可选，绕过代理）=====
-    // 直连火山引擎官方 HTTP V3 Chunked endpoint，需新版控制台 X-Api-Key 鉴权。
+    // ===== TTS（直连火山引擎）=====
+    // 直连官方 HTTP V3 Chunked endpoint，需新版控制台 X-Api-Key 鉴权。
     const val TTS_DIRECT_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
-    // 火山引擎豆包 2.0 声音复刻资源 ID（与代理路径共用）
+    // 火山引擎豆包 2.0 声音复刻资源 ID
     const val TTS_VOICE_CLONE_RESOURCE_ID = "seed-icl-2.0"
 
     // ===== 云端 AI 默认配置 =====

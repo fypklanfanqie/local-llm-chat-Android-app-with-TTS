@@ -22,6 +22,9 @@ data class ApiConfig(
 @Serializable
 data class TtsConfig(
     val apiKey: String = "",
+    /** 声音复刻训练成功后控制台给出的 speaker_id，例如 S_xxx。 */
+    val defaultVoiceId: String = "",
+    /** 旧版隐藏兼容字段；新版云端朗读不再使用。 */
     val appId: String = "",
     val accessKey: String = "",
 )
@@ -51,22 +54,6 @@ enum class TtsEngine(val storageKey: String, val label: String) {
     companion object {
         val DEFAULT: TtsEngine = SYSTEM
         fun fromStorageKey(value: String?): TtsEngine =
-            entries.firstOrNull { it.storageKey == value } ?: DEFAULT
-    }
-}
-
-/**
- * 云端 TTS 接入端点：
- *  - [PROXY]：CloudBase 透明代理（默认，支持新版 apiKey 或旧版 appId+accessKey）；
- *  - [DIRECT]：直连火山引擎官方 Chunked endpoint（仅新版 apiKey）。
- */
-enum class TtsEndpointMode(val storageKey: String, val label: String) {
-    PROXY("proxy", "代理"),
-    DIRECT("direct", "直连火山引擎");
-
-    companion object {
-        val DEFAULT: TtsEndpointMode = PROXY
-        fun fromStorageKey(value: String?): TtsEndpointMode =
             entries.firstOrNull { it.storageKey == value } ?: DEFAULT
     }
 }
@@ -103,11 +90,41 @@ enum class SystemVoiceTemplate(
  * 角色音色映射（火山引擎声音复刻 ID，S_xxx 格式）
  * zh / ja 分别对应中、日语音色；留空则由服务端按 characterId 默认选择。
  */
+enum class TtsAuthMode { API_KEY, NONE }
+
+@Serializable
+data class VoiceConfig(
+    val voiceId: String = "",
+    val resourceId: String = "",
+) {
+    val isEmpty: Boolean get() = voiceId.isBlank()
+    val isComplete: Boolean get() = voiceId.isNotBlank()
+
+    /** resourceId 是旧配置兼容字段，新版声音复刻 2.0 资源由客户端固定。 */
+    fun validationError(label: String): String? =
+        if (voiceId.isBlank() && resourceId.isNotBlank()) "$label Resource ID 已保存，但缺少音色 ID" else null
+}
+
 @Serializable
 data class VoicePair(
-    val zh: String = "",
-    val ja: String = "",
+    val zh: VoiceConfig = VoiceConfig(),
+    val ja: VoiceConfig = VoiceConfig(),
 )
+
+fun TtsConfig.authMode(): TtsAuthMode =
+    if (apiKey.isNotBlank()) TtsAuthMode.API_KEY else TtsAuthMode.NONE
+
+fun TtsConfig.validationError(): String? =
+    if (apiKey.isBlank()) "请填写火山引擎 API Key" else null
+
+fun speakerIdForLanguage(
+    characterId: String,
+    language: TtsLanguage,
+    voiceMap: Map<String, VoicePair>,
+): String? {
+    val pair = voiceMap[characterId] ?: return null
+    return (if (language == TtsLanguage.JA) pair.ja else pair.zh).voiceId.takeIf { it.isNotBlank() }
+}
 
 /**
  * 聊天 Provider 类型

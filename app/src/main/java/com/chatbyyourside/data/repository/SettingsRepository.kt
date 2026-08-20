@@ -11,7 +11,6 @@ import com.chatbyyourside.data.model.UserProfileConfig
 import com.chatbyyourside.data.model.SystemVoiceTemplate
 import com.chatbyyourside.data.model.ThemeMode
 import com.chatbyyourside.data.model.TtsConfig
-import com.chatbyyourside.data.model.TtsEndpointMode
 import com.chatbyyourside.data.model.TtsEngine
 import com.chatbyyourside.data.model.TtsLanguage
 import com.chatbyyourside.data.model.VoicePair
@@ -42,8 +41,6 @@ class SettingsRepository(private val store: SettingsStore) {
     val ttsVoiceMap: Flow<Map<String, VoicePair>> = store.ttsVoiceMap
     /** 朗读引擎（system=手机自带，默认；cloud=云端火山豆包）。 */
     val ttsEngine: Flow<TtsEngine> = store.ttsEngine
-    /** 云端 TTS 接入端点（proxy=CloudBase 代理，默认；direct=直连火山引擎）。 */
-    val ttsEndpointMode: Flow<TtsEndpointMode> = store.ttsEndpointMode
     /** 系统引擎声音模板。 */
     val ttsSystemTemplate: Flow<SystemVoiceTemplate> = store.ttsSystemTemplate
     val activeCharacter: Flow<String> = store.activeCharacter
@@ -120,7 +117,6 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun setTtsVolume(vol: Int) = store.setTtsVolume(vol)
     suspend fun setTtsVoiceMap(map: Map<String, VoicePair>) = store.setTtsVoiceMap(map)
     suspend fun setTtsEngine(engine: TtsEngine) = store.setTtsEngine(engine)
-    suspend fun setTtsEndpointMode(mode: TtsEndpointMode) = store.setTtsEndpointMode(mode)
     suspend fun setTtsSystemTemplate(template: SystemVoiceTemplate) = store.setTtsSystemTemplate(template)
     suspend fun setActiveCharacter(id: String) = store.setActiveCharacter(id)
     val activeConversations: Flow<Map<String, Long>> = store.activeConversations
@@ -217,10 +213,6 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun getTtsEngineNow(): TtsEngine = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         ttsEngine.first()
     } ?: TtsEngine.DEFAULT
-
-    suspend fun getTtsEndpointModeNow(): TtsEndpointMode = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
-        ttsEndpointMode.first()
-    } ?: TtsEndpointMode.DEFAULT
 
     suspend fun getTtsSystemTemplateNow(): SystemVoiceTemplate = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         ttsSystemTemplate.first()

@@ -19,7 +19,6 @@ import com.chatbyyourside.data.model.SeedanceResolution
 import com.chatbyyourside.data.model.SystemVoiceTemplate
 import com.chatbyyourside.data.model.ThemeMode
 import com.chatbyyourside.data.model.TtsConfig
-import com.chatbyyourside.data.model.TtsEndpointMode
 import com.chatbyyourside.data.model.TtsEngine
 import com.chatbyyourside.data.model.TtsLanguage
 import com.chatbyyourside.data.model.VoicePair
@@ -63,6 +62,7 @@ class SettingsStore(
 
         // TTS
         val TTS_API_KEY = stringPreferencesKey("tts_api_key")
+        val TTS_DEFAULT_VOICE_ID = stringPreferencesKey("tts_default_voice_id")
         val TTS_APP_ID = stringPreferencesKey("tts_app_id")
         val TTS_ACCESS_KEY = stringPreferencesKey("tts_access_key")
         val TTS_LANGUAGE = stringPreferencesKey("tts_language")
@@ -70,7 +70,6 @@ class SettingsStore(
         val TTS_VOICE_MAP = stringPreferencesKey("tts_voice_map")  // JSON: Map<characterId, VoicePair>
         val TTS_ENGINE = stringPreferencesKey("tts_engine")        // system（默认，手机自带）/ cloud（火山豆包）
         val TTS_SYSTEM_TEMPLATE = stringPreferencesKey("tts_system_template")  // 系统引擎声音模板
-        val TTS_ENDPOINT_MODE = stringPreferencesKey("tts_endpoint_mode")      // proxy（默认）/ direct（直连火山）
 
         // 角色
         val ACTIVE_CHARACTER = stringPreferencesKey("active_character")
@@ -252,6 +251,7 @@ class SettingsStore(
     val ttsConfig: Flow<TtsConfig> = dataStore.data.map { p ->
         TtsConfig(
             apiKey = p[Keys.TTS_API_KEY] ?: "",
+            defaultVoiceId = p[Keys.TTS_DEFAULT_VOICE_ID] ?: "",
             appId = p[Keys.TTS_APP_ID] ?: "",
             accessKey = p[Keys.TTS_ACCESS_KEY] ?: "",
         )
@@ -260,6 +260,7 @@ class SettingsStore(
     suspend fun setTtsConfig(config: TtsConfig) {
         dataStore.edit { p ->
             p[Keys.TTS_API_KEY] = config.apiKey
+            p[Keys.TTS_DEFAULT_VOICE_ID] = config.defaultVoiceId
             p[Keys.TTS_APP_ID] = config.appId
             p[Keys.TTS_ACCESS_KEY] = config.accessKey
         }
@@ -280,15 +281,6 @@ class SettingsStore(
 
     suspend fun setTtsEngine(engine: TtsEngine) {
         dataStore.edit { it[Keys.TTS_ENGINE] = engine.storageKey }
-    }
-
-    /** 云端 TTS 接入端点（proxy=CloudBase 代理，默认；direct=直连火山引擎）。 */
-    val ttsEndpointMode: Flow<TtsEndpointMode> = dataStore.data.map { p ->
-        TtsEndpointMode.fromStorageKey(p[Keys.TTS_ENDPOINT_MODE])
-    }
-
-    suspend fun setTtsEndpointMode(mode: TtsEndpointMode) {
-        dataStore.edit { it[Keys.TTS_ENDPOINT_MODE] = mode.storageKey }
     }
 
     /** 系统引擎声音模板。 */

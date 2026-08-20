@@ -149,8 +149,8 @@
   Auto-generate a Seedance 2.0 video of your character after a reply — director-style prompt generation, reference snapshots, submit/query/download pipeline, playback & export. Volcengine Ark and media-relay protocols; bounded retries with cost-confirmation before fee-bearing regeneration.
 
 - **🔊 双 TTS 语音合成 · Dual TTS engines**
-  **系统离线 TTS**（默认，免配置，按语言 + 音色模板选声）+ **火山引擎豆包云端声音复刻**（每角色独立音色，支持中/日文，日文经 LLM 翻译后合成）。云端接入可选 **CloudBase 代理**（默认，支持新版 API Key / 旧版 App ID+Access Key）或**直连火山官方接口**。朗读时自动剥离 `<think>` 思考块；视频播放时自动暂停 / 恢复 TTS。
-  Offline system TTS (default) + Volcengine Doubao cloud voice cloning (per-character voices, zh/ja). Cloud TTS can route through the default CloudBase proxy or connect directly to the official Volcengine endpoint (new-style API Key). `<think>` blocks are stripped before reading; video playback pauses/resumes TTS.
+  **系统离线 TTS**（默认，免配置，按语言 + 音色模板选声）+ **火山引擎豆包云端声音复刻**（**直连官方接口**，每角色分别配置中/日 speaker_id，支持中/日文）。朗读时自动剥离 `<think>` 思考块；视频播放时自动暂停 / 恢复 TTS。
+  Offline system TTS (default) + Volcengine Doubao cloud voice cloning (direct to the official endpoint, per-character zh/ja speaker IDs, zh/ja support). `<think>` blocks are stripped before reading; video playback pauses/resumes TTS.
   
 - **🚀 深度思考 / 推理过程** · **Deep thinking / reasoning trace**
   展示并折叠模型推理过程（本地与云端均可）；本地端支持思考分级与预算控制。

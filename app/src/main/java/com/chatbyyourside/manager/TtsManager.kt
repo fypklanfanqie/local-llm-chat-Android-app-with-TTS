@@ -3,11 +3,12 @@ package com.chatbyyourside.manager
 import android.content.Context
 import android.media.MediaPlayer
 import android.util.Log
+import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.data.model.SystemVoiceTemplate
 import com.chatbyyourside.data.model.TtsConfig
-import com.chatbyyourside.data.model.TtsEndpointMode
 import com.chatbyyourside.data.model.TtsEngine
 import com.chatbyyourside.data.model.TtsLanguage
+import com.chatbyyourside.data.model.speakerIdForLanguage
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.tts.SystemTtsEngine
 import com.chatbyyourside.tts.VolcTtsClient
@@ -91,30 +92,23 @@ class TtsManager(
     /** 云端引擎合成并播放（原 MediaPlayer 路径；仅在 [speak] 持有 mutex 时调用，自身不加锁）。 */
     private suspend fun speakCloud(text: String, characterId: String, language: TtsLanguage) {
         val ttsConfig = settings.getTtsConfigNow()
-        val volume = withTimeoutOrNull(5000) { settings.ttsVolume.first() } ?: 60
+        val volume = withTimeoutOrNull(5000) { settings.ttsVolume.first() }
+            ?: AppConfig.TTS_DEFAULT_VOLUME
 
         if (!client.hasCredentials(ttsConfig)) {
-            throw Exception("请先在设置页配置火山引擎 TTS 凭据（或改用手机系统语音）")
+            throw Exception("请先填写火山引擎 API Key")
         }
 
-        // 角色音色映射：优先使用用户配置的音色 ID，留空则由服务端默认选择
         val voiceMap = settings.getTtsVoiceMapNow()
-        val voice = voiceMap[characterId]?.let { pair ->
-            (if (language == TtsLanguage.JA) pair.ja else pair.zh).takeIf { it.isNotBlank() }
-        }
+        val speakerId = speakerIdForLanguage(characterId, language, voiceMap)
+            ?: throw Exception(
+                "请先在设置 → 角色双语音色中填写该角色的${language.label} speaker_id",
+            )
 
         // 清理括号内容
         val cleanText = cleanTtsText(text)
 
-        // 合成（网络 IO，由 Retrofit 调度）
-        val audioBytes = client.synthesize(
-            cleanText,
-            language.code,
-            characterId,
-            ttsConfig,
-            voice,
-            useDirect = settings.getTtsEndpointModeNow() == TtsEndpointMode.DIRECT,
-        )
+        val audioBytes = client.synthesize(cleanText, characterId, ttsConfig, speakerId)
 
         // 写入临时文件（磁盘 IO，切到 IO 调度器）
         val tempFile = File(context.cacheDir, "tts_${System.currentTimeMillis()}.mp3")

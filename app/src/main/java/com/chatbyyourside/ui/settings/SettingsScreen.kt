@@ -49,9 +49,10 @@ import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.ThemeMode
 import com.chatbyyourside.data.model.SystemVoiceTemplate
-import com.chatbyyourside.data.model.TtsEndpointMode
 import com.chatbyyourside.data.model.TtsEngine
+import com.chatbyyourside.data.model.TtsLanguage
 import com.chatbyyourside.data.model.VoicePair
+import com.chatbyyourside.data.model.validationError
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.SeedanceModelVariant
@@ -129,16 +130,16 @@ fun SettingsScreen(
     // 朗读引擎（系统自带 / 云端）与系统声音模板。
     val ttsEngine by container.settingsRepository.ttsEngine.collectAsState(initial = TtsEngine.DEFAULT)
     val ttsTemplate by container.settingsRepository.ttsSystemTemplate.collectAsState(initial = SystemVoiceTemplate.DEFAULT_TEMPLATE)
-    val ttsEndpoint by container.settingsRepository.ttsEndpointMode.collectAsState(initial = TtsEndpointMode.DEFAULT)
     var ttsEngineEdit by remember(ttsEngine) { mutableStateOf(ttsEngine) }
     var ttsTemplateEdit by remember(ttsTemplate) { mutableStateOf(ttsTemplate) }
-    var ttsEndpointEdit by remember(ttsEndpoint) { mutableStateOf(ttsEndpoint) }
     var ttsSaved by remember { mutableStateOf(false) }
     LaunchedEffect(ttsSaved) {
         if (ttsSaved) { delay(2000); ttsSaved = false }
     }
     var ttsPreviewBusy by remember { mutableStateOf(false) }
     var ttsPreviewError by remember { mutableStateOf<String?>(null) }
+    var showAdvancedTtsVoices by remember { mutableStateOf(false) }
+    var ttsPreviewCharacterId by remember { mutableStateOf<String?>(null) }
 
     val ttsVoiceMap by container.settingsRepository.ttsVoiceMap.collectAsState(initial = emptyMap())
     var voiceEdit by remember(ttsVoiceMap) { mutableStateOf(ttsVoiceMap) }
@@ -335,22 +336,10 @@ fun SettingsScreen(
                     )
                 } else {
                     Text(
-                        "云端引擎需火山引擎凭据；声音复刻音色按下方「角色音色映射」配置。",
+                        "从火山引擎「API Key 管理」复制 API Key。下方为每个角色分别配置中文/日文 speaker_id；日语模式必须配置日文 speaker_id。资源版本已自动配置，无需填写 App ID、Access Key 或 Resource ID。",
                         color = scheme.onSurfaceVariant, fontSize = 10.sp,
                     )
-                    PasswordField("API Key", ttsApiKey, showTtsKey, { ttsApiKey = it }, { showTtsKey = !showTtsKey })
-                    FieldLabel("接入方式")
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(if (ttsEndpointEdit == TtsEndpointMode.DIRECT) "直连火山引擎（绕过代理）" else "CloudBase 代理（默认）", color = scheme.onSurface, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                        Switch(
-                            checked = ttsEndpointEdit == TtsEndpointMode.DIRECT,
-                            onCheckedChange = { direct -> ttsEndpointEdit = if (direct) TtsEndpointMode.DIRECT else TtsEndpointMode.PROXY },
-                        )
-                    }
-                    Text(
-                        "直连需新版 API Key；代理模式才支持旧版 App ID + Access Key。",
-                        color = scheme.onSurfaceVariant, fontSize = 10.sp,
-                    )
+                    PasswordField("火山引擎 API Key", ttsApiKey, showTtsKey, { ttsApiKey = it }, { showTtsKey = !showTtsKey })
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     TextButton(
@@ -362,7 +351,13 @@ fun SettingsScreen(
                                     if (ttsEngineEdit == TtsEngine.SYSTEM) {
                                         container.ttsManager.previewSystem("你好，这是朗读语音的试听效果。", ttsTemplateEdit)
                                     } else {
-                                        container.ttsManager.speak("你好，这是朗读语音的试听效果。", "")
+                                        val characterId = ttsPreviewCharacterId
+                                            ?: voiceCharacters.firstOrNull()?.id
+                                            ?: throw IllegalStateException("请先配置至少一个角色音色")
+                                        container.ttsManager.speak(
+                                            if (container.settingsRepository.getTtsLanguageNow() == TtsLanguage.JA) "こんにちは、これは日本語の音声テストです。" else "你好，这是声音复刻朗读的试听效果。",
+                                            characterId,
+                                        )
                                     }
                                 }
                                 ttsPreviewError = result.exceptionOrNull()?.message
@@ -370,9 +365,7 @@ fun SettingsScreen(
                             }
                         },
                         enabled = !ttsPreviewBusy,
-                    ) {
-                        Text(if (ttsPreviewBusy) "试听中…" else "试听", fontSize = 12.sp)
-                    }
+                    ) { Text(if (ttsPreviewBusy) "试听中…" else "试听", fontSize = 12.sp) }
                     ttsPreviewError?.let {
                         Text(it, color = scheme.error, fontSize = 10.sp, modifier = Modifier.weight(1f))
                     }
@@ -386,9 +379,14 @@ fun SettingsScreen(
                 scope.launch {
                     container.settingsRepository.setTtsEngine(ttsEngineEdit)
                     container.settingsRepository.setTtsSystemTemplate(ttsTemplateEdit)
-                    container.settingsRepository.setTtsEndpointMode(ttsEndpointEdit)
                     if (ttsEngineEdit == TtsEngine.CLOUD) {
-                        container.settingsRepository.setTtsConfig(TtsConfig(ttsApiKey))
+                        val config = TtsConfig(apiKey = ttsApiKey.trim())
+                        val error = config.validationError()
+                        if (error != null) {
+                            ttsPreviewError = error
+                            return@launch
+                        }
+                        container.settingsRepository.setTtsConfig(config)
                     }
                     ttsSaved = true
                 }
@@ -397,53 +395,61 @@ fun SettingsScreen(
 
         TtsGuideButton()
 
-        // ===== 角色音色映射 =====
-        GlassListSection(title = "角色音色映射（声音复刻 ID · 仅云端引擎）") {
+        // ===== 角色双语音色 =====
+        GlassListSection(title = "角色双语音色（speaker_id）") {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "为角色填入火山引擎声音复刻音色 ID（S_xxx），留空则用默认音色。中日分别配置。",
+                    "每个角色分别填写中文和日文 speaker_id。日语模式只使用日文音色，缺失时会提示配置，不会用中文音色硬读日文。",
                     color = scheme.onSurfaceVariant, fontSize = 11.sp,
                 )
-                voiceCharacters.forEach { char ->
-                    val id = char.id
-                    val pair = voiceEdit[id] ?: VoicePair()
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            char.name,
-                            color = scheme.primary,
-                            fontSize = 12.sp,
-                            modifier = Modifier.width(56.dp),
-                            maxLines = 1,
-                        )
-                        VoiceField(
-                            label = "中",
-                            value = pair.zh,
-                            onValueChange = { v ->
-                                val cur = voiceEdit[id] ?: VoicePair()
-                                voiceEdit = voiceEdit + (id to cur.copy(zh = v))
-                            },
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        VoiceField(
-                            label = "日",
-                            value = pair.ja,
-                            onValueChange = { v ->
-                                val cur = voiceEdit[id] ?: VoicePair()
-                                voiceEdit = voiceEdit + (id to cur.copy(ja = v))
-                            },
-                            modifier = Modifier.weight(1f),
-                        )
+                TextButton(onClick = { showAdvancedTtsVoices = !showAdvancedTtsVoices }) {
+                    Text(if (showAdvancedTtsVoices) "收起角色音色表" else "展开角色音色表", color = scheme.primary)
+                }
+                if (showAdvancedTtsVoices) {
+                    voiceCharacters.forEach { char ->
+                        val id = char.id
+                        val pair = voiceEdit[id] ?: VoicePair()
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(char.name, color = scheme.primary, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                                Text(if (pair.zh.voiceId.isBlank()) "中 未配置" else "中 已配置", color = if (pair.zh.voiceId.isBlank()) scheme.error else scheme.tertiary, fontSize = 10.sp)
+                                Spacer(Modifier.width(8.dp))
+                                Text(if (pair.ja.voiceId.isBlank()) "日 未配置" else "日 已配置", color = if (pair.ja.voiceId.isBlank()) scheme.error else scheme.tertiary, fontSize = 10.sp)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                VoiceField(
+                                    label = "中文 speaker_id",
+                                    value = pair.zh.voiceId,
+                                    onValueChange = { value ->
+                                        val cur = voiceEdit[id] ?: VoicePair()
+                                        voiceEdit = voiceEdit + (id to cur.copy(zh = cur.zh.copy(voiceId = value, resourceId = "")))
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                VoiceField(
+                                    label = "日文 speaker_id",
+                                    value = pair.ja.voiceId,
+                                    onValueChange = { value ->
+                                        val cur = voiceEdit[id] ?: VoicePair()
+                                        voiceEdit = voiceEdit + (id to cur.copy(ja = cur.ja.copy(voiceId = value, resourceId = "")))
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
         SaveButton(
-            text = "保存音色映射",
+            text = "保存角色双语音色",
             saved = voiceSaved,
             onClick = {
                 scope.launch {
-                    val toSave = voiceEdit.filter { it.value.zh.isNotBlank() || it.value.ja.isNotBlank() }
+                    val toSave = voiceEdit.mapValues { (_, pair) ->
+                        pair.copy(zh = pair.zh.copy(resourceId = ""), ja = pair.ja.copy(resourceId = ""))
+                    }.filter { (_, pair) -> !pair.zh.isEmpty || !pair.ja.isEmpty }
                     container.settingsRepository.setTtsVoiceMap(toSave)
                     voiceSaved = true
                 }

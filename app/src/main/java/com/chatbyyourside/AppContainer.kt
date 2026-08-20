@@ -328,7 +328,15 @@ class AppContainer(private val context: Context) {
         }
 
     // ===== TTS =====
-    val ttsClient: VolcTtsClient by lazy { VolcTtsClient(AppConfig.TTS_PROXY_URL, RetrofitClient.okHttpClient, directUrl = AppConfig.TTS_DIRECT_URL) }
+    private val ttsHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(120, TimeUnit.SECONDS)
+            .build()
+    }
+    val ttsClient: VolcTtsClient by lazy { VolcTtsClient(AppConfig.TTS_DIRECT_URL, ttsHttpClient) }
     val ttsManager: TtsManager by lazy { TtsManager(context, ttsClient, settingsRepository) }
 
     // ===== 音频 =====
