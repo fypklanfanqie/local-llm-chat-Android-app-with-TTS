@@ -121,7 +121,7 @@ data class AffinityRewardEntity(
 @Entity(tableName = "special_event_script")
 data class SpecialEventScriptEntity(
     @PrimaryKey val characterId: String,
-    val threshold: Int,
+    @PrimaryKey val threshold: Int,
     val title: String,
     val scene: String,
     val opening: String,
