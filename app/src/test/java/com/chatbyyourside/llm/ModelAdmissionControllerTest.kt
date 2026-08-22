@@ -140,7 +140,7 @@ class ModelAdmissionControllerTest {
     fun minContextExactlyFitsIsDowngradedToMinimum() {
         // 5.2GB 权重：仅 512 档（5.2G + 256M KV + 192M 预留 ≈ 5.64GB）放得进 5.75GB 预算 -> 降档到 512。
         val d = ModelAdmissionController.decideMemory(
-            mem(weightWorkingSet = 5.2f * gb.toFloat().toLong(), context = 4096, availMem = 6L * gb),
+            mem(weightWorkingSet = (5.2f * gb).toLong(), context = 4096, availMem = 6L * gb),
         ) as AdmissionDecision.Downgraded
         assertEquals(512, d.actualContext)
         assertTrue(d.reasons.contains(DowngradeReason.MEMORY))

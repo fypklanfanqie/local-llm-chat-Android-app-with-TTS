@@ -59,6 +59,8 @@ class SettingsStore(
         val API_BASE = stringPreferencesKey("api_base")
         val API_KEY = stringPreferencesKey("api_key")
         val API_MODEL = stringPreferencesKey("api_model")
+        // 每供应商配置记忆（JSON Map<providerKey, ApiConfig>；仅设置页切换/恢复用，请求仍读活跃 api_base/api_key/api_model）
+        val API_CONFIG_MAP = stringPreferencesKey("api_config_map")
 
         // TTS
         val TTS_API_KEY = stringPreferencesKey("tts_api_key")
@@ -70,6 +72,7 @@ class SettingsStore(
         val TTS_VOICE_MAP = stringPreferencesKey("tts_voice_map")  // JSON: Map<characterId, VoicePair>
         val TTS_ENGINE = stringPreferencesKey("tts_engine")        // system（默认，手机自带）/ cloud（火山豆包）
         val TTS_SYSTEM_TEMPLATE = stringPreferencesKey("tts_system_template")  // 系统引擎声音模板
+        val TTS_AUTO_READ = booleanPreferencesKey("tts_auto_read")             // 自动朗读新回复（默认关）
 
         // 角色
         val ACTIVE_CHARACTER = stringPreferencesKey("active_character")
@@ -201,6 +204,54 @@ class SettingsStore(
         }
     }
 
+    // ===== 每供应商配置记忆层（仅设置页切换/恢复用；请求仍读活跃 apiConfig）=====
+    /** 解码用 Json（与 voiceJson 同款宽松配置；独立一份避免依赖文件后部声明）。 */
+    private val apiConfigJson = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    /** 每供应商配置 map：providerKey(预设 id / CUSTOM_PROVIDER_KEY) -> ApiConfig。空白/损坏回退空 map。 */
+    val apiConfigMap: Flow<Map<String, ApiConfig>> = dataStore.data.map { p ->
+        val raw = p[Keys.API_CONFIG_MAP] ?: ""
+        if (raw.isBlank()) emptyMap()
+        else runCatching { apiConfigJson.decodeFromString<Map<String, ApiConfig>>(raw) }
+            .getOrDefault(emptyMap())
+    }
+
+    private fun readApiConfigMap(p: Preferences): Map<String, ApiConfig> {
+        val raw = p[Keys.API_CONFIG_MAP] ?: ""
+        if (raw.isBlank()) return emptyMap()
+        return runCatching { apiConfigJson.decodeFromString<Map<String, ApiConfig>>(raw) }
+            .getOrDefault(emptyMap())
+    }
+
+    /** 写某个供应商的配置（读-改-写在单个 edit 事务内，防 lost-update）。 */
+    suspend fun setApiConfigFor(providerKey: String, config: ApiConfig) {
+        dataStore.edit { p ->
+            val next = readApiConfigMap(p) + (providerKey to config)
+            p[Keys.API_CONFIG_MAP] = apiConfigJson.encodeToString(next)
+        }
+    }
+
+    /** 仅当该供应商尚无记录时写入（首开回填用；不覆盖已存记录）。 */
+    suspend fun ensureApiConfigFor(providerKey: String, config: ApiConfig) {
+        dataStore.edit { p ->
+            val current = readApiConfigMap(p)
+            if (providerKey !in current) {
+                p[Keys.API_CONFIG_MAP] = apiConfigJson.encodeToString(current + (providerKey to config))
+            }
+        }
+    }
+
+    /** 原子双写：同一事务内更新活跃 api_base/api_key/api_model 并写入该供应商记忆。设置页保存按钮调用。 */
+    suspend fun saveApiConfig(providerKey: String, config: ApiConfig) {
+        dataStore.edit { p ->
+            p[Keys.API_BASE] = config.baseUrl
+            p[Keys.API_KEY] = config.apiKey
+            p[Keys.API_MODEL] = config.model
+            val next = readApiConfigMap(p) + (providerKey to config)
+            p[Keys.API_CONFIG_MAP] = apiConfigJson.encodeToString(next)
+        }
+    }
+
     // ===== Seedance 对话视频 =====
     /**
      * Seedance 视频生成配置聚合快照（Task 3）。单个 data.map 读取全部相关键。
@@ -298,6 +349,15 @@ class SettingsStore(
 
     suspend fun setTtsVolume(vol: Int) {
         dataStore.edit { it[Keys.TTS_VOLUME] = vol }
+    }
+
+    /** 自动朗读新回复开关（默认关）。 */
+    val ttsAutoRead: Flow<Boolean> = dataStore.data.map { p ->
+        p[Keys.TTS_AUTO_READ] ?: false
+    }
+
+    suspend fun setTtsAutoRead(enabled: Boolean) {
+        dataStore.edit { it[Keys.TTS_AUTO_READ] = enabled }
     }
 
     // ===== 角色音色映射 =====

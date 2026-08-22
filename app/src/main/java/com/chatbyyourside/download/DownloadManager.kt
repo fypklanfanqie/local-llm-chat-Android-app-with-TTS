@@ -36,6 +36,8 @@ class DownloadManager(private val context: Context) {
         private const val TAG = "DownloadManager"
         private const val MAX_RETRY = 3
         private const val CHUNK_SIZE = 8192L
+        /** 非 Range（200）下载的临时文件后缀：成功后原子替换正式文件；失败则保留旧分片供续传。 */
+        private const val FRESH_SUFFIX = ".fresh"
 
         /** HF 仓库里无需下载的辅助文件（非模型本体） */
         private val SKIP_FILES = setOf(
@@ -142,23 +144,30 @@ class DownloadManager(private val context: Context) {
         if (!dir.exists()) dir.mkdirs()
         val total = model.size
 
+        // 清理上次失败/中断遗留的临时续传文件（非 Range 镜像用 .fresh 先写临时文件）。
+        dir.listFiles { f -> f.name.endsWith(FRESH_SUFFIX) }?.forEach { it.delete() }
+
         val files = listMnnRepoFiles(model)
         if (files.isEmpty()) throw Exception("无法获取 MNN 模型文件列表: ${model.repo}")
         Log.i(TAG, "MNN 模型 ${model.id}: ${files.size} 个文件 -> ${dir.absolutePath}")
 
-        updateState(model.id, DownloadState.Downloading(0L, total))
-        var aggregate = 0L
+        // 续传基线：已存在文件（上次中断/失败留下的分片）计入起始进度，重试/继续时不从 0 归零。
+        val sizes = files.associateWith { File(dir, it).length() }.toMutableMap()
+        var aggregate = sizes.values.sum()
+        updateState(model.id, DownloadState.Downloading(aggregate, total))
         for (file in files) {
             if (pauseFlags[model.id] == true || !currentCoroutineContext().isActive) return
             val target = File(dir, file)
             target.parentFile?.mkdirs()
+            // 当前文件之外的已下字节数：单文件增量进度叠加到基线之上，续传不归零。
+            val aggregateBefore = aggregate - (sizes[file] ?: 0L)
             val urls = buildMnnFileUrls(model, file)
             var ok = false
             var was404 = false
             var lastErr: Exception? = null
             for (url in urls) {
                 try {
-                    ok = downloadMnnFile(url, target, model.id, aggregate, total)
+                    ok = downloadMnnFile(url, target, model.id, aggregateBefore, total)
                     if (ok) break
                     if (pauseFlags[model.id] == true || !currentCoroutineContext().isActive) return
                 } catch (e: CancellationException) {
@@ -177,7 +186,8 @@ class DownloadManager(private val context: Context) {
                     throw lastErr ?: Exception("下载失败: $file")
                 }
             }
-            aggregate += target.length()
+            sizes[file] = File(dir, file).length()
+            aggregate = aggregateBefore + (sizes[file] ?: 0L)
             updateState(model.id, DownloadState.Downloading(aggregate, total))
         }
 
@@ -188,7 +198,7 @@ class DownloadManager(private val context: Context) {
      * 下载 MNN 仓库中的单个文件（支持断点续传）。
      * - 416：文件已完整（Range 越界），跳过。
      * - 206：服务端支持 Range，从 [startBytes] 续传。
-     * - 200：不支持 Range，从头重写。
+     * - 200：不支持 Range，从头重写（先写 .fresh 临时文件、成功后原子替换，失败时旧分片仍保留供续传）。
      * 进度按 [aggregateBefore] + 本文件已写字节累加进总进度 [total]。
      */
     private suspend fun downloadMnnFile(
@@ -210,9 +220,11 @@ class DownloadManager(private val context: Context) {
             val body = response.body ?: throw Exception("响应体为空")
             val supportRange = response.code == 206
             val currentStart = if (supportRange) startBytes else 0L
-            if (!supportRange && target.exists()) target.delete()
-
-            val raf = RandomAccessFile(target, "rw")
+            // 200（不支持 Range）不能续传：先写临时文件、成功后原子替换正式文件；中途失败时旧分片保留，
+            // 下一个支持 Range 的镜像可继续续传，避免「网络波动后重头下载」。
+            val writeTarget = if (supportRange) target else File(target.parentFile, target.name + FRESH_SUFFIX)
+            writeTarget.parentFile?.mkdirs()
+            val raf = RandomAccessFile(writeTarget, "rw")
             try {
                 raf.seek(currentStart)
                 val source = body.byteStream()
@@ -238,6 +250,14 @@ class DownloadManager(private val context: Context) {
                 }
             } finally {
                 raf.close()
+            }
+            if (writeTarget != target) {
+                // 临时文件 → 正式文件：同目录 rename 基本必成；失败（跨文件系统/占用）时拷贝兜底。
+                val replaced = target.delete() && writeTarget.renameTo(target)
+                if (!replaced) {
+                    writeTarget.copyTo(target, overwrite = true)
+                    writeTarget.delete()
+                }
             }
         } finally {
             response.close()

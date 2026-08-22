@@ -21,7 +21,8 @@ class FingerprintTest {
 
     @Test
     fun hashIsIndependentOfMapIterationOrder() {
-        val reversed = base.entries.toList().reversed().toMap()
+        // Map.Entry 列表不能直接 toMap()（需要 Pair）；associate 转换后再比较哈希不受迭代顺序影响。
+        val reversed = base.entries.toList().reversed().associate { it.key to it.value }
 
         assertEquals(
             DeviceRuntimeFingerprint.canonicalHash(base),

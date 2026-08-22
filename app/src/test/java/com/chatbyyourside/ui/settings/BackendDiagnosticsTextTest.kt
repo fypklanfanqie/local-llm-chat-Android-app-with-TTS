@@ -4,9 +4,9 @@ import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.benchmark.BenchmarkScenarioResult
-import com.chatbyyourside.llm.benchmark.BenchmarkSummary
 import com.chatbyyourside.llm.benchmark.CertifiedInferenceOptions
 import com.chatbyyourside.llm.benchmark.InferenceBenchmarkScenario
+import com.chatbyyourside.llm.metrics.BenchmarkSummary
 import com.chatbyyourside.llm.metrics.InferenceTurnRecord
 import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.profile.DowngradeReason

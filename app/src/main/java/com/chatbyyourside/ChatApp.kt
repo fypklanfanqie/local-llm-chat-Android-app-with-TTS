@@ -3,7 +3,6 @@ package com.chatbyyourside
 import android.app.Application
 import android.content.ComponentCallbacks2
 import android.content.res.Configuration
-import android.os.Process
 import android.util.Log
 import com.chatbyyourside.data.local.AppDatabase
 import com.chatbyyourside.notification.AppLifecycleObserver
@@ -12,6 +11,7 @@ import com.chatbyyourside.notification.GroupChatNotificationManager
 import com.chatbyyourside.service.InferenceForegroundService
 import com.chatbyyourside.ui.affinity.DailyCheckinBus
 import com.chatbyyourside.util.CrashReporter
+import com.chatbyyourside.util.ProcessNameUtil
 import com.chatbyyourside.work.GreetingScheduler
 import com.chatbyyourside.work.GroupChatScheduler
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -137,7 +137,9 @@ class ChatApp : Application() {
         private const val TAG = "ChatApp"
     }
 
-    /** 当前是否运行于 :mnn_probe 隔离进程（OpenCL 探测专用，见 OpenClProbeService）。 */
+    /** 当前是否运行于 :mnn_probe 隔离进程（OpenCL 探测专用，见 OpenClProbeService）。
+     *  经 ProcessNameUtil 读 /proc/self/cmdline：Process.myProcessName() 为 API 33+ 方法，
+     *  minSdk=24 下 Android 7~12L 会抛 NoSuchMethodError（v2.5 冷启动闪退根因）。 */
     private fun isMnnProbeProcess(): Boolean =
-        (Process.myProcessName() ?: "").endsWith(":mnn_probe")
+        ProcessNameUtil.currentProcessName().endsWith(":mnn_probe")
 }

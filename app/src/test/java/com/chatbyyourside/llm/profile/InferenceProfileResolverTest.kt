@@ -4,6 +4,7 @@ import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.llm.backend.BackendPreference
 import com.chatbyyourside.llm.backend.BackendType
 import com.chatbyyourside.llm.benchmark.CertifiedInferenceOptions
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -185,8 +186,8 @@ class InferenceProfileResolverTest {
     fun canonicalJsonSortsKeysRecursively() {
         val canonical = InferenceProfileResolver.canonicalJsonString(
             kotlinx.serialization.json.buildJsonObject {
-                put("z", 1)
-                put("a", kotlinx.serialization.json.buildJsonObject { put("y", 2); put("b", 3) })
+                put("z", JsonPrimitive(1))
+                put("a", kotlinx.serialization.json.buildJsonObject { put("y", JsonPrimitive(2)); put("b", JsonPrimitive(3)) })
             },
         )
         // 根键 a 在 z 前；嵌套对象 b 在 y 前。

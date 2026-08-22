@@ -1,6 +1,5 @@
 package com.chatbyyourside.llm.backend
 
-import android.test.mock.MockContext
 import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
@@ -156,7 +155,7 @@ class BackendManagerOutputPolicyFallbackTest {
     }
 
     /** fake 推理后端（Task 4 版）：在 HealthWiringTest fake 基础上增加空摘要 / 分类器收口 / release 追踪。 */
-    private class PlanFakeBackend(
+    private inner class PlanFakeBackend(
         override val backendType: BackendType,
     ) : InferenceBackend {
         var loadResult = true
@@ -269,7 +268,8 @@ class BackendManagerOutputPolicyFallbackTest {
         store: FakeHealthStore,
         backends: Map<BackendType, PlanFakeBackend>,
     ): BackendManager {
-        val context = MockContext()
+        // 测试只把 Context 传给 BackendManager 存引用、不触达框架方法（见类注释），故用 null 替身。
+        val context = TestContexts.nullContext()
         return BackendManager(
             context = context,
             cpuBoostController = CpuBoostController(context),

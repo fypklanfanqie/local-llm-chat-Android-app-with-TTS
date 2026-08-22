@@ -33,6 +33,13 @@ jobs:
         run: |
           ./gradlew testDebugUnitTest --console=plain
 
+      - name: Android Lint (NewApi gate)
+        run: |
+          # 未守卫高版本 API 的冷启动闪退（Process.myProcessName since=33，minSdk=24）
+          # 能上线正是因为 CI 无 lint、本地无法编译。lintDebug 的 NewApi/ObsoleteSdkInt
+          # 检查作为门禁：error 级问题直接失败。
+          ./gradlew :app:lintDebug --console=plain
+
       - name: Static checks
         run: |
           git diff --check

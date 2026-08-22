@@ -100,7 +100,10 @@ class TtsManager(
         }
 
         val voiceMap = settings.getTtsVoiceMapNow()
+        // 优先该角色当前语言的 speaker_id；未配置时回落 TtsConfig.defaultVoiceId（默认音色），
+        // 让未逐一配置音色的角色也能直接朗读；两者都缺才给引导错误。
         val speakerId = speakerIdForLanguage(characterId, language, voiceMap)
+            ?: ttsConfig.defaultVoiceId.takeIf { it.isNotBlank() }
             ?: throw Exception(
                 "请先在设置 → 角色双语音色中填写该角色的${language.label} speaker_id",
             )

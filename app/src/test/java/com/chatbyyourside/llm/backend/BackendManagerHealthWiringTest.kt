@@ -1,6 +1,5 @@
 package com.chatbyyourside.llm.backend
 
-import android.test.mock.MockContext
 import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.llm.CpuBoostController
@@ -73,7 +72,7 @@ class BackendManagerHealthWiringTest {
     }
 
     /** fake 推理后端：由场景字段驱动 generate 的四种结局（摘要完成 / control 中断 / 生成异常 / 加载失败）。 */
-    private class FakeBackend(
+    private inner class FakeBackend(
         override val backendType: BackendType,
     ) : InferenceBackend {
         var loadResult = true
@@ -174,7 +173,8 @@ class BackendManagerHealthWiringTest {
         coordinator: BackendHealthCoordinator,
         backends: Map<BackendType, FakeBackend>,
     ): BackendManager {
-        val context = MockContext()
+        // 测试只把 Context 传给 BackendManager 存引用、不触达框架方法（见类注释），故用 null 替身。
+        val context = TestContexts.nullContext()
         return BackendManager(
             context = context,
             cpuBoostController = CpuBoostController(context),
@@ -314,7 +314,8 @@ class BackendManagerHealthWiringTest {
     fun loadFailure_recordsLoadCategoryAndFallsBackToCpu() {
         val store = FakeHealthStore()
         val gpu = FakeBackend(BackendType.MNN_GPU).apply { loadResult = false }
-        val result = runGenerate(manager(coordinator(store), backends(gpu)), gpuPlan(), control())
+        val cpu = FakeBackend(BackendType.MNN_CPU).apply { summaryReason = "EOS" }
+        val result = runGenerate(manager(coordinator(store), backends(gpu, cpu)), gpuPlan(), control())
 
         assertEquals(BackendType.MNN_CPU, result.usedBackend)
         assertEquals(CompletionReason.EOS, result.completionReason)
@@ -340,7 +341,8 @@ class BackendManagerHealthWiringTest {
     fun loadFailureWriteFailure_stillFallsBackToCpu() {
         val store = FakeHealthStore().apply { failWrites = true }
         val gpu = FakeBackend(BackendType.MNN_GPU).apply { loadResult = false }
-        val result = runGenerate(manager(coordinator(store), backends(gpu)), gpuPlan(), control())
+        val cpu = FakeBackend(BackendType.MNN_CPU).apply { summaryReason = "EOS" }
+        val result = runGenerate(manager(coordinator(store), backends(gpu, cpu)), gpuPlan(), control())
 
         assertEquals(BackendType.MNN_CPU, result.usedBackend)
         assertEquals(CompletionReason.EOS, result.completionReason)

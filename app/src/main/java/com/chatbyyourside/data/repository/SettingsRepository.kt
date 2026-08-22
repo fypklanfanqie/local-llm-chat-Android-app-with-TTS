@@ -43,6 +43,8 @@ class SettingsRepository(private val store: SettingsStore) {
     val ttsEngine: Flow<TtsEngine> = store.ttsEngine
     /** 系统引擎声音模板。 */
     val ttsSystemTemplate: Flow<SystemVoiceTemplate> = store.ttsSystemTemplate
+    /** 自动朗读新回复开关（默认关）。 */
+    val ttsAutoRead: Flow<Boolean> = store.ttsAutoRead
     val activeCharacter: Flow<String> = store.activeCharacter
     val customCharacters: Flow<List<Character>> = store.customCharacters
     val volume: Flow<Int> = store.volume
@@ -111,6 +113,22 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun setThemeMode(mode: ThemeMode) = store.setThemeMode(mode)
 
     suspend fun setApiConfig(config: ApiConfig) = store.setApiConfig(config)
+
+    /** 每供应商配置记忆 map（设置页切换/恢复用；请求仍读活跃 apiConfig）。 */
+    val apiConfigMap: Flow<Map<String, ApiConfig>> = store.apiConfigMap
+
+    /** 同步读取每供应商配置 map（5s 超时回退空 map，国产 ROM 文件 I/O 被拦截时设置页不卡死）。 */
+    suspend fun getApiConfigMapNow(): Map<String, ApiConfig> = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        apiConfigMap.first()
+    } ?: emptyMap()
+
+    suspend fun setApiConfigFor(providerKey: String, config: ApiConfig) =
+        store.setApiConfigFor(providerKey, config)
+    suspend fun ensureApiConfigFor(providerKey: String, config: ApiConfig) =
+        store.ensureApiConfigFor(providerKey, config)
+    /** 原子双写：更新活跃 api_config 并写入该供应商记忆（设置页保存按钮调用）。 */
+    suspend fun saveApiConfig(providerKey: String, config: ApiConfig) =
+        store.saveApiConfig(providerKey, config)
     suspend fun setSeedanceConfig(config: SeedanceConfig) = store.setSeedanceConfig(config)
     suspend fun setTtsConfig(config: TtsConfig) = store.setTtsConfig(config)
     suspend fun setTtsLanguage(lang: TtsLanguage) = store.setTtsLanguage(lang)
@@ -118,6 +136,7 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun setTtsVoiceMap(map: Map<String, VoicePair>) = store.setTtsVoiceMap(map)
     suspend fun setTtsEngine(engine: TtsEngine) = store.setTtsEngine(engine)
     suspend fun setTtsSystemTemplate(template: SystemVoiceTemplate) = store.setTtsSystemTemplate(template)
+    suspend fun setTtsAutoRead(enabled: Boolean) = store.setTtsAutoRead(enabled)
     suspend fun setActiveCharacter(id: String) = store.setActiveCharacter(id)
     val activeConversations: Flow<Map<String, Long>> = store.activeConversations
     suspend fun setActiveConversation(characterId: String, conversationId: Long) =
@@ -217,6 +236,10 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun getTtsSystemTemplateNow(): SystemVoiceTemplate = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         ttsSystemTemplate.first()
     } ?: SystemVoiceTemplate.DEFAULT_TEMPLATE
+
+    suspend fun getTtsAutoReadNow(): Boolean = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        ttsAutoRead.first()
+    } ?: false
 
     suspend fun getTtsVoiceMapNow(): Map<String, VoicePair> = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         ttsVoiceMap.first()

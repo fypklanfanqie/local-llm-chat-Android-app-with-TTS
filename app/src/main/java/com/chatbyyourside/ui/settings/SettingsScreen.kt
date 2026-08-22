@@ -41,6 +41,8 @@ import com.chatbyyourside.ui.glass.GlassListSection
 import com.chatbyyourside.ui.glass.frostedGlass
 import com.chatbyyourside.ui.theme.GlassShapes
 import com.chatbyyourside.config.Characters
+import com.chatbyyourside.config.CUSTOM_PROVIDER_KEY
+import com.chatbyyourside.config.normalizeBaseUrl
 import com.chatbyyourside.config.ModelProvider
 import com.chatbyyourside.config.PresetModel
 import com.chatbyyourside.config.FREE_PROVIDER_ID
@@ -90,14 +92,17 @@ fun SettingsScreen(
 ) {
     val scheme = MaterialTheme.colorScheme
     val apiConfig by container.settingsRepository.apiConfig.collectAsState(initial = ApiConfig())
+    // 每供应商配置记忆：切换供应商时恢复该供应商已存的 baseUrl/model/apiKey，不互相串。
+    val apiConfigMap by container.settingsRepository.apiConfigMap.collectAsState(initial = emptyMap())
     val ttsConfig by container.settingsRepository.ttsConfig.collectAsState(initial = TtsConfig())
     val deepThinking by container.settingsRepository.deepThinking.collectAsState(initial = false)
     val liquidGlass by container.settingsRepository.liquidGlass.collectAsState(initial = true)
     val themeMode by container.settingsRepository.themeMode.collectAsState(initial = ThemeMode.SYSTEM)
     val scope = rememberCoroutineScope()
 
+    // 归一化匹配：被污染的存量 Base URL（如尾缀 https）也能正确命中预设供应商。
     val matchedProvider: ModelProvider? = PRESET_PROVIDERS.find { provider ->
-        provider.baseUrl.trimEnd('/').equals(apiConfig.baseUrl.trimEnd('/'), ignoreCase = true)
+        normalizeBaseUrl(provider.baseUrl).equals(normalizeBaseUrl(apiConfig.baseUrl), ignoreCase = true)
     }
     var selectedProvider by remember(apiConfig) { mutableStateOf(matchedProvider) }
     val isCustom = selectedProvider == null
@@ -119,16 +124,26 @@ fun SettingsScreen(
     var customBaseUrl by remember(apiConfig) { mutableStateOf(apiConfig.baseUrl) }
     var customModel by remember(apiConfig) { mutableStateOf(apiConfig.model) }
 
+    // 首开回填：把当前活跃配置写入对应供应商记忆（老用户升级后切走再切回也不丢 key）。
+    // 只写 map、不碰 apiConfig，不冲掉未保存编辑；已有记录即 no-op。
+    LaunchedEffect(apiConfig) {
+        val activeKey = matchedProvider?.id ?: CUSTOM_PROVIDER_KEY
+        container.settingsRepository.ensureApiConfigFor(activeKey, apiConfig)
+    }
+
     var apiSaved by remember { mutableStateOf(false) }
     LaunchedEffect(apiSaved) {
         if (apiSaved) { delay(2000); apiSaved = false }
     }
 
     var ttsApiKey by remember(ttsConfig) { mutableStateOf(ttsConfig.apiKey) }
+    // 默认音色（未单独配置 speaker_id 的角色回落使用，见 TtsManager.speakCloud）
+    var ttsDefaultVoice by remember(ttsConfig) { mutableStateOf(ttsConfig.defaultVoiceId) }
     var showTtsKey by remember { mutableStateOf(false) }
 
     // 朗读引擎（系统自带 / 云端）与系统声音模板。
     val ttsEngine by container.settingsRepository.ttsEngine.collectAsState(initial = TtsEngine.DEFAULT)
+    val ttsAutoRead by container.settingsRepository.ttsAutoRead.collectAsState(initial = false)
     val ttsTemplate by container.settingsRepository.ttsSystemTemplate.collectAsState(initial = SystemVoiceTemplate.DEFAULT_TEMPLATE)
     var ttsEngineEdit by remember(ttsEngine) { mutableStateOf(ttsEngine) }
     var ttsTemplateEdit by remember(ttsTemplate) { mutableStateOf(ttsTemplate) }
@@ -224,6 +239,33 @@ fun SettingsScreen(
                         providerExpanded = false
                         // 选中「免费对话」：弹出免费服务提示。
                         if (provider?.id == FREE_PROVIDER_ID) showFreeNotice = true
+                        // 切到目标供应商时恢复该供应商已存配置，避免把上一家的 key/baseUrl/model 串过来。
+                        when (provider) {
+                            null -> {
+                                val stored = apiConfigMap[CUSTOM_PROVIDER_KEY]
+                                val activeIsCustom = matchedProvider == null
+                                customBaseUrl = stored?.baseUrl ?: apiConfig.baseUrl
+                                customModel = stored?.model ?: apiConfig.model
+                                apiKey = when {
+                                    stored != null -> stored.apiKey
+                                    activeIsCustom -> apiConfig.apiKey // 当前活跃的就是自定义，保留活跃 key
+                                    else -> ""
+                                }
+                            }
+                            else -> {
+                                val stored = apiConfigMap[provider.id]
+                                selectedModel = if (stored != null) {
+                                    provider.models.find { it.id == stored.model } ?: provider.models.firstOrNull()
+                                } else {
+                                    provider.models.find { it.id == apiConfig.model } ?: provider.models.firstOrNull()
+                                }
+                                apiKey = when {
+                                    stored != null -> stored.apiKey
+                                    provider.id == matchedProvider?.id -> apiConfig.apiKey // 当前活跃供应商回退
+                                    else -> ""
+                                }
+                            }
+                        }
                     },
                 )
                 if (!isCustom && selectedProvider != null) {
@@ -261,11 +303,18 @@ fun SettingsScreen(
             saved = apiSaved,
             onClick = {
                 scope.launch {
-                    val baseUrl = if (isCustom) customBaseUrl else selectedProvider?.baseUrl ?: customBaseUrl
-                    val model = if (isCustom) customModel else selectedModel?.id ?: customModel
+                    // normalizeBaseUrl：消毒手输/粘贴带进 Base URL 的尾 scheme 残渣与空白，避免请求命中错误路径 404。
+                    val baseUrl = if (isCustom) {
+                        normalizeBaseUrl(customBaseUrl)
+                    } else {
+                        selectedProvider?.baseUrl ?: normalizeBaseUrl(customBaseUrl)
+                    }
+                    val model = (if (isCustom) customModel else selectedModel?.id ?: customModel).trim()
                     // 「免费对话」供应商的 key 由云端代理注入，App 端存空即可。
-                    val key = if (selectedProvider?.id == FREE_PROVIDER_ID) "" else apiKey
-                    container.settingsRepository.setApiConfig(ApiConfig(baseUrl, key, model))
+                    val key = if (selectedProvider?.id == FREE_PROVIDER_ID) "" else apiKey.trim()
+                    val providerKey = selectedProvider?.id ?: CUSTOM_PROVIDER_KEY
+                    // 原子双写：更新活跃配置 + 写入该供应商记忆。
+                    container.settingsRepository.saveApiConfig(providerKey, ApiConfig(baseUrl, key, model))
                     apiSaved = true
                 }
             },
@@ -312,6 +361,16 @@ fun SettingsScreen(
 
         // ===== 语音合成（朗读）=====
         GlassListSection(title = "语音合成 (TTS) · 朗读") {
+            GlassListRow(
+                title = "自动朗读新回复",
+                subtitle = "AI 回复完成后自动朗读（仍可用「朗读」按钮手动控制）",
+                trailing = {
+                    Switch(
+                        checked = ttsAutoRead,
+                        onCheckedChange = { scope.launch { container.settingsRepository.setTtsAutoRead(it) } },
+                    )
+                },
+            )
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
                     "手机系统语音：离线、免费、开箱即用；云端（火山豆包）：支持声音复刻音色与中日双语，需配置凭据。",
@@ -340,6 +399,16 @@ fun SettingsScreen(
                         color = scheme.onSurfaceVariant, fontSize = 10.sp,
                     )
                     PasswordField("火山引擎 API Key", ttsApiKey, showTtsKey, { ttsApiKey = it }, { showTtsKey = !showTtsKey })
+                    VoiceField(
+                        label = "默认音色 speaker_id（未单独配置的角色使用）",
+                        value = ttsDefaultVoice,
+                        onValueChange = { ttsDefaultVoice = it },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "默认音色让未在下方逐一配置 speaker_id 的角色也能直接朗读；单个角色如需专属音色，再在下方覆盖。",
+                        color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                    )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     TextButton(
@@ -380,7 +449,8 @@ fun SettingsScreen(
                     container.settingsRepository.setTtsEngine(ttsEngineEdit)
                     container.settingsRepository.setTtsSystemTemplate(ttsTemplateEdit)
                     if (ttsEngineEdit == TtsEngine.CLOUD) {
-                        val config = TtsConfig(apiKey = ttsApiKey.trim())
+                        // 保留 defaultVoiceId（默认音色）——只填 apiKey 会在下次保存时把它冲掉。
+                        val config = TtsConfig(apiKey = ttsApiKey.trim(), defaultVoiceId = ttsDefaultVoice.trim())
                         val error = config.validationError()
                         if (error != null) {
                             ttsPreviewError = error
@@ -399,7 +469,7 @@ fun SettingsScreen(
         GlassListSection(title = "角色双语音色（speaker_id）") {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "每个角色分别填写中文和日文 speaker_id。日语模式只使用日文音色，缺失时会提示配置，不会用中文音色硬读日文。",
+                    "为个别角色配置专属 speaker_id 可覆盖默认音色；未配置的角色朗读时自动回落上方「默认音色」。日语模式优先用日文音色，缺日文时同样回落默认音色。",
                     color = scheme.onSurfaceVariant, fontSize = 11.sp,
                 )
                 TextButton(onClick = { showAdvancedTtsVoices = !showAdvancedTtsVoices }) {

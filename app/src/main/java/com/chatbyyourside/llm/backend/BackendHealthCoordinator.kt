@@ -5,6 +5,8 @@ import android.os.SystemClock
 import com.chatbyyourside.llm.profile.DeviceRuntimeFingerprint
 import com.chatbyyourside.llm.profile.OpenClHealthState
 import com.chatbyyourside.llm.profile.RuntimeVariant
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.security.MessageDigest
 
@@ -190,18 +192,19 @@ class BackendHealthCoordinator(
          * internal 供 JVM 单测断言 native 身份不进健康指纹。
          */
         internal fun healthFingerprintParts(): Map<String, String> = buildMap {
-            put("manufacturer", Build.MANUFACTURER)
-            put("model", Build.MODEL)
-            put("osFingerprint", Build.FINGERPRINT)
+            // Build.* 真机恒非空；`: ""` 仅防御 JVM 单测等无设备信息场景（canonicalHash 会过滤空值）。
+            put("manufacturer", Build.MANUFACTURER ?: "")
+            put("model", Build.MODEL ?: "")
+            put("osFingerprint", Build.FINGERPRINT ?: "")
             put(
                 "soc",
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    "${Build.SOC_MANUFACTURER} ${Build.SOC_MODEL}"
+                    "${Build.SOC_MANUFACTURER ?: ""} ${Build.SOC_MODEL ?: ""}"
                 } else {
                     ""
                 },
             )
-            put("abi", Build.SUPPORTED_ABIS.firstOrNull() ?: "")
+            put("abi", (Build.SUPPORTED_ABIS ?: emptyArray()).firstOrNull() ?: "")
             put("policySchema", POLICY_SCHEMA)
         }
 

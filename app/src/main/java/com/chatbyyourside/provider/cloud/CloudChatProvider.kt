@@ -1,5 +1,6 @@
 package com.chatbyyourside.provider.cloud
 
+import com.chatbyyourside.config.isFreeProxyBaseUrl
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.remote.ChatMessageDto
@@ -42,10 +43,8 @@ class CloudChatProvider(
 
         val apiConfig = settings.getApiConfigNow()
         // 内置「免费对话」供应商的 key 由云端代理注入，App 端允许空 key（无需在设置页填写）。
-        val isFreeProxy = apiConfig.baseUrl.trimEnd('/').equals(
-            com.chatbyyourside.config.FREE_PROVIDER_BASE_URL.trimEnd('/'),
-            ignoreCase = true,
-        )
+        // 归一化判定（isFreeProxyBaseUrl 内部 normalizeBaseUrl）：被污染的免费地址也不误伤空 key 豁免。
+        val isFreeProxy = isFreeProxyBaseUrl(apiConfig.baseUrl)
         if (apiConfig.apiKey.isBlank() && !isFreeProxy) {
             throw Exception("请先在设置页配置 API Key")
         }

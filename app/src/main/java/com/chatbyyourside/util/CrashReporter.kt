@@ -2,7 +2,6 @@ package com.chatbyyourside.util
 
 import android.content.Context
 import android.os.Build
-import android.os.Process
 import android.util.Log
 import java.io.File
 import java.io.PrintWriter
@@ -98,11 +97,9 @@ object CrashReporter {
         appendLine("进程: ${processName()}")
     }
 
-    private fun processName(): String = try {
-        Process.myProcessName() ?: "unknown"
-    } catch (_: Throwable) {
-        "unknown"
-    }
+    /** 当前进程名（经 ProcessNameUtil 读 /proc/self/cmdline，全 API 级别可用；
+     *  原 Process.myProcessName() 为 API 33+，低版本上崩溃日志进程名恒为 "unknown"）。 */
+    private fun processName(): String = ProcessNameUtil.currentProcessName().ifEmpty { "unknown" }
 
     private fun timestamp(): String =
         SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())

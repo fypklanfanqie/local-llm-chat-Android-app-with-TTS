@@ -42,7 +42,7 @@ enum class ThinkingTemplateCapability {
  * config.json 优先、llm_config.json 次之；无任一配置文件时不缓存（直接扫描模板文件）。
  * 并发安全：ConcurrentHashMap，读-算-写竞态最多重复计算一次，结果幂等无害。
  */
-class ThinkingTemplateCapabilityResolver {
+open class ThinkingTemplateCapabilityResolver {
 
     /** 缓存：键 = `<config 绝对路径>@<mtime>`。 */
     private val cache = ConcurrentHashMap<String, ThinkingTemplateCapability>()

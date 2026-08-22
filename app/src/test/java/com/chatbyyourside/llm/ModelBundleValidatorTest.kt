@@ -24,7 +24,8 @@ class ModelBundleValidatorTest {
     }
 
     private fun validMinimal() {
-        file("config.json", "{\"model_path\":\"llm.mnn\"}")
+        // config 显式引用 weight 与 tokenizer：它们才会进入必需集，缺失即校验失败。
+        file("config.json", "{\"model_path\":\"llm.mnn\",\"llm_weight\":\"llm.mnn.weight\",\"tokenizer\":\"tokenizer.txt\"}")
         file("llm.mnn")
         file("llm.mnn.weight")
         file("tokenizer.txt")
@@ -37,10 +38,22 @@ class ModelBundleValidatorTest {
 
         assertTrue("errors=$r", r.valid)
         assertTrue(r.modelFingerprint.isNotBlank())
-        // 必需文件 = 默认集（llm.mnn/weight/tokenizer）+ config 引用（model_path=llm.mnn）。
+        // 必需文件 = 默认集（仅 llm.mnn）+ config 引用（llm.mnn/weight/tokenizer）。
         assertTrue(r.requiredFiles.contains("llm.mnn"))
         assertTrue(r.requiredFiles.contains("llm.mnn.weight"))
         assertTrue(r.requiredFiles.contains("tokenizer.txt"))
+    }
+
+    @Test
+    fun embeddedWeightAndTokenizerAreToleratedWhenNotReferenced() {
+        // 内嵌权重/tokenizer 的模型：config 不引用，目录也没有独立文件，应通过（对齐下载侧「可能内嵌」容忍）。
+        file("config.json", "{\"model_path\":\"llm.mnn\"}")
+        file("llm.mnn")
+
+        val r = ModelBundleValidator.validate(root)
+
+        assertTrue("内嵌模型应通过: $r", r.valid)
+        assertEquals(listOf("llm.mnn"), r.requiredFiles)
     }
 
     @Test

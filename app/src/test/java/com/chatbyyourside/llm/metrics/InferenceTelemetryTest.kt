@@ -288,6 +288,7 @@ class InferenceTelemetryTest {
             targetMinMs = 8_000L,
             targetMaxMs = 15_000L,
             checkpointBudget = 4,
+            thinkingBudgetBytes = 768L * 4,
             systemInstruction = "纯软提示：只约束思考，不改变最终答案",
         )
         val telemetry = ThinkingPolicyTelemetry.from(plan, "UNVERIFIED")!!

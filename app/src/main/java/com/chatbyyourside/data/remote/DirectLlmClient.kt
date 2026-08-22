@@ -1,5 +1,6 @@
 package com.chatbyyourside.data.remote
 
+import com.chatbyyourside.config.normalizeBaseUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
@@ -67,14 +68,15 @@ class DirectLlmClient(
         deepThinking: Boolean = false,
     ): String = withContext(Dispatchers.IO) {
         // Anthropic 格式：/v1/messages + x-api-key 头 + content_block_delta 流式；
-        // 其余端点一律 OpenAI 兼容格式。
-        if (isAnthropicEndpoint(baseUrl)) {
-            anthropicChatStream(baseUrl, apiKey, model, messages, onChunk, onCall)
+        // 其余端点一律 OpenAI 兼容格式。base 先归一化，剥离粘贴/输入法污染的尾 scheme 残渣。
+        val base = normalizeBaseUrl(baseUrl)
+        if (isAnthropicEndpoint(base)) {
+            anthropicChatStream(base, apiKey, model, messages, onChunk, onCall)
         } else {
             val request = buildRequest(
-                endpoint = buildEndpoint(baseUrl),
+                endpoint = buildEndpoint(base),
                 apiKey = apiKey,
-                body = buildBody(model, messages, stream = true, baseUrl = baseUrl, deepThinking = deepThinking),
+                body = buildBody(model, messages, stream = true, baseUrl = base, deepThinking = deepThinking),
                 accept = "text/event-stream",
             )
             executeStreaming(request, onChunk, onCall, deepThinking)
@@ -107,19 +109,20 @@ class DirectLlmClient(
         messages: List<ChatMessageDto>,
         responseFormatJson: Boolean,
     ): String = withContext(Dispatchers.IO) {
-        if (isAnthropicEndpoint(baseUrl)) {
-            anthropicChatOnce(baseUrl, apiKey, model, messages)
+        val base = normalizeBaseUrl(baseUrl)
+        if (isAnthropicEndpoint(base)) {
+            anthropicChatOnce(base, apiKey, model, messages)
         } else {
             val request = buildRequest(
-                endpoint = buildEndpoint(baseUrl),
+                endpoint = buildEndpoint(base),
                 apiKey = apiKey,
                 body = buildBody(
                     model = model,
                     messages = messages,
                     stream = false,
-                    baseUrl = baseUrl,
+                    baseUrl = base,
                     deepThinking = false,
-                    responseFormatJson = responseFormatJson && supportsJsonObjectResponse(baseUrl, model),
+                    responseFormatJson = responseFormatJson && supportsJsonObjectResponse(base, model),
                 ),
                 accept = null,
             )
@@ -201,8 +204,8 @@ class DirectLlmClient(
         return renderAccumulated(reasoningBuf, contentBuf, contentStarted)
     }
 
-    private fun buildEndpoint(baseUrl: String): String {
-        val base = baseUrl.trim().trimEnd('/')
+    internal fun buildEndpoint(baseUrl: String): String {
+        val base = normalizeBaseUrl(baseUrl).trimEnd('/')
         return if (base.endsWith("/chat/completions", ignoreCase = true)) {
             base
         } else {
@@ -215,9 +218,10 @@ class DirectLlmClient(
      * - baseUrl 含 anthropic / claude（官方域或中转网关）→ Anthropic；
      * - baseUrl 以 /v1/messages 结尾 → Anthropic；
      * - 其余一律 OpenAI 兼容格式。
+     * 判定前先 [normalizeBaseUrl]，避免污染的 `.../v1/messageshttps` 被误判为 OpenAI。
      */
-    private fun isAnthropicEndpoint(baseUrl: String): Boolean {
-        val b = baseUrl.lowercase()
+    internal fun isAnthropicEndpoint(baseUrl: String): Boolean {
+        val b = normalizeBaseUrl(baseUrl).lowercase()
         return b.contains("anthropic") || b.contains("claude") ||
             b.trim().trimEnd('/').endsWith("/v1/messages")
     }
@@ -367,9 +371,9 @@ class DirectLlmClient(
     private val ANTHROPIC_VERSION = "2023-06-01"
     private val ANTHROPIC_MAX_TOKENS = 8192
 
-    /** 兼容用户填写的 baseUrl 形态：`…/v1` / `…/v1/messages` 已含 / 裸域。 */
-    private fun buildAnthropicEndpoint(baseUrl: String): String {
-        val base = baseUrl.trim().trimEnd('/')
+    /** 兼容用户填写的 baseUrl 形态：`…/v1` / `…/v1/messages` 已含 / 裸域。先归一化剥尾 scheme 残渣。 */
+    internal fun buildAnthropicEndpoint(baseUrl: String): String {
+        val base = normalizeBaseUrl(baseUrl).trimEnd('/')
         return when {
             base.endsWith("/v1/messages") -> base
             base.endsWith("/v1") -> "$base/messages"

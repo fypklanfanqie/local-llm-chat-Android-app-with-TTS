@@ -19,9 +19,7 @@ class NativeGenerationSummaryTest {
 
     /** v1 wire 形态样本（Task 4）：v2 新字段缺省，用于验证向后兼容回填。 */
     private fun sampleJson(reason: String): String =
-        """{"v":1,"completionReason":"$reason","promptTokens":120,"generatedTokens":45,"""" +
-            """"prefillUs":900000,"decodeUs":450000,"reuseKv":1,"callbackCount":9,"callbackBytes":360,"""" +
-            """"firstDeltaUs":950000,"errorStage":null,"errorMessage":null}"""
+        """{"v":1,"completionReason":"$reason","promptTokens":120,"generatedTokens":45,"prefillUs":900000,"decodeUs":450000,"reuseKv":1,"callbackCount":9,"callbackBytes":360,"firstDeltaUs":950000,"errorStage":null,"errorMessage":null}"""
 
     /** v2 wire 形态样本（Task 1）：含全部 v2 新字段（native mnn_jni.cpp v2 摘要的输出形态）。 */
     private fun sampleJsonV2(
@@ -31,14 +29,8 @@ class NativeGenerationSummaryTest {
         reasoningEndUs: Long? = 123456L,
         firstBodyDeltaUs: Long? = 234567L,
         errorCode: String? = null,
-    ): String = buildString {
-        append("""{"v":2,"completionReason":"$reason","promptTokens":120,"generatedTokens":45,"""")
-        append(""""prefillUs":900000,"decodeUs":450000,"reuseKv":1,"callbackCount":9,"callbackBytes":360,"""")
-        append(""""firstDeltaUs":950000,"errorStage":null,"errorMessage":null,""")
-        append(""""decodeStepTokens":$decodeStepTokens,"thinkingConfigAccepted":$thinkingConfigAccepted,""")
-        append(""""reasoningEndUs":${reasoningEndUs ?: "null"},"firstBodyDeltaUs":${firstBodyDeltaUs ?: "null"},""")
-        append(""""errorCode":${errorCode?.let { "\"$it\"" } ?: "null"}}""")
-    }
+    ): String =
+        """{"v":2,"completionReason":"$reason","promptTokens":120,"generatedTokens":45,"prefillUs":900000,"decodeUs":450000,"reuseKv":1,"callbackCount":9,"callbackBytes":360,"firstDeltaUs":950000,"errorStage":null,"errorMessage":null,"decodeStepTokens":$decodeStepTokens,"thinkingConfigAccepted":$thinkingConfigAccepted,"reasoningEndUs":${reasoningEndUs ?: "null"},"firstBodyDeltaUs":${firstBodyDeltaUs ?: "null"},"errorCode":${errorCode?.let { "\"$it\"" } ?: "null"}}"""
 
     @Test
     fun parsesEveryCompletionReason() {
@@ -90,8 +82,7 @@ class NativeGenerationSummaryTest {
 
     @Test
     fun missingOptionalFieldsTolerated() {
-        val json = """{"v":1,"completionReason":"EOS","promptTokens":1,"generatedTokens":1,"""" +
-            """"prefillUs":1,"decodeUs":1,"reuseKv":0,"callbackCount":1,"callbackBytes":4}"""
+        val json = """{"v":1,"completionReason":"EOS","promptTokens":1,"generatedTokens":1,"prefillUs":1,"decodeUs":1,"reuseKv":0,"callbackCount":1,"callbackBytes":4}"""
         val s = NativeGenerationSummary.parse(json)
         assertNotNull(s)
         assertNull(s!!.firstDeltaUs)

@@ -32,9 +32,16 @@ data class ModelProvider(
 const val FREE_PROVIDER_ID = "siliconflow-free"
 const val FREE_PROVIDER_BASE_URL = "https://siliconflow-free-proxy.lanfanqie.workers.dev/v1"
 
-/** 判断 baseUrl 是否为内置「免费对话」代理地址（空 key 豁免用；忽略尾斜杠与大小写）。 */
+/** 自定义供应商在每供应商配置 map 中的槽位键（当前 UI 仅支持一个自定义配置）。 */
+const val CUSTOM_PROVIDER_KEY = "custom"
+
+/**
+ * 判断 baseUrl 是否为内置「免费对话」代理地址（空 key 豁免用；忽略大小写与污染）。
+ * 两侧都经 [normalizeBaseUrl]：存量被污染的免费地址（如尾缀 https）若不归一化，
+ * 会先因 key 豁免失败弹「请先配置 API Key」，根本到不了 buildEndpoint。
+ */
 fun isFreeProxyBaseUrl(baseUrl: String): Boolean =
-    baseUrl.trimEnd('/').equals(FREE_PROVIDER_BASE_URL.trimEnd('/'), ignoreCase = true)
+    normalizeBaseUrl(baseUrl).equals(normalizeBaseUrl(FREE_PROVIDER_BASE_URL), ignoreCase = true)
 
 val PRESET_PROVIDERS: List<ModelProvider> = listOf(
     ModelProvider(

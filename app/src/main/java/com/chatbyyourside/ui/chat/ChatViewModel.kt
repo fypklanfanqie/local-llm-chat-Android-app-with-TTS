@@ -259,8 +259,11 @@ class ChatViewModel(
                 characterRole = char.role,
                 characterImage = imageUrl,
                 watermarkName = char.watermarkName,
-                // 自定义角色也允许 TTS（朗读按钮显示），音色由角色音色映射按 characterId 选取
-                ttsEnabled = char.ttsEnabled || char.isCustom,
+                // 所有角色都显示朗读按钮：音色由「设置 → 角色双语音色」按 characterId 配置，
+                // 云端引擎未配置 speaker_id 时回落默认音色（见 TtsManager.speakCloud）；
+                // 系统引擎对所有角色可用。不再用 char.ttsEnabled 隐藏按钮（仅部分角色设置了该标记，
+                // 其余角色按钮会消失导致无法朗读）。
+                ttsEnabled = true,
                 subtitleJp = char.voiceLines?.jp ?: "",
                 subtitleCn = char.voiceLines?.cn ?: "",
             )
@@ -653,6 +656,13 @@ class ChatViewModel(
             return
         }
 
+        // 用户发送新消息：停止正在播放的（自动）朗读，避免旧回复继续出声；清理朗读状态与字幕。
+        ttsJob?.cancel()
+        container.ttsManager.stopAll()
+        _uiState.update {
+            it.copy(ttsLoadingIndex = -1, ttsPlayingIndex = -1, ttsSubtitleJp = "", ttsSubtitleCn = "")
+        }
+
         // Task 7：为本次生成分配唯一请求序号，防止迟到 finally 清掉新一轮流式状态。
         val generationId = ++generationCounter
         latestAccumulated = ""
@@ -1024,6 +1034,12 @@ class ChatViewModel(
                 activeGenerationId = null,
             )
         }
+
+        // 自动朗读新回复（设置「自动朗读新回复」开启时）：复用手动朗读链路朗读刚渲染的助手回复；
+        // 失败静默（不弹错误横幅打断对话）。
+        if (runCatching { container.settingsRepository.getTtsAutoReadNow() }.getOrDefault(false)) {
+            autoReadAssistant(assistantDisplay)
+        }
     }
 
     /**
@@ -1224,6 +1240,61 @@ class ChatViewModel(
                         ttsSubtitleJp = "",
                         ttsSubtitleCn = "",
                         errorMessage = "TTS 失败: ${e.message}",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 自动朗读新回复（设置「自动朗读新回复」开启时由 finalizeAssistant 触发）。
+     * 复用 [playTts] 的朗读链路（语言处理/字幕/状态），但**不做 toggle-off 判停**：
+     * 新回复到达即朗读，替代可能正在播放的旧朗读（TtsManager.speak 内部 stopAll）。
+     * 朗读失败静默（不弹错误横幅打断对话）。
+     */
+    fun autoReadAssistant(message: DisplayMessage) {
+        val cleanText = container.ttsManager.cleanTtsText(message.content)
+        if (cleanText.isBlank()) return
+        ttsJob = viewModelScope.launch {
+            try {
+                _uiState.update { it.copy(ttsLoadingIndex = it.messages.indexOf(message), showSwitchSubtitle = false) }
+                val lang = container.settingsRepository.getTtsLanguageNow()
+                val engine = container.settingsRepository.getTtsEngineNow()
+                val speakText = if (lang == TtsLanguage.JA && engine == TtsEngine.CLOUD) {
+                    try {
+                        translateToJapanese(cleanText)
+                    } catch (e: Exception) {
+                        cleanText
+                    }
+                } else {
+                    cleanText
+                }
+                _uiState.update {
+                    it.copy(
+                        ttsPlayingIndex = it.messages.indexOf(message),
+                        ttsSubtitleCn = cleanText,
+                        ttsSubtitleJp = if (lang == TtsLanguage.JA) speakText else "",
+                    )
+                }
+                container.ttsManager.speak(speakText, _uiState.value.characterId)
+                _uiState.update {
+                    it.copy(
+                        ttsLoadingIndex = -1,
+                        ttsPlayingIndex = -1,
+                        ttsSubtitleJp = "",
+                        ttsSubtitleCn = "",
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 自动朗读失败静默：不弹错误横幅打断对话。
+                _uiState.update {
+                    it.copy(
+                        ttsLoadingIndex = -1,
+                        ttsPlayingIndex = -1,
+                        ttsSubtitleJp = "",
+                        ttsSubtitleCn = "",
                     )
                 }
             }

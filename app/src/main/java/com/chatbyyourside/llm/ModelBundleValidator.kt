@@ -21,8 +21,13 @@ import java.io.File
  */
 object ModelBundleValidator {
 
-    /** 必需的 MNN 默认文件（config.json 未显式引用时仍要求存在）。 */
-    private val DEFAULT_REQUIRED = listOf("llm.mnn", "llm.mnn.weight", "tokenizer.txt")
+    /**
+     * 必需的 MNN 默认文件（config.json 未显式引用时仍要求存在）。
+     * 仅 llm.mnn 图文件无条件必需：权重（llm.mnn.weight）与 tokenizer.txt 在部分 MNN 转换里内嵌于
+     * llm.mnn（下载侧对缺 weight 也只告警"可能内嵌"，不阻断；tokenizer 同理可能用 tokenizer.mtok/json），
+     * 故二者只在 config.json 显式引用时校验；未引用即视为内嵌、缺失容忍，避免误报「缺少必需文件」。
+     */
+    private val DEFAULT_REQUIRED = listOf("llm.mnn")
 
     /** 引用路径值的文件扩展（用于从 config JSON 收集引用路径）。 */
     private val REFERENCED_EXTENSIONS = listOf(
