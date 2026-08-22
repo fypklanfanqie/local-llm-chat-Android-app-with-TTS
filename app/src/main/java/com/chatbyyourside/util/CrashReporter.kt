@@ -282,11 +282,40 @@ object CrashWatchdog {
     private const val DIR_NAME = "startup_journal"
     private const val MARKER_STARTED = "started"
     private const val MARKER_LOADED = "loaded"
+    private const val MARKER_STREAK = "crash_streak"
+
+    /** 进入「崩溃循环安全模式」的连续崩溃次数阈值：连续 2 次启动窗口内崩溃 -> 降级启动。 */
+    internal const val SAFE_MODE_THRESHOLD = 2
 
     /** 上次启动是否在加载窗口内异常退出（检查当下即代表上一次进程的状态）。 */
     fun hasCrashedLastLaunch(context: Context): Boolean = try {
         val dir = journalDir(context)
         File(dir, MARKER_STARTED).exists() && !File(dir, MARKER_LOADED).exists()
+    } catch (_: Throwable) {
+        false
+    }
+
+    /**
+     * 更新连续崩溃计数（主进程 Application.onCreate 时调用；探测进程已短路，不参与）。
+     * 上次启动在加载窗口内崩溃 -> 计数 +1；正常走完 -> 归零。计数持久化到 startup_journal。
+     */
+    fun updateCrashStreak(context: Context): Int = try {
+        val dir = journalDir(context)
+        dir.mkdirs()
+        val file = File(dir, MARKER_STREAK)
+        val prev = runCatching { file.readText().trim().toInt() }.getOrDefault(0)
+        val next = if (hasCrashedLastLaunch(context)) prev + 1 else 0
+        file.writeText(next.toString())
+        next
+    } catch (_: Throwable) {
+        0
+    }
+
+    /** 是否已进入「崩溃循环安全模式」：连续 [SAFE_MODE_THRESHOLD] 次启动窗口内崩溃。 */
+    fun isCrashLoopSafeMode(context: Context): Boolean = try {
+        val file = File(journalDir(context), MARKER_STREAK)
+        val streak = runCatching { file.readText().trim().toInt() }.getOrDefault(0)
+        streak >= SAFE_MODE_THRESHOLD
     } catch (_: Throwable) {
         false
     }

@@ -76,6 +76,16 @@ class ChatApp : Application() {
         // OpenClProbeService 的 companion init 独立加载，不依赖本 onCreate。
         if (isMnnProbeProcess()) return
 
+        // 崩溃循环安全模式（Track A3）：主进程每次启动先更新「连续启动窗口内崩溃」计数。
+        // 连续 2 次启动即崩溃 -> 本次降级启动：跳过空闲 OpenCL 探测（起隔离进程碰 GPU 驱动）
+        // 与问候/群聊后台调度（WorkManager 入队 + 精确闹钟），只保留最轻的 UI 启动路径，
+        // 保证 App 能打开、崩溃日志引导能弹出——把「点图标必闪退」变成「能进来自我修复」。
+        val crashLoopSafeMode = CrashWatchdog.updateCrashStreak(this) >= CrashWatchdog.SAFE_MODE_THRESHOLD
+        if (crashLoopSafeMode) {
+            Log.w(TAG, "连续启动崩溃，进入安全模式：跳过空闲 OpenCL 探测与后台调度")
+            CrashReporter.logEvent(this, "startup", "safe_mode 降级启动（连续崩溃）")
+        }
+
         container = AppContainer(this)
 
         // 启动同步初始化整体兜底（Track B3）：通知渠道创建 / 生命周期观察 / 空闲 OpenCL 探测
@@ -90,26 +100,31 @@ class ChatApp : Application() {
             InferenceForegroundService.createChannel(this)
             AppLifecycleObserver.register(this)
             // Task 15/16：前台空闲时只做轻量 OpenCL 探测（绝不自动加载模型/预热）。
-            container.startIdleOpenClProbe(appScope)
+            // 崩溃循环安全模式：跳过探测（起隔离进程 + 驱动初始化，降级时不做）。
+            if (!crashLoopSafeMode) {
+                container.startIdleOpenClProbe(appScope)
+            }
         }.onFailure { e ->
             Log.w(TAG, "启动同步初始化部分失败（非致命）：${e.message}")
             CrashReporter.logEvent(this, "startup", "启动同步初始化失败: ${e.message}")
         }
         // Task 15/16：内存压力安全网（关键 trim/低内存时释放模型；生成中延迟释放）。
         registerComponentCallbacks(memoryPressureCallbacks)
-        appScope.launch {
-            try {
-                GreetingScheduler.ensureScheduled(this@ChatApp, container.settingsRepository)
-            } catch (e: Exception) {
-                Log.w(TAG, "角色问候后台调度初始化失败（非致命）：${e.message}")
+        if (!crashLoopSafeMode) {
+            appScope.launch {
+                try {
+                    GreetingScheduler.ensureScheduled(this@ChatApp, container.settingsRepository)
+                } catch (e: Exception) {
+                    Log.w(TAG, "角色问候后台调度初始化失败（非致命）：${e.message}")
+                }
             }
-        }
-        // 群聊自动聊天：后台调度链（仅云端可用，按 next_fire_at + 精确闹钟触发）
-        appScope.launch {
-            try {
-                GroupChatScheduler.ensureScheduled(this@ChatApp, container.settingsRepository)
-            } catch (e: Exception) {
-                Log.w(TAG, "群聊后台调度初始化失败（非致命）：${e.message}")
+            // 群聊自动聊天：后台调度链（仅云端可用，按 next_fire_at + 精确闹钟触发）
+            appScope.launch {
+                try {
+                    GroupChatScheduler.ensureScheduled(this@ChatApp, container.settingsRepository)
+                } catch (e: Exception) {
+                    Log.w(TAG, "群聊后台调度初始化失败（非致命）：${e.message}")
+                }
             }
         }
         // Task 6：恢复 Seedance 视频流水线（复位进程中断残留的进行中状态 + 重入队可自动认领任务）。幂等，异步。
