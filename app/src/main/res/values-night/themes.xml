@@ -1,0 +1,11 @@
+<resources>
+    <!-- 启动壳主题（夜间覆盖）：values/themes.xml 恒 windowLightStatusBar=true，
+         夜间启动窗口底色为近黑（@color/app_bg night 变体 #07080C），深色状态栏图标不可见；
+         此处关闭亮色图标标记，让系统用白色图标。运行时由 ChatTheme 的 SideEffect 接管同步。 -->
+    <style name="Theme.ChatByYourSide" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">@color/app_bg</item>
+        <item name="android:navigationBarColor">@color/app_bg</item>
+        <item name="android:windowBackground">@color/app_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
