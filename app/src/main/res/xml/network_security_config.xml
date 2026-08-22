@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    网络安全配置（API 24+，优先级高于 usesCleartextTraffic）。
+
+    默认禁止明文 HTTP：本应用全部自有端点（LLM 供应商、火山 TTS、ModelScope/
+    hf-mirror/HuggingFace 模型源、Cloudflare Worker 代理）均为 HTTPS。
+
+    唯一例外：网易云音乐外链。music.163.com 的歌曲外链
+    （/song/media/outer/url）会 302 到 http:// 明文地址，ExoPlayer 跟随
+    重定向时受平台明文检查约束，须放行；CDN 命中域名在 music.126.net 下。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">music.163.com</domain>
+        <domain includeSubdomains="true">music.126.net</domain>
+    </domain-config>
+</network-security-config>
