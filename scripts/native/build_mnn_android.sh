@@ -173,7 +173,12 @@ log "installing MNN (headers + libMNN.so)"
 "$CMAKE_BIN" --install "$MNN_BUILD" --component headers 2>/dev/null || true
 # Ensure lib + include are where the JNI build expects them.
 mkdir -p "$MNN_INSTALL/lib" "$MNN_INSTALL/include"
-cp -f "$MNN_BUILD"/libMNN.so "$MNN_INSTALL/lib/libMNN.so"
+# 部分上游 CMake 布局会把产物放进多配置子目录（如 OFF/arm64-v8a/、Release/），
+# 单配置路径 $MNN_BUILD/libMNN.so 未必存在 —— find 兜底取最新链接产物。
+BUILT_LIBMNN="$(find "$MNN_BUILD" -name 'libMNN.so' -type f -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+[[ -n "$BUILT_LIBMNN" ]] || die "libMNN.so not found under $MNN_BUILD after build"
+log "copying libMNN.so from ${BUILT_LIBMNN#$STAGING/}"
+cp -f "$BUILT_LIBMNN" "$MNN_INSTALL/lib/libMNN.so"
 # MNN installs headers under include/; if install did not copy them, copy manually.
 if [[ ! -f "$MNN_INSTALL/include/llm/llm.hpp" ]]; then
     log "copying MNN headers manually"
