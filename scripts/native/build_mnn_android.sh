@@ -149,6 +149,13 @@ MNN_CMAKE_FLAGS=(
     -DCMAKE_INSTALL_PREFIX="$MNN_INSTALL"
     # MNN features
     -DMNN_BUILD_LLM=ON
+    # 关键：上游默认 MNN_SEP_BUILD=ON，会把 llm 构建成独立库且不链入 libMNN.so，
+    # --target MNN 时 transformers/llm 完全不编译 → JNI 链接期 Llm 符号全部 undefined。
+    # OFF 让 llm 以 OBJECT 库链进 libMNN.so（与生产 jniLibs 的 7.4MB 产物一致）。
+    -DMNN_SEP_BUILD=OFF
+    # 上游变量名是 MNN_BUILD_SHARED_LIBS（带 S）；此前传的 MNN_BUILD_SHARED_LIB 是
+    # 拼写错误（CMake "Manually-specified variables were not used" 警告可证）。
+    -DMNN_BUILD_SHARED_LIBS=ON
     -DMNN_LOW_MEMORY=ON
     -DMNN_CPU_WEIGHT_DEQUANT_GEMM=ON
     -DMNN_TRANSFORMERS_FUSE=ON
@@ -156,10 +163,9 @@ MNN_CMAKE_FLAGS=(
     -DMNN_OPENCL=ON
     -DMNN_BUILD_QNN=OFF
     -DMNN_VULKAN=OFF
-    # 16 KiB page support (Android 15 flexible page sizes)
-    -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON
+    # 16 KiB page support：NDK r26 无 ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES 变量
+    # （那是 NDK r27+ 的开关），实际对齐由下方 PAGE_FLAG 链接器参数保证。
     -DCMAKE_SHARED_LINKER_FLAGS="$PAGE_FLAG"
-    -DMNN_BUILD_SHARED_LIB=ON
     -DMNN_BUILD_DEMO=OFF
     -DMNN_BUILD_TESTS=OFF
     -DMNN_BUILD_TOOLS=OFF
