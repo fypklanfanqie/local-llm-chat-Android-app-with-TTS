@@ -37,3 +37,5 @@ backup/
 # Python cache
 __pycache__/
 *.pyc
+# gnhf 本夜运行元数据(本地,不提交)
+.gnhf/

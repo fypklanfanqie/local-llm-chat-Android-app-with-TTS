@@ -1,7 +1,10 @@
 package com.chatbyyourside.util
 
+import android.content.ContentResolver
+import android.content.ContentValues
 import android.content.Context
 import android.os.Build
+import android.provider.MediaStore
 import android.util.Log
 import java.io.File
 import java.io.PrintWriter
@@ -34,12 +37,18 @@ object CrashReporter {
     private const val TAG = "CrashReporter"
     private const val DIR_NAME = "crash"
 
+    /** 公共 Download 镜像子目录（MediaStore RELATIVE_PATH = Download/ChatLogs/）。 */
+    private const val PUBLIC_DIR_NAME = "ChatLogs"
+
     /** 镜像目录保留的最新日志份数上限（防无限膨胀；文件名含时间戳，按名排序即按时间）。 */
     private const val MIRROR_MAX_FILES = 20
 
     private val installed = AtomicBoolean(false)
     private var crashDir: File? = null
     private var externalMirrorDir: File? = null
+    /** 公共 Download 镜像用 applicationContext（install 时缓存；null = 未安装或 API<29）。 */
+    @Volatile
+    private var appContext: Context? = null
 
     /**
      * 安装全局崩溃 handler。应在 Application.onCreate 最开头调用（含 `:mnn_probe` 进程），
@@ -52,6 +61,11 @@ object CrashReporter {
         crashDir = File(context.filesDir, DIR_NAME)
         externalMirrorDir = try {
             context.getExternalFilesDir(null)?.let { File(it, DIR_NAME) }
+        } catch (_: Throwable) {
+            null
+        }
+        appContext = try {
+            context.applicationContext
         } catch (_: Throwable) {
             null
         }
@@ -74,14 +88,17 @@ object CrashReporter {
 
     /** 手动记录一条事件日志（非崩溃，如启动初始化异常兜底），与崩溃日志同目录。 */
     fun logEvent(context: Context, tag: String, message: String) {
-        try {
+        val file: File? = try {
             val dir = crashDir ?: File(context.filesDir, DIR_NAME).also { crashDir = it }
             dir.mkdirs()
-            val file = File(dir, "event_${timestamp()}.log")
-            file.writeText(buildLogHeader() + "\n[$tag] $message\n")
+            val f = File(dir, "event_${timestamp()}.log")
+            f.writeText(buildLogHeader() + "\n[$tag] $message\n")
+            f
         } catch (_: Exception) {
-            // 记录失败不影响主流程
-        }
+            null  // 记录失败不影响主流程
+        } ?: return
+        mirrorToExternal(file)
+        mirrorToPublicDownloads(file)
     }
 
     private fun writeCrash(thread: Thread, throwable: Throwable) {
@@ -98,6 +115,7 @@ object CrashReporter {
         pw.flush()
         file.writeText(sw.toString())
         mirrorToExternal(file)
+        mirrorToPublicDownloads(file)
         Log.e(TAG, "崩溃日志已写入 ${file.absolutePath}")
     }
 
@@ -110,6 +128,92 @@ object CrashReporter {
             trimMirror(mirror)
         } catch (_: Throwable) {
             // 镜像失败不追溯：内部日志已落盘，设置页仍可见
+        }
+    }
+
+    /**
+     * 公共 Download 镜像（API 29+ MediaStore，无需任何存储权限）：把崩溃/事件日志写入
+     * `Download/ChatLogs/`，OPPO/vivo 用户用**自带文件管理器**即可直接看到并发给开发者——
+     * 解决「App 打不开 → 设置页不可达；Android/data 被 MTP/厂商文件管理器屏蔽」的取证死角。
+     *
+     * - 仅 API 29+：MediaStore.Downloads 自 Q 起可用且 scoped storage 下 app 无需权限即可
+     *   写入自己的贡献；API 24-28 走 legacy 直写公共目录需 WRITE_EXTERNAL_STORAGE 运行时
+     *   权限（已随 da6ff6e 移除，不为其回加），低版本保持仅内部+外部私有镜像双通道。
+     * - 同名文件跳过（IS_PENDING 发布后重复崩溃极少同名——名字带毫秒时间戳）；写入全程
+     *   独立 try/catch，失败不影响内部落盘主流程。
+     * - 超限清理 [trimPublicDownloads]：只删本应用自己创建的条目（owner 匹配，API 29+
+     *   允许 app 删除自己的 MediaStore 贡献，无需用户确认）。
+     */
+    private fun mirrorToPublicDownloads(file: File) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val context = appContext ?: return
+        try {
+            val resolver = context.contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "chatbyyourside_${file.name}")
+                put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                put(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    "Download/${PUBLIC_DIR_NAME}",
+                )
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: return  // 插入被 ROM 拒绝：放弃公共镜像，内部日志仍在
+            resolver.openOutputStream(uri)?.use { out ->
+                file.inputStream().use { it.copyTo(out) }
+            } ?: run {
+                // 打不开输出流：清掉半截 pending 条目再返回
+                runCatching { resolver.delete(uri, null, null) }
+                return
+            }
+            values.clear()
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            trimPublicDownloads(resolver)
+        } catch (_: Throwable) {
+            // 公共镜像失败不追溯：内部 + Android/data 双通道已尽力
+        }
+    }
+
+    /** 公共 Download 目录保留最新 [MIRROR_MAX_FILES] 份，只删本应用创建的条目。 */
+    private fun trimPublicDownloads(resolver: ContentResolver) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        try {
+            val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            val projection = arrayOf(
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.OWNER_PACKAGE_NAME,
+            )
+            val pkg = appContext?.packageName
+            resolver.query(
+                collection,
+                projection,
+                "${MediaStore.MediaColumns.RELATIVE_PATH}=?",
+                arrayOf("Download/${PUBLIC_DIR_NAME}/"),
+                "${MediaStore.MediaColumns.DATE_ADDED} DESC",
+            )?.use { cursor ->
+                // OWNER_PACKAGE_NAME 个别 ROM 可能缺列：缺列即放弃清理（宁多留不误删）。
+                val idCol = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+                val ownerCol = cursor.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
+                if (idCol < 0 || ownerCol < 0) return
+                var seen = 0
+                while (cursor.moveToNext()) {
+                    seen++
+                    val isOurs = cursor.getString(ownerCol) == pkg
+                    if (seen > MIRROR_MAX_FILES && isOurs) {
+                        val id = cursor.getLong(idCol)
+                        runCatching {
+                            resolver.delete(
+                                android.content.ContentUris.withAppendedId(collection, id),
+                                null, null,
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+            // 清理失败不影响主流程：最坏情况是 Download/ChatLogs 多积几份日志
         }
     }
 
