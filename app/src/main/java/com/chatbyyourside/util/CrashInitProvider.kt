@@ -53,6 +53,9 @@ class CrashInitProvider : ContentProvider() {
         // 污染主进程阶段判定。
         try {
             if (!ProcessNameUtil.currentProcessName().endsWith(":mnn_probe")) {
+                // 归档「上次启动最后到达的阶段」——必须在写本次 phase 之前（最早代码时机），
+                // 供 hasCrashedLastLaunch 判定「死在 ContentProvider/Application 阶段」窗口。
+                CrashWatchdog.archiveLastPhase(appContext)
                 CrashWatchdog.markPhase(appContext, CrashWatchdog.PHASE_PROVIDER)
             }
         } catch (e: Throwable) {

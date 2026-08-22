@@ -297,6 +297,9 @@ object CrashWatchdog {
     private const val MARKER_LOADED = "loaded"
     private const val MARKER_STREAK = "crash_streak"
     private const val MARKER_PHASE = "phase"
+    /** 上次启动最后到达的阶段（markPhase 覆盖前归档；崩溃窗口判定用——本次启动的 provider
+     *  标记会覆盖 phase，必须从归档读上次的真相）。 */
+    private const val MARKER_LAST_PHASE = "last_phase"
 
     /** 启动阶段名（写 phase 标记）：provider（ContentProvider 阶段）-> application -> activity -> loaded。 */
     internal const val PHASE_PROVIDER = "provider"
@@ -307,10 +310,27 @@ object CrashWatchdog {
     /** 进入「崩溃循环安全模式」的连续崩溃次数阈值：连续 2 次启动窗口内崩溃 -> 降级启动。 */
     internal const val SAFE_MODE_THRESHOLD = 2
 
-    /** 上次启动是否在加载窗口内异常退出（检查当下即代表上一次进程的状态）。 */
+    /**
+     * 上次启动是否在启动窗口内异常退出（检查当下即代表上一次进程的状态）。
+     *
+     * 双窗口判定：
+     * 1. 旧语义：`started` 在且 `loaded` 不在 —— MainActivity 已到但加载未完成（Activity/首帧窗口）。
+     * 2. 新语义（Track A4）：last_phase 归档停在 provider/application/activity —— 死在
+     *    ContentProvider 或 Application.onCreate 阶段（「点图标即闪退」最可能的窗口，
+     *    此时 started/loaded 是上上轮的值，旧判定会漏检）。归档由最早代码 CrashInitProvider
+     *    在写本次 phase 前完成，避免被本次标记污染。
+     *
+     * 兼容性：last_phase 缺失（旧版本升级或首次安装）-> 只走旧判定，不误判。
+     */
     fun hasCrashedLastLaunch(context: Context): Boolean = try {
         val dir = journalDir(context)
-        File(dir, MARKER_STARTED).exists() && !File(dir, MARKER_LOADED).exists()
+        val started = File(dir, MARKER_STARTED).exists()
+        val loaded = File(dir, MARKER_LOADED).exists()
+        if (started && !loaded) true
+        else when (lastArchivedPhase(context)) {
+            PHASE_PROVIDER, PHASE_APPLICATION, PHASE_ACTIVITY -> true
+            else -> false
+        }
     } catch (_: Throwable) {
         false
     }
@@ -324,6 +344,33 @@ object CrashWatchdog {
         } catch (_: Throwable) {
             // 阶段标记失败不影响启动主流程
         }
+    }
+
+    /**
+     * 归档「上次启动最后到达的阶段」（phase -> last_phase，只应由最早代码 CrashInitProvider
+     * 在写任何本次 phase 之前调用一次）。此后本次启动的 provider/application/... 覆盖 phase，
+     * 但 last_phase 保留上次的真相，供 [hasCrashedLastLaunch] 判定「死在 ContentProvider/
+     * Application 阶段」窗口（此时 started/loaded 是上上轮的值，旧判定漏检）。
+     */
+    fun archiveLastPhase(context: Context) {
+        try {
+            val dir = journalDir(context)
+            val phaseFile = File(dir, MARKER_PHASE)
+            if (phaseFile.exists()) {
+                dir.mkdirs()
+                phaseFile.copyTo(File(dir, MARKER_LAST_PHASE), overwrite = true)
+            }
+        } catch (_: Throwable) {
+            // 归档失败不影响启动主流程
+        }
+    }
+
+    /** 上次启动最后到达的阶段（last_phase 归档；读失败/缺失返回 null）。 */
+    fun lastArchivedPhase(context: Context): String? = try {
+        val file = File(journalDir(context), MARKER_LAST_PHASE)
+        if (file.exists()) file.readText().trim() else null
+    } catch (_: Throwable) {
+        null
     }
 
     /** 当前 phase 标记内容（崩溃日志头部用；读失败返回 unknown）。 */
