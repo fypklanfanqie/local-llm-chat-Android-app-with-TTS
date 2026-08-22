@@ -11,6 +11,7 @@ import com.chatbyyourside.notification.GroupChatNotificationManager
 import com.chatbyyourside.service.InferenceForegroundService
 import com.chatbyyourside.ui.affinity.DailyCheckinBus
 import com.chatbyyourside.util.CrashReporter
+import com.chatbyyourside.util.CrashWatchdog
 import com.chatbyyourside.util.ProcessNameUtil
 import com.chatbyyourside.work.GreetingScheduler
 import com.chatbyyourside.work.GroupChatScheduler
