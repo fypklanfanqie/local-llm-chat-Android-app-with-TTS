@@ -3,8 +3,10 @@ package com.chatbyyourside.manager
 import android.content.Context
 import android.media.MediaPlayer
 import android.util.Log
+import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import com.chatbyyourside.data.repository.AssetRepository
 import com.chatbyyourside.data.repository.BgmTrack
@@ -19,12 +21,20 @@ import java.io.IOException
 import kotlin.random.Random
 
 /**
+ * 音频管理器。
+ *
+ * media3 的 datasource/exoplayer.source 属 UnstableApi：本文件集中使用其
+ * DefaultHttpDataSource/DefaultMediaSourceFactory 组合数据源，文件级 @OptIn 豁免。
+ */
+
+/**
  * 音频管理器
  *
  * 对应小程序 utils/audio.js：
  * - 角色语音播放（MediaPlayer）
  * - BGM 背景音乐播放（ExoPlayer）
  */
+@OptIn(UnstableApi::class)
 class AudioManager(
     private val context: Context,
     private val settings: SettingsRepository,

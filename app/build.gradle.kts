@@ -119,6 +119,15 @@ android {
             isReturnDefaultValues = true
         }
     }
+
+    lint {
+        // ProduceStateDoesNotAssignValue 误报：全部 17 处 produceState 均为合法的
+        // 「producer lambda 内 value = ...」直接赋值（BackendSettingsScreen/AffinityScreens/
+        // ModelManagerScreen）。compose-lint 的 K2 UAST 迁移期解析缺陷（检测器源码自注
+        // "K1/K2 UAST behaviors mismatch"，无法 multiResolve 到 MutableState#setValue）。
+        // 非 error 级真问题，忽略；其余 NewApi/WrongConstant 等门禁保持生效。
+        disable += "ProduceStateDoesNotAssignValue"
+    }
 }
 
 dependencies {

@@ -126,7 +126,10 @@ class CpuBoostController(private val context: Context) {
             tid: Int,
             targetDurationNanos: Long,
         ): Pair<(Long) -> Unit, () -> Unit>? {
-            val phm = context.getSystemService(Context.PERFORMANCE_HINT_SERVICE) as? PerformanceHintManager
+            // Context.PERFORMANCE_HINT_SERVICE 是 API 31 引入的常量，lint（WrongConstant）
+            // 在 minSdk 24 下要求内联字面量；值即 "performancehint"（该方法仅在 @RequiresApi(S) 的
+            // HintApi31 内被调用，低版本不会触达）。
+            val phm = context.getSystemService("performancehint") as? PerformanceHintManager
                 ?: run {
                     Log.w(TAG, "PerformanceHintManager service unavailable")
                     return null

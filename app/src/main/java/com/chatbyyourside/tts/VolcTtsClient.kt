@@ -22,7 +22,6 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody
 import java.io.ByteArrayOutputStream
-import java.util.Base64
 import java.util.UUID
 
 /**
@@ -153,7 +152,9 @@ class VolcTtsClient(
             val data = obj["data"]?.jsonPrimitive?.contentOrNull
             if (!data.isNullOrEmpty()) {
                 try {
-                    output.write(Base64.getMimeDecoder().decode(data.replace(Regex("\\s"), "")))
+                    // android.util.Base64（API 1+）：DEFAULT 严格解码；数据已剥空白，
+                    // MIME 容错语义由预处理替代（java.util.Base64 需 API 26，minSdk 24 不可用）
+                    output.write(android.util.Base64.decode(data.replace(Regex("\\s"), ""), android.util.Base64.DEFAULT))
                 } catch (_: IllegalArgumentException) {
                     throw Exception("火山引擎返回了非法 Base64 音频数据")
                 }
