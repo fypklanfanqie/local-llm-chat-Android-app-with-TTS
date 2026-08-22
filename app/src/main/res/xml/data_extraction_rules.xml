@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    数据提取规则（Android 12+，dataExtractionRules）：
+    cloud-backup = Google 云备份；device-transfer = 换机迁移。
+    与 backup_rules.xml（API ≤ 30）语义一致：凭据类 DataStore 与本机诊断日志不迁移，
+    聊天数据库保留。未声明的文件默认参与备份/迁移。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="datastore/rhodes_settings.preferences_pb" />
+        <exclude domain="file" path="datastore/health_store.preferences_pb" />
+        <exclude domain="file" path="datastore/certification_store.preferences_pb" />
+        <exclude domain="file" path="datastore/benchmark_store.preferences_pb" />
+        <exclude domain="file" path="crash" />
+        <exclude domain="file" path="startup_journal" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="datastore/rhodes_settings.preferences_pb" />
+        <exclude domain="file" path="datastore/health_store.preferences_pb" />
+        <exclude domain="file" path="datastore/certification_store.preferences_pb" />
+        <exclude domain="file" path="datastore/benchmark_store.preferences_pb" />
+        <exclude domain="file" path="crash" />
+        <exclude domain="file" path="startup_journal" />
+    </device-transfer>
+</data-extraction-rules>

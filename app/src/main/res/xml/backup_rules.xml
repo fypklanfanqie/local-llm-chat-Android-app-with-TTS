@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    自动备份规则（Android 8-11，fullBackupContent）。
+
+    排除项：
+    - DataStore 凭据类存储：rhodes_settings 含云端 API Key、火山 TTS 凭据，
+      health/certification/benchmark 为设备指纹键控数据，换机还原会因指纹失配而失效，
+      还原明文凭据到新设备也有泄露面；
+    - crash/ 与 startup_journal/：崩溃日志属本机诊断信息，无迁移价值。
+    保留项：databases/rhodes_chat.db（聊天历史）随系统自动备份迁移。
+-->
+<full-backup-content>
+    <exclude domain="file" path="datastore/rhodes_settings.preferences_pb" />
+    <exclude domain="file" path="datastore/health_store.preferences_pb" />
+    <exclude domain="file" path="datastore/certification_store.preferences_pb" />
+    <exclude domain="file" path="datastore/benchmark_store.preferences_pb" />
+    <exclude domain="file" path="crash" />
+    <exclude domain="file" path="startup_journal" />
+</full-backup-content>
