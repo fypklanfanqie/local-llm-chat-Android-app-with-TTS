@@ -33,8 +33,14 @@ class ConversationTextExporterTest {
 
     @Test
     fun suggestedNameSanitizesProviderUnsafeCharacters() {
+        // 期望值按运行时默认时区动态构造：suggestedExportBaseName 内部用
+        // SimpleDateFormat（无显式 TimeZone），CI runner 为 UTC 而开发机为 +8，
+        // 硬编码时刻字符串会随执行环境时区漂移导致 ComparisonFailure。
+        val expected = "聊天记录_阿橙_行动_报告_" +
+            java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+                .format(java.util.Date(1_724_096_200_000L))
         assertEquals(
-            "聊天记录_阿橙_行动_报告_20240820_033640",
+            expected,
             suggestedExportBaseName("阿橙", "行动:报告?", 1_724_096_200_000L),
         )
     }
