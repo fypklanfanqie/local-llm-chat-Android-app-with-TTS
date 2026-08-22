@@ -3,7 +3,10 @@ package com.chatbyyourside.ui.chat
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -106,7 +109,7 @@ class SeedanceVideoCardTest {
         rule.setContent {
             SeedanceVideoCard(video = video(state = SeedanceVideoState.QUEUED), onCancel = { cancelled = true })
         }
-        rule.onNodeWithText("已排队").assertExists()
+        rule.onNodeWithText("已排队").assertIsDisplayed()
         rule.onNodeWithText("取消").performClick()
         rule.waitForIdle()
         assertTrue("点击取消后回调未触发", cancelled)
@@ -117,7 +120,7 @@ class SeedanceVideoCardTest {
         rule.setContent {
             SeedanceVideoCard(video = video(state = SeedanceVideoState.RUNNING))
         }
-        rule.onNodeWithText("正在生成…").assertExists()
+        rule.onNodeWithText("正在生成…").assertIsDisplayed()
     }
 
     @Test
@@ -129,11 +132,11 @@ class SeedanceVideoCardTest {
                 onRetry = { retried = true },
             )
         }
-        rule.onNodeWithText("查询失败").assertExists()
+        rule.onNodeWithText("查询失败").assertIsDisplayed()
         rule.onNodeWithText("继续查询").performClick()
         rule.waitForIdle()
         assertTrue("继续查询未直接触发重试", retried)
-        rule.onNodeWithText("该操作可能产生费用，确认重新生成？").assertDoesNotExist()
+        rule.onAllNodesWithText("该操作可能产生费用，确认重新生成？").assertCountEquals(0)
     }
 
     @Test
@@ -147,7 +150,7 @@ class SeedanceVideoCardTest {
         }
         rule.onNodeWithText("重新生成").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("该操作可能产生费用，确认重新生成？").assertExists()
+        rule.onNodeWithText("该操作可能产生费用，确认重新生成？").assertIsDisplayed()
         assertFalse("确认前不应触发重试", retried)
         rule.onNodeWithText("确认").performClick()
         rule.waitForIdle()
@@ -169,7 +172,7 @@ class SeedanceVideoCardTest {
         }
         rule.onNodeWithText("重新提交").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("该操作可能产生费用，确认重新生成？").assertExists()
+        rule.onNodeWithText("该操作可能产生费用，确认重新生成？").assertIsDisplayed()
         rule.onNodeWithText("确认").performClick()
         rule.waitForIdle()
         assertTrue(retried)
@@ -190,7 +193,7 @@ class SeedanceVideoCardTest {
         }
         rule.onNodeWithText("重新提交").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("该操作可能产生费用，确认重新生成？").assertDoesNotExist()
+        rule.onAllNodesWithText("该操作可能产生费用，确认重新生成？").assertCountEquals(0)
         assertTrue(retried)
     }
 
@@ -199,9 +202,9 @@ class SeedanceVideoCardTest {
         rule.setContent {
             SeedanceVideoCard(video = video(state = SeedanceVideoState.READY, errorMessage = null))
         }
-        rule.onNodeWithText("播放").assertDoesNotExist()
-        rule.onNodeWithText("全屏").assertDoesNotExist()
-        rule.onNodeWithText("保存到本地").assertDoesNotExist()
+        rule.onAllNodesWithText("播放").assertCountEquals(0)
+        rule.onAllNodesWithText("全屏").assertCountEquals(0)
+        rule.onAllNodesWithText("保存到本地").assertCountEquals(0)
     }
 
     @Test
@@ -215,9 +218,9 @@ class SeedanceVideoCardTest {
                 onExport = { exported = true },
             )
         }
-        rule.onNodeWithText("播放").assertExists()
-        rule.onNodeWithText("全屏").assertExists()
-        rule.onNodeWithText("保存到本地").assertExists()
+        rule.onNodeWithText("播放").assertIsDisplayed()
+        rule.onNodeWithText("全屏").assertIsDisplayed()
+        rule.onNodeWithText("保存到本地").assertIsDisplayed()
         rule.onNodeWithText("播放").performClick()
         rule.onNodeWithText("保存到本地").performClick()
         rule.waitForIdle()
@@ -230,7 +233,7 @@ class SeedanceVideoCardTest {
         rule.setContent {
             SeedanceVideoCard(video = video(state = SeedanceVideoState.CANCELLED))
         }
-        rule.onNodeWithText("已取消").assertExists()
+        rule.onNodeWithText("已取消").assertIsDisplayed()
     }
 
     @Test
@@ -238,6 +241,6 @@ class SeedanceVideoCardTest {
         rule.setContent {
             SeedanceVideoCard(video = video(state = SeedanceVideoState.PROMPT_PENDING))
         }
-        rule.onNodeWithText("正在构思视频…").assertExists()
+        rule.onNodeWithText("正在构思视频…").assertIsDisplayed()
     }
 }

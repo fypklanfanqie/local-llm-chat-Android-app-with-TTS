@@ -248,7 +248,7 @@ class MnnRuntimeIntegrationTest {
         assertEquals(
             "native 摘要 callbackBytes ≠ Kotlin 拼接字节数",
             summary!!.callbackBytes,
-            sb.toByteArray(Charsets.UTF_8).size.toLong(),
+            sb.toString().toByteArray(Charsets.UTF_8).size.toLong(),
         )
     }
 

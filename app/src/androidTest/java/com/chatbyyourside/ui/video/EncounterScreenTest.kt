@@ -9,8 +9,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -69,7 +72,7 @@ class EncounterScreenTest {
                     onOpenDetails = {},
                 )
             }
-            rule.onNodeWithTag(SEEDANCE_ENCOUNTER_PLAYER_TAG).assertExists()
+            rule.onNodeWithTag(SEEDANCE_ENCOUNTER_PLAYER_TAG).assertIsDisplayed()
         } finally {
             rule.runOnUiThread { player.release() }
         }
@@ -85,7 +88,7 @@ class EncounterScreenTest {
                 onOpenDetails = {},
             )
         }
-        rule.onNodeWithTag(SEEDANCE_ENCOUNTER_PLAYER_TAG).assertDoesNotExist()
+        rule.onAllNodesWithTag(SEEDANCE_ENCOUNTER_PLAYER_TAG).assertCountEquals(0)
     }
 
     @Test
@@ -100,7 +103,7 @@ class EncounterScreenTest {
                     onOpenDetails = {},
                 )
             }
-            rule.onNodeWithTag(SEEDANCE_ENCOUNTER_PLAYER_TAG).assertDoesNotExist()
+            rule.onAllNodesWithTag(SEEDANCE_ENCOUNTER_PLAYER_TAG).assertCountEquals(0)
         } finally {
             rule.runOnUiThread { player.release() }
         }
@@ -118,7 +121,7 @@ class EncounterScreenTest {
                     onOpenDetails = {},
                 )
             }
-            rule.onNodeWithTag(SEEDANCE_ENCOUNTER_PLAYER_TAG).assertDoesNotExist()
+            rule.onAllNodesWithTag(SEEDANCE_ENCOUNTER_PLAYER_TAG).assertCountEquals(0)
         } finally {
             rule.runOnUiThread { player.release() }
         }
@@ -139,10 +142,10 @@ class EncounterScreenTest {
         rule.setContent {
             EncounterVideoPage(video = v, settled = true, player = null, onOpenDetails = {})
         }
-        rule.onNodeWithText("阿米娅").assertExists()
-        rule.onNodeWithText("“今天我们去看流星雨吧”").assertExists()
-        rule.onNodeWithText("好呀，罗德岛的夜空最合适了。").assertExists()
-        rule.onNodeWithText("提示词：流星雨下的阿米娅，远景，9:16").assertExists()
+        rule.onNodeWithText("阿米娅").assertIsDisplayed()
+        rule.onNodeWithText("“今天我们去看流星雨吧”").assertIsDisplayed()
+        rule.onNodeWithText("好呀，罗德岛的夜空最合适了。").assertIsDisplayed()
+        rule.onNodeWithText("提示词：流星雨下的阿米娅，远景，9:16").assertIsDisplayed()
     }
 
     // ===== 页面动作：失败/排队/就绪 =====
@@ -159,7 +162,7 @@ class EncounterScreenTest {
                 onRetry = { retried = true },
             )
         }
-        rule.onNodeWithText("查询失败").assertExists()
+        rule.onNodeWithText("查询失败").assertIsDisplayed()
         rule.onNodeWithText("继续查询").performClick()
         rule.waitForIdle()
         assertTrue("继续查询回调未触发", retried)
@@ -177,7 +180,7 @@ class EncounterScreenTest {
                 onCancel = { cancelled = true },
             )
         }
-        rule.onNodeWithText("已排队").assertExists()
+        rule.onNodeWithText("已排队").assertIsDisplayed()
         rule.onNodeWithText("取消").performClick()
         rule.waitForIdle()
         assertTrue("取消回调未触发", cancelled)
@@ -230,7 +233,7 @@ class EncounterScreenTest {
         rule.setContent {
             EncounterVideoPage(video = v, settled = true, player = null, onOpenDetails = {})
         }
-        rule.onNodeWithContentDescription("陈 参考图").assertExists()
+        rule.onNodeWithContentDescription("陈 参考图").assertIsDisplayed()
     }
 
     // ===== 分页器：最新在前 + 仅落定页播放 + 切页让出上一页 =====
@@ -269,7 +272,7 @@ class EncounterScreenTest {
             // 第一页（最新）自动播放
             assertEquals("应自动播放最新视频", newest.localVideoPath, controller.activePath.value)
             assertTrue("最新视频应处于播放状态", controller.player.playWhenReady)
-            rule.onNodeWithText("最新任务").assertExists()
+            rule.onNodeWithText("最新任务").assertIsDisplayed()
             // 同一时刻至多一个 PlayerView 表面（仅落定页挂载）
             rule.onAllNodesWithTag(SEEDANCE_ENCOUNTER_PLAYER_TAG).assertCountEquals(1)
         } finally {
@@ -329,7 +332,7 @@ class EncounterScreenTest {
             rule.waitForIdle()
             assertEquals("切页后应播放第二页", second.localVideoPath, controller.activePath.value)
             assertTrue("第二页应处于播放状态", controller.player.playWhenReady)
-            rule.onNodeWithText("第二页").assertExists()
+            rule.onNodeWithText("第二页").assertIsDisplayed()
             rule.onAllNodesWithTag(SEEDANCE_ENCOUNTER_PLAYER_TAG).assertCountEquals(1)
         } finally {
             rule.runOnUiThread { controller.release() }
@@ -386,7 +389,7 @@ class EncounterScreenTest {
             rule.waitForIdle()
             rule.onAllNodesWithTag(SEEDANCE_ENCOUNTER_PLAYER_TAG).assertCountEquals(0)
             assertFalse("落定到非 READY 页应暂停", controller.isPlaying.value)
-            rule.onNodeWithText("查询失败").assertExists()
+            rule.onNodeWithText("查询失败").assertIsDisplayed()
         } finally {
             rule.runOnUiThread { controller.release() }
         }
@@ -397,8 +400,8 @@ class EncounterScreenTest {
     @Test
     fun emptyState_showsWhenNoVideos() {
         rule.setContent { EncounterEmptyState(Modifier.fillMaxSize()) }
-        rule.onNodeWithText("还没有视频故事").assertExists()
-        rule.onNodeWithText("开启角色会话的自动视频后，生成的视频会出现在这里").assertExists()
+        rule.onNodeWithText("还没有视频故事").assertIsDisplayed()
+        rule.onNodeWithText("开启角色会话的自动视频后，生成的视频会出现在这里").assertIsDisplayed()
     }
 
     // ===== 详情弹层：提示词 / 参数 / 错误 / 动作 =====
@@ -428,22 +431,22 @@ class EncounterScreenTest {
                 onDismiss = {},
             )
         }
-        rule.onNodeWithText("用户原文").assertExists()
-        rule.onNodeWithText("助手原文").assertExists()
-        rule.onNodeWithText("最终提示词内容").assertExists()
-        rule.onNodeWithText(SeedanceModelVariant.STANDARD.modelId).assertExists()
-        rule.onNodeWithText(SeedanceResolution.P720.storageKey).assertExists()
-        rule.onNodeWithText(SeedanceRatio.PORTRAIT.storageKey).assertExists()
-        rule.onNodeWithText("5 秒").assertExists()
+        rule.onNodeWithText("用户原文").assertIsDisplayed()
+        rule.onNodeWithText("助手原文").assertIsDisplayed()
+        rule.onNodeWithText("最终提示词内容").assertIsDisplayed()
+        rule.onNodeWithText(SeedanceModelVariant.STANDARD.modelId).assertIsDisplayed()
+        rule.onNodeWithText(SeedanceResolution.P720.storageKey).assertIsDisplayed()
+        rule.onNodeWithText(SeedanceRatio.PORTRAIT.storageKey).assertIsDisplayed()
+        rule.onNodeWithText("5 秒").assertIsDisplayed()
         // 关闭按钮是 Icon（contentDescription 语义键），并非 Text 节点。
-        rule.onNodeWithContentDescription("关闭").assertExists()
-        rule.onNodeWithText("generation").assertExists()
-        rule.onNodeWithText("1001").assertExists()
-        rule.onNodeWithText("远端生成失败").assertExists()
+        rule.onNodeWithContentDescription("关闭").assertIsDisplayed()
+        rule.onNodeWithText("generation").assertIsDisplayed()
+        rule.onNodeWithText("1001").assertIsDisplayed()
+        rule.onNodeWithText("远端生成失败").assertIsDisplayed()
         // 费用性重试：先弹确认
         rule.onNodeWithText("重新生成").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("该操作可能产生费用，确认重新生成？").assertExists()
+        rule.onNodeWithText("该操作可能产生费用，确认重新生成？").assertIsDisplayed()
     }
 
     @Test
@@ -480,7 +483,7 @@ class EncounterScreenTest {
                 onDismiss = {},
             )
         }
-        rule.onNodeWithText("取消").assertExists()
+        rule.onNodeWithText("取消").assertIsDisplayed()
     }
 
     // ===== 辅助 =====
