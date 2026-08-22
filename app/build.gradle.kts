@@ -10,9 +10,13 @@ plugins {
 // 故把 buildDir 重定向到 ASCII 路径。仅在该 ASCII 路径已存在（即本机已构建过）时重定向，
 // 其他克隆者使用默认 buildDir，避免硬编码路径导致他人构建失败。
 // （native 库已预编译入 jniLibs，Gradle 不再调 CMake，默认 buildDir 对他人安全。）
-val redirectBuildDir = file("D:/ai-build/chatbyyourside/app-build")
-if (redirectBuildDir.parentFile?.exists() == true) {
-    layout.buildDirectory.set(redirectBuildDir)
+// 注意：file("D:/...") 的盘符路径在 Linux/CI 上会抛 "Cannot convert URL to a file"
+// （Gradle 8.9 起），必须先判操作系统再触碰该路径。
+if (org.gradle.internal.os.OperatingSystem.current().isWindows) {
+    val redirectBuildDir = file("D:/ai-build/chatbyyourside/app-build")
+    if (redirectBuildDir.parentFile?.exists() == true) {
+        layout.buildDirectory.set(redirectBuildDir)
+    }
 }
 
 android {
