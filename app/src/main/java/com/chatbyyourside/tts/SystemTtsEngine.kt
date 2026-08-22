@@ -56,6 +56,10 @@ class SystemTtsEngine(private val context: Context) {
         private const val TAG = "SystemTtsEngine"
         private const val INIT_TIMEOUT_MS = 4_000L
         private const val UTTERANCE_ID = "tts_system_utterance"
+        /** 引擎未上报上限时的兜底切分长度（Android AOSP TextToSpeech 文档值）。 */
+        private const val DEFAULT_MAX_SPEECH_INPUT_LENGTH = 4000
+        /** 切分长度下限：防个别 ROM 返回异常小值导致碎片化分段。 */
+        private const val MIN_CHUNK_LENGTH = 500
     }
 
     @Volatile
@@ -107,7 +111,17 @@ class SystemTtsEngine(private val context: Context) {
                 "setVoiceResult=$setVoiceResult pitch=${template.pitch} rate=${template.rate}"
         )
         playing = true
-        engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
+        // 长文本分段：系统引擎有 getMaxSpeechInputLength 上限（通常 4000 字符），超限静默失败。
+        // 首段 QUEUE_FLUSH 打断上一次朗读，余段 QUEUE_ADD 排队续播；
+        // onDone/onError 按 utterance 复位 playing，末段完成即整体结束。
+        val maxLen = runCatching { engine.maxSpeechInputLength }
+            .getOrDefault(DEFAULT_MAX_SPEECH_INPUT_LENGTH)
+            .coerceAtLeast(MIN_CHUNK_LENGTH)
+        val chunks = chunkTtsText(text, maxLen)
+        chunks.forEachIndexed { index, chunk ->
+            val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            engine.speak(chunk, queueMode, null, "$UTTERANCE_ID_$index")
+        }
     }
 
     /** 停止朗读（系统引擎无暂停语义，pause 亦走此路径）。 */

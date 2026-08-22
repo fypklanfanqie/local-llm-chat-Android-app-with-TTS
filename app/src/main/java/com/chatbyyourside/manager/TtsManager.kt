@@ -12,12 +12,14 @@ import com.chatbyyourside.data.model.speakerIdForLanguage
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.tts.SystemTtsEngine
 import com.chatbyyourside.tts.VolcTtsClient
+import com.chatbyyourside.tts.chunkTtsText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.ByteArrayOutputStream
 import java.io.File
 
 /**
@@ -36,6 +38,8 @@ class TtsManager(
 
     companion object {
         private const val TAG = "TtsManager"
+        /** 云端单段合成上限（字符）：火山 unidirectional 长文本保守值，超限按句界切分。 */
+        private const val CLOUD_MAX_CHUNK_LENGTH = 500
     }
 
     private var mediaPlayer: MediaPlayer? = null
@@ -111,7 +115,12 @@ class TtsManager(
         // 清理括号内容
         val cleanText = cleanTtsText(text)
 
-        val audioBytes = client.synthesize(cleanText, characterId, ttsConfig, speakerId)
+        // 长文本分段合成：火山单次合成有长度上限，按句界切 ≤500 字符/段，
+        // MP3 帧流可直接字节拼接（与 VolcTtsClient 内部 Chunked 逐帧拼接同理）。
+        val audioBytes = chunkTtsText(cleanText, CLOUD_MAX_CHUNK_LENGTH)
+            .joinTo(ByteArrayOutputStream()) { chunk ->
+                client.synthesize(chunk, characterId, ttsConfig, speakerId)
+            }.toByteArray()
 
         // 写入临时文件（磁盘 IO，切到 IO 调度器）
         val tempFile = File(context.cacheDir, "tts_${System.currentTimeMillis()}.mp3")
