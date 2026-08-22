@@ -153,9 +153,10 @@ MNN_CMAKE_FLAGS=(
     # --target MNN 时 transformers/llm 完全不编译 → JNI 链接期 Llm 符号全部 undefined。
     # OFF 让 llm 以 OBJECT 库链进 libMNN.so（与生产 jniLibs 的 7.4MB 产物一致）。
     -DMNN_SEP_BUILD=OFF
-    # OBJECT 库不允许 POST_BUILD custom_command（Android 分支会挂头文件拷贝命令），
-    # 此 flag 走 INSTALL(DIRECTORY) 分支把 llm 头文件装进 CMAKE_INSTALL_PREFIX/include。
-    -DMNN_BUILD_FOR_ANDROID_COMMAND=OFF
+    # OBJECT 库不允许 POST_BUILD custom_command（Android 分支会挂头文件拷贝命令）。
+    # 条件为 IF(Android AND NOT MNN_BUILD_FOR_ANDROID_COMMAND)：置 ON 使 NOT 为假，
+    # 走 ELSE 的 INSTALL(DIRECTORY) 分支把 llm 头文件装进 CMAKE_INSTALL_PREFIX/include。
+    -DMNN_BUILD_FOR_ANDROID_COMMAND=ON
     # 上游变量名是 MNN_BUILD_SHARED_LIBS（带 S）；此前传的 MNN_BUILD_SHARED_LIB 是
     # 拼写错误（CMake "Manually-specified variables were not used" 警告可证）。
     -DMNN_BUILD_SHARED_LIBS=ON
