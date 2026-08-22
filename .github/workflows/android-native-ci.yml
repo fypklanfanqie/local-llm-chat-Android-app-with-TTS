@@ -78,6 +78,10 @@ jobs:
         with:
           api-level: 35
           arch: x86_64
+          # action 内置 disable-animations 在 boot 完成后立即 adb shell settings put，
+          # 软件模拟（runner 无 KVM，-accel off）此刻最不稳定，Broken pipe 直接红；
+          # 动画禁用改由下方 script 在 wait-for-device 之后执行（设备稳定后）。
+          disable-animations: false
           # 注意：script 内不要用 "\" 续行（action 拼接脚本时续行符会被破坏，
           # 报 `\: not found` 且 echo 兜底不执行）。单行化 + 先等设备就绪
           # （软件模拟 boot 慢，gradle 立即跑会报 No compatible devices connected）。
