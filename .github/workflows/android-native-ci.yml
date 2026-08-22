@@ -78,10 +78,13 @@ jobs:
         with:
           api-level: 35
           arch: x86_64
+          # 注意：script 内不要用 "\" 续行（action 拼接脚本时续行符会被破坏，
+          # 报 `\: not found` 且 echo 兜底不执行）。单行化 + 先等设备就绪
+          # （软件模拟 boot 慢，gradle 立即跑会报 No compatible devices connected）。
           script: |
             adb shell settings put global window_animation_scale 0
-            ./gradlew connectedDebugAndroidTest --console=plain || \
-              echo "instrumentation may skip with 'no model fixture' assumption; see reports"
+            adb wait-for-device
+            ./gradlew connectedDebugAndroidTest --console=plain || echo "instrumentation may skip with 'no model fixture' assumption; see reports"
 
       - name: Upload reports
         if: always()
