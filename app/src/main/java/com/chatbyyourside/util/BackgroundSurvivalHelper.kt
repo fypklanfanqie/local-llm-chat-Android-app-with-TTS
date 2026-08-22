@@ -62,8 +62,13 @@ object BackgroundSurvivalHelper {
     }
 
     /**
-     * 按厂商返回「自启动 / 后台管理」设置 Activity intent；本机不可达返回 null。
-     * 每个候选用 `resolveActivity` 探测，首个可达者返回（并加 `FLAG_ACTIVITY_NEW_TASK`）。无匹配厂商返回 null。
+     * 按厂商返回「自启动 / 后台管理」设置 Activity intent；厂商候选均不可达时降级为
+     * 本应用详情页（用户可在其中找到通知/电池等开关），保证引导入口永不消失。
+     *
+     * 每个候选用 `resolveActivity` 探测，首个可达者返回（并加 `FLAG_ACTIVITY_NEW_TASK`）。
+     * 注意：Android 11+ 包可见性下，未在 Manifest `<queries>` 声明的厂商包 resolveActivity
+     * 恒 null——queries 已按本列表包名逐一声明；仍不可达（组件随 ROM 版本改名/被裁剪）
+     * 时走应用详情页兜底。绝不因入口失效而崩溃。
      */
     fun manufacturerAutostartIntent(context: Context): Intent? {
         val mfr = (Build.MANUFACTURER ?: "").lowercase()
@@ -115,8 +120,12 @@ object BackgroundSurvivalHelper {
                     "com.samsung.android.sm.ui.battery.BatteryActivity"))
             }
         }
-        return candidates.firstOrNull { it.resolveActivity(context.packageManager) != null }
-            ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+        return (candidates.firstOrNull { it.resolveActivity(context.packageManager) != null }
+            ?: // 兜底：厂商专属页全不可达 -> 应用详情页（文章「处理无法跳转的情况」的标准降级），
+            // 用户仍可在此开启通知、电池优化豁免等；入口不再静默消失。
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(android.net.Uri.parse("package:${context.packageName}")))
+            .apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
     }
 
     private fun component(pkg: String, cls: String): Intent =
