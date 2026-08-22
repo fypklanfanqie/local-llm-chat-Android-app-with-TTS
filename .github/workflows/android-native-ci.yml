@@ -22,7 +22,7 @@ jobs:
       - name: Setup Android SDK + NDK r26b
         uses: android-actions/setup-android@v3
         with:
-          api-level: 34
+          api-level: 35
           # android-actions/setup-android（v3/v4）没有 ndk-version 输入——该键只会被
           # runner 静默忽略，旧工作流的 27.2 从未真正安装过。NDK 需经 sdkmanager
           # 包语法安装，落盘于 $ANDROID_HOME/ndk/<version>（26.1 与
@@ -74,7 +74,7 @@ jobs:
       - name: Emulator instrumentation (runtime tests, skip-if-no-fixture)
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          api-level: 35
           arch: x86_64
           script: |
             adb shell settings put global window_animation_scale 0

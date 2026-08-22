@@ -17,7 +17,7 @@ if (redirectBuildDir.parentFile?.exists() == true) {
 
 android {
     namespace = "com.chatbyyourside"
-    compileSdk = 34
+    compileSdk = 35
     // 与 local.properties 的 ndk.dir(D:\android-ndk-r27c)对齐，版本 27.2.12479018。
     // 否则 AGP 报 [CXX1104]：ndk.dir 版本与 android.ndkVersion 默认值(26.x)不一致。
     ndkVersion = "27.2.12479018"
@@ -30,7 +30,7 @@ android {
     defaultConfig {
         applicationId = "com.chatbyyourside"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 3
         versionName = "2.6"
 
