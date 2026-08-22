@@ -37,9 +37,18 @@ class OpenClProbeService : Service() {
         val result = runCatching { json.decodeFromString<OpenClProbeResult>(raw) }
             .getOrElse { OpenClProbeResult(success = false, failureCode = OpenClProbeResult.FAILURE_KERNEL_EXECUTION) }
         try {
-            // 文件通道：写结果文件 + 清 pending 标记（主进程按结果文件存在与否轮询，无缓存）。
+            // 文件通道：先写 .tmp 再同目录 rename 原子发布（审计 llm-backend-5）——
+            // 直接 writeText 正式文件会让主进程 100ms 轮询观察到空/半截 JSON 被误判
+            // PROCESS_DEATH → 24h GPU 冷却。rename 后正式文件名出现即内容完整。
+            // 写完清 pending 标记（主进程按结果文件存在与否轮询，无缓存）。
             val resultFile = File(cacheDir, OpenClProbeRunner.RESULT_FILE)
-            resultFile.writeText(json.encodeToString(result))
+            val tmpFile = File(cacheDir, OpenClProbeRunner.RESULT_FILE + ".tmp")
+            tmpFile.writeText(json.encodeToString(result))
+            if (!tmpFile.renameTo(resultFile)) {
+                // rename 失败（极端文件系统）：退回直写，至少保证结果可见。
+                resultFile.writeText(json.encodeToString(result))
+                tmpFile.delete()
+            }
             File(cacheDir, OpenClProbeRunner.PENDING_FILE).delete()
         } catch (t: Throwable) {
             Log.w(TAG, "写结果失败: ${t.message}")

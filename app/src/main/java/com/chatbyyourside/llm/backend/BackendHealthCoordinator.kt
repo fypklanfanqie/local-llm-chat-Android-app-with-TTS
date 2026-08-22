@@ -100,8 +100,19 @@ class BackendHealthCoordinator(
     }
 
     /**
+     * 探测互斥（审计 llm-backend-1）：聊天路径（resolveForGpu）、空闲探测
+     * （IdleOpenClProbeCoordinator）、GPU 预热等共用同一单例协调器，探测必须全局串行——
+     * 并发两次 runProbe 会互相删除对方的结果文件、探测进程自杀吞掉第二个 startService
+     * intent，双方 15s 超时被误记 PROBE 失败 → 24h GPU 冷却。
+     */
+    private val probeMutex = Mutex()
+
+    /**
      * 探测入口（LocalChatProvider 每轮调用）：先按持久记录解析；若 [BackendHealthDecision.probeRequired]
      * 且 probeRunner 可用，则同步跑一次隔离探测（5s 超时）并写 store，再按新记录重新解析返回。
+     *
+     * 探测经 [probeMutex] 全局串行：并发调用方等待在途探测完成后重新 resolve——
+     * 若对方已写入 PROBE_OK/MODEL_OK，本调用方零成本拿到结果，不再重复启动探测进程。
      */
     suspend fun resolveForGpu(modelFingerprint: String = this.modelFingerprint): BackendHealthDecision {
         runProbeIfNeeded(modelFingerprint)
@@ -111,13 +122,16 @@ class BackendHealthCoordinator(
     /**
      * 仅当决策要求探测且 probeRunner 可用时执行一次探测并记录；返回探测后的健康状态
      * （无需探测 / 无 probeRunner 时返回当前决策状态，不启动探测进程）。
+     *
+     * 锁内先重读一次决策：等待期间别的调用方可能已完成探测并写好记录，此时直接复用，
+     * 不再重复跑（修复空闲探测与聊天路径探测的竞态，见类 KDoc 记录规则）。
      */
-    suspend fun runProbeIfNeeded(modelFingerprint: String = this.modelFingerprint): OpenClHealthState {
+    suspend fun runProbeIfNeeded(modelFingerprint: String = this.modelFingerprint): OpenClHealthState = probeMutex.withLock {
         val decision = resolve(modelFingerprint)
         val runner = probeRunner
-        if (!decision.probeRequired || runner == null) return decision.state
+        if (!decision.probeRequired || runner == null) return@withLock decision.state
         val result = runner.runProbe()
-        return if (result.success) {
+        if (result.success) {
             afterProbeSuccess(modelFingerprint)
             OpenClHealthState.PROBE_OK
         } else {

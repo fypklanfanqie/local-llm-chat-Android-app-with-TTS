@@ -19,6 +19,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 「崩溃日志」入口查看 / 复制 / 分享。这是解决「拿不到崩溃日志」的核心手段——用户无需 adb，
  * 闪退后从 设置 → 崩溃日志 复制发给开发者即可定位真因。
  *
+ * 外部镜像：崩溃日志同步写一份到 `getExternalFilesDir/crash/`（即
+ * `/sdcard/Android/data/<包名>/files/crash/`）。App 因闪退打不开时，设置页入口不可达，
+ * 而部分厂商文件管理器也进不了 Android/data；镜像后用户用数据线连电脑（MTP）即可直接
+ * 取出日志。安装时会把内部目录已有的历史日志迁移到镜像（上限 [MIRROR_MAX_FILES] 份，
+ * 按文件名时间戳保留最新），使升级前落盘的旧崩溃也能被导出。所有镜像操作独立 try/catch，
+ * 失败不影响内部落盘主流程。
+ *
  * 原生崩溃（SIGSEGV 等，Java handler 拦不住）由 [CrashWatchdog] 的启动存活标记间接判定：
  * 启动窗口内进程死掉 -> 下次启动见 `started` 无 `loaded` -> 判定「上次启动异常退出」。
  */
@@ -27,8 +34,12 @@ object CrashReporter {
     private const val TAG = "CrashReporter"
     private const val DIR_NAME = "crash"
 
+    /** 镜像目录保留的最新日志份数上限（防无限膨胀；文件名含时间戳，按名排序即按时间）。 */
+    private const val MIRROR_MAX_FILES = 20
+
     private val installed = AtomicBoolean(false)
     private var crashDir: File? = null
+    private var externalMirrorDir: File? = null
 
     /**
      * 安装全局崩溃 handler。应在 Application.onCreate 最开头调用（含 `:mnn_probe` 进程），
@@ -39,6 +50,12 @@ object CrashReporter {
     fun install(context: Context) {
         if (installed.get()) return
         crashDir = File(context.filesDir, DIR_NAME)
+        externalMirrorDir = try {
+            context.getExternalFilesDir(null)?.let { File(it, DIR_NAME) }
+        } catch (_: Throwable) {
+            null
+        }
+        migrateExistingLogsToMirror()
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             try {
@@ -80,7 +97,49 @@ object CrashReporter {
         throwable.printStackTrace(pw)
         pw.flush()
         file.writeText(sw.toString())
+        mirrorToExternal(file)
         Log.e(TAG, "崩溃日志已写入 ${file.absolutePath}")
+    }
+
+    /** 把刚落盘的崩溃/事件日志复制到外部镜像目录（独立 try/catch，失败不影响主流程）。 */
+    private fun mirrorToExternal(file: File) {
+        val mirror = externalMirrorDir ?: return
+        try {
+            mirror.mkdirs()
+            file.copyTo(File(mirror, file.name), overwrite = false)
+            trimMirror(mirror)
+        } catch (_: Throwable) {
+            // 镜像失败不追溯：内部日志已落盘，设置页仍可见
+        }
+    }
+
+    /** 镜像目录超限时按文件名（含时间戳）删最旧的，保留最新 [MIRROR_MAX_FILES] 份。 */
+    private fun trimMirror(mirror: File) {
+        val files = mirror.listFiles { f -> f.isFile && f.name.endsWith(".log") } ?: return
+        if (files.size <= MIRROR_MAX_FILES) return
+        files.sortedByDescending { it.name }
+            .drop(MIRROR_MAX_FILES)
+            .forEach { runCatching { it.delete() } }
+    }
+
+    /** 安装时把内部目录已有的历史日志迁移到镜像（幂等：镜像已存在的跳过），让升级前
+     *  落盘的崩溃（如 v2.5 的 myProcessName 闪退）也能经 USB 导出。 */
+    private fun migrateExistingLogsToMirror() {
+        val internal = crashDir ?: return
+        val mirror = externalMirrorDir ?: return
+        try {
+            val existing = internal.listFiles { f -> f.isFile && f.name.endsWith(".log") } ?: return
+            for (f in existing) {
+                val target = File(mirror, f.name)
+                if (!target.exists()) {
+                    mirror.mkdirs()
+                    runCatching { f.copyTo(target, overwrite = false) }
+                }
+            }
+            trimMirror(mirror)
+        } catch (_: Throwable) {
+            // 迁移失败不影响崩溃采集主流程
+        }
     }
 
     private fun buildLogHeader(): String = buildString {

@@ -70,11 +70,13 @@ class OpenClProbeRunner(
                     }
                 },
                 readResult = {
+                    // 审计 llm-backend-5：服务侧经 .tmp + rename 原子发布（见 OpenClProbeService），
+                    // 正式文件名出现即内容完整；此处读到但解析失败（理论不可达）不立即判死，
+                    // 交由轮询继续——宁可超时也不把一次成功探测误记成 PROCESS_DEATH → 24h 冷却。
                     val file = File(cacheDir, RESULT_FILE)
                     if (!file.exists()) return@OpenClProbeRunner null
                     val raw = runCatching { file.readText() }.getOrNull() ?: return@OpenClProbeRunner null
-                    runCatching { json.decodeFromString<OpenClProbeResult>(raw) }
-                        .getOrElse { OpenClProbeResult(success = false, failureCode = OpenClProbeResult.FAILURE_PROCESS_DEATH) }
+                    runCatching { json.decodeFromString<OpenClProbeResult>(raw) }.getOrNull()
                 },
             )
         }
