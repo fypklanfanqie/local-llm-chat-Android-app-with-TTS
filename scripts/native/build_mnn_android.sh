@@ -182,8 +182,16 @@ cp -f "$BUILT_LIBMNN" "$MNN_INSTALL/lib/libMNN.so"
 # MNN installs headers under include/; if install did not copy them, copy manually.
 if [[ ! -f "$MNN_INSTALL/include/llm/llm.hpp" ]]; then
     log "copying MNN headers manually"
-    (cd "$MNN_SRC" && find . -name '*.hpp' -path '*/llm/*' -print0 \
-        | while IFS= read -r -d '' f; do install -Dm644 "$f" "$MNN_INSTALL/include/$f"; done)
+    # llm.hpp 位于 transformers/llm/engine/include/llm/llm.hpp —— 其 include 根是
+    # engine/include。直接按全相对路径安装会落到 include/transformers/...，
+    # JNI 侧（MNN_DIR/include/llm/llm.hpp）找不到；这里以 engine/include 为根对齐安装。
+    LLM_INCLUDE_ROOT="$MNN_SRC/transformers/llm/engine/include"
+    if [[ -f "$LLM_INCLUDE_ROOT/llm/llm.hpp" ]]; then
+        cp -rf "$LLM_INCLUDE_ROOT/." "$MNN_INSTALL/include/"
+    fi
+    # 兜底：其余 llm 相关头（如其它路径布局）+ MNN 主 include 全量
+    (cd "$MNN_SRC" && find . -name '*.hpp' -path '*/include/llm/*' -print0 \
+        | while IFS= read -r -d '' f; do rel="${f#./}"; rel="${rel#*include/}"; install -Dm644 "$f" "$MNN_INSTALL/include/$rel"; done)
     cp -rf "$MNN_SRC/include/." "$MNN_INSTALL/include/" 2>/dev/null || true
 fi
 [[ -f "$MNN_INSTALL/lib/libMNN.so" ]] || die "libMNN.so not built"
