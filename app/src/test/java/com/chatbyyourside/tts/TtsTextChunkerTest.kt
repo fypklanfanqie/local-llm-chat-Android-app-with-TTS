@@ -58,7 +58,17 @@ class TtsTextChunkerTest {
         val chunks = chunkTtsText(text, 40)
         assertTrue(chunks.size >= 3)
         chunks.forEach { assertTrue(it.length <= 40) }
-        assertEquals(text.replace("\n", "").length, chunks.joinToString("").length)
+        // 无内容丢失：join 后仅少了被段尾 trim() 去掉的空白字符（每段至多一个段尾 \n），
+        // 其余字符（含段中保留的换行）必须原样保留。
+        val removedCount = text.length - chunks.joinToString("").length
+        assertTrue("被移除的应为纯空白，实际移除 $removedCount 字符", removedCount >= 0)
+        assertEquals(
+            text.count { it == '\n' },
+            removedCount + chunks.joinToString("").count { it == '\n' },
+        )
+        // 更强的等价断言：把每段重新补回段尾换行后应能重建原文的字符多重集。
+        // 直接验证：所有非空白字符按序不变。
+        assertEquals(text.replace(Regex("\\s"), ""), chunks.joinToString("").replace(Regex("\\s"), ""))
     }
 
     @Test

@@ -117,14 +117,16 @@ class SystemTtsEngine(private val context: Context) {
         // 长文本分段：系统引擎有 getMaxSpeechInputLength 上限（通常 4000 字符），超限静默失败。
         // 首段 QUEUE_FLUSH 打断上一次朗读，余段 QUEUE_ADD 排队续播；
         // onDone/onError 按段递减计数，末段完成才复位 playing（防 UI 提前显示「已结束」）。
-        val maxLen = runCatching { engine.maxSpeechInputLength }
+        // getMaxSpeechInputLength 是 TextToSpeech 的静态方法，按类级调用（实例上调用静态方法
+        // 在部分 Kotlin 编译器版本解析异常，统一用类引用最稳）。
+        val maxLen = runCatching { TextToSpeech.getMaxSpeechInputLength() }
             .getOrDefault(DEFAULT_MAX_SPEECH_INPUT_LENGTH)
             .coerceAtLeast(MIN_CHUNK_LENGTH)
         val chunks = chunkTtsText(text, maxLen)
         pendingUtterances.set(chunks.size)
         chunks.forEachIndexed { index, chunk ->
             val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-            engine.speak(chunk, queueMode, null, "$UTTERANCE_ID_$index")
+            engine.speak(chunk, queueMode, null, "${UTTERANCE_ID}_$index")
         }
     }
 
