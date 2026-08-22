@@ -17,8 +17,12 @@ class ChatProviderManager(
     private val cloudProvider: CloudChatProvider,
     private val localProvider: LocalChatProvider,
     private val settings: SettingsRepository,
-    /** 切离本地（本地 -> 云端）时触发：释放本地已加载模型（deferred-safe）。 */
-    private val onSwitchAwayFromLocal: () -> Unit = {},
+    /**
+     * Provider 切换回调（审计 llm-backend-6 接线）：参数 = 切换后是否仍为本地。
+     * false（本地→云端）：经 [ModelResidencyController] 宽限后释放已加载模型；
+     * true（云端→本地）：恢复驻留资格，取消任何在途宽限释放。
+     */
+    private val onSwitchAwayFromLocal: (staysLocal: Boolean) -> Unit = {},
 ) {
 
     val activeProviderType: Flow<ChatProviderType> = settings.activeProvider
@@ -35,10 +39,12 @@ class ChatProviderManager(
     suspend fun switchProvider(type: ChatProviderType) {
         val previous = settings.getActiveProviderNow()
         settings.setActiveProvider(type)
-        // 切离本地（切到云端）后本地模型不应继续驻留（数 GB 权重/KV 常驻浪费内存）；
-        // 释放为 deferred-safe：推理进行中延迟到 JNI 返回后释放。
-        if (previous == ChatProviderType.LOCAL && type != ChatProviderType.LOCAL) {
-            onSwitchAwayFromLocal()
+        // 切离本地（切到云端）后本地模型不应继续驻留（数 GB 权重/KV 常驻浪费内存）。
+        // 经驻留控制器走宽限释放（审计 llm-backend-6 接线）：宽限内切回本地/回前台自动取消，
+        // 宽限期满或生成中由 BackendManager 的 deferred-safe 机制安全释放。
+        // 同时同步「切回本地」方向，恢复驻留资格（否则切回后 canReside 恒 false、后台即释放）。
+        if (previous != type) {
+            onSwitchAwayFromLocal(type == ChatProviderType.LOCAL)
         }
     }
 

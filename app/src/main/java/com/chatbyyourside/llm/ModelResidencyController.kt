@@ -29,13 +29,16 @@ class ModelResidencyController(
     private var appForeground: Boolean = true
     @Volatile
     private var generationActive: Boolean = false
+    /** 当前活跃 provider 是否为本地（false = 已切云，切云即不驻留，见 [onProviderChanged]）。 */
+    @Volatile
+    private var providerStaysLocal: Boolean = true
     @Volatile
     private var residencyMs: Long = balancedKeepAliveMs
 
     private var graceJob: Job? = null
 
-    /** 当前是否允许驻留（后台 + 未在生成）。 */
-    private fun canReside(): Boolean = !appForeground && !generationActive
+    /** 当前是否允许驻留（后台 + 未在生成 + 活跃 provider 为本地）。 */
+    private fun canReside(): Boolean = !appForeground && !generationActive && providerStaysLocal
 
     fun onAppForegroundChanged(foreground: Boolean) {
         appForeground = foreground
@@ -49,8 +52,14 @@ class ModelResidencyController(
     }
 
     fun onProviderChanged(providerStaysLocal: Boolean) {
-        // 切云/切 provider 后本地模型不应驻留。
-        if (!providerStaysLocal) scheduleRelease()
+        this.providerStaysLocal = providerStaysLocal
+        if (providerStaysLocal) {
+            // 切回本地：取消任何在途宽限释放（用户要继续用本地模型）。
+            cancelRelease()
+        } else {
+            // 切云/切 provider 后本地模型不应驻留（宽限后释放；宽限内切回取消）。
+            scheduleRelease()
+        }
     }
 
     fun onModelChanged(policy: ResidencyPolicy) {

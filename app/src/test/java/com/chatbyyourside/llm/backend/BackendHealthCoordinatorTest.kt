@@ -3,6 +3,8 @@ package com.chatbyyourside.llm.backend
 import com.chatbyyourside.llm.profile.DeviceRuntimeFingerprint
 import com.chatbyyourside.llm.profile.OpenClHealthState
 import com.chatbyyourside.llm.profile.RuntimeVariant
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -277,5 +279,38 @@ class BackendHealthCoordinatorTest {
 
         assertEquals(OpenClHealthState.UNKNOWN, decision.state)
         assertTrue(decision.probeRequired)
+    }
+
+    @Test
+    fun concurrentRunProbeIfNeeded_runsProbeOnlyOnceAndSharesResult() = runBlocking {
+        // 审计 llm-backend-1 回归守卫：空闲探测与聊天路径并发调用 runProbeIfNeeded 时，
+        // probeMutex 保证只跑一次探测；后到方在锁内重读决策，直接复用对方写入的 PROBE_OK。
+        val store = FakeHealthStore()
+        val recorder = ProbeRecorder()
+        var inFlight = 0
+        var maxConcurrent = 0
+        val runner = OpenClProbeRunner(
+            launchProbe = {
+                inFlight++
+                if (inFlight > maxConcurrent) maxConcurrent = inFlight
+                recorder.launched = true
+            },
+            readResult = { successProbe },
+            clock = { 0L },
+        )
+        val coordinator = BackendHealthCoordinator(store, deviceA, probeRunner = runner)
+
+        val a = async(Dispatchers.Unconfined) {
+            coordinator.runProbeIfNeeded(modelA)
+        }
+        val b = async(Dispatchers.Unconfined) {
+            coordinator.runProbeIfNeeded(modelA)
+        }
+        val results = listOf(a.await(), b.await())
+
+        // 双方都拿到 PROBE_OK（一方真实探测、另一方锁内复用）。
+        results.forEach { assertEquals(OpenClHealthState.PROBE_OK, it) }
+        assertEquals("互斥下探测进程绝不并发启动", 1, maxConcurrent)
+        assertEquals(HealthState.PROBE_OK, store.records[gpuKeyA]?.state)
     }
 }

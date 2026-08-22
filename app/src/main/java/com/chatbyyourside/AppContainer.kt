@@ -46,6 +46,7 @@ import com.chatbyyourside.video.SeedanceVideoDownloader
 import com.chatbyyourside.video.SeedanceVideoFileStore
 import com.chatbyyourside.work.SeedanceVideoScheduler
 import com.chatbyyourside.llm.CpuBoostController
+import com.chatbyyourside.llm.ModelResidencyController
 import com.chatbyyourside.llm.backend.BackendHealthCoordinator
 import com.chatbyyourside.llm.backend.BackendHealthStore
 import com.chatbyyourside.llm.backend.BackendManager
@@ -89,7 +90,7 @@ class AppContainer(private val context: Context) {
     val documentRepository: DocumentRepository by lazy { DocumentRepository(directLlmClient) }
     val characterRepository: CharacterRepository by lazy { CharacterRepository(settingsRepository) }
     val groupChatRepository: GroupChatRepository by lazy {
-        GroupChatRepository(conversationRepository, chatRepository)
+        GroupChatRepository(context, conversationRepository, chatRepository)
     }
     val conversationExportService: ConversationExportService by lazy {
         ConversationExportService(conversationRepository, chatRepository, characterRepository)
@@ -431,8 +432,27 @@ class AppContainer(private val context: Context) {
             cloudChatProvider,
             localChatProvider,
             settingsRepository,
-            onSwitchAwayFromLocal = { backendManager.release() },
+            // Provider 切换经驻留控制器（Task 14 审计接线——此前零引用未生效）：
+            // 切云后按 keepAliveMs 宽限释放；切回本地恢复驻留资格；生成中/前台返回自动取消。
+            onSwitchAwayFromLocal = { staysLocal ->
+                modelResidencyController.onProviderChanged(providerStaysLocal = staysLocal)
+            },
         )
+    }
+
+    /**
+     * Task 14 模型驻留控制器（审计 llm-backend-6 接线）：后台宽限（Balanced 15s / MAXIMUM_SPEED
+     * 60s）后释放已加载模型，宽限内回前台取消释放；生成中绝不释放。trim 关键档仍走
+     * [ChatApp] 的立即释放安全网（两条路径都经 BackendManager 的 deferred-safe release，幂等）。
+     */
+    val modelResidencyController: ModelResidencyController by lazy {
+        ModelResidencyController(
+            releaseAll = { backendManager.release() },
+        ).also { controller ->
+            AppLifecycleObserver.addForegroundListener { foreground ->
+                controller.onAppForegroundChanged(foreground)
+            }
+        }
     }
 
     // ===== 性能监控浮窗（仅本地聊天界面显示；应用内液态玻璃，见 PerformanceGlassOverlay）=====

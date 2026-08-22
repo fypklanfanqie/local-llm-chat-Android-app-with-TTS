@@ -10,7 +10,8 @@ import org.json.JSONObject
  *
  * 对应 C 层 libmnn_jni.so（由 cpp/mnn_jni.cpp 编译，移植自 MNN `llm_session` + `llm_mnn_jni`）：
  *   Java_com_chatbyyourside_llm_backend_MnnBridge_nativeCreate
- *   Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStream
+ *   Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStream（兼容入口）
+ *   Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStreamUtf8（生产入口，标准 UTF-8 字节）
  *   Java_com_chatbyyourside_llm_backend_MnnBridge_nativeStop
  *   Java_com_chatbyyourside_llm_backend_MnnBridge_nativeRelease
  *   Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGetMetrics
@@ -245,6 +246,28 @@ class MnnBridge {
     external fun nativeGenerateStream(
         handle: Long,
         messagesJson: String,
+        maxTokens: Int,
+        temperature: Float,
+        topP: Float,
+        repeatPenalty: Float,
+        enableThinking: Boolean,
+        batchMaxBytes: Int,
+        batchMaxMs: Int,
+        decodeStepTokens: Int,
+    ): String
+
+    /**
+     * 标准 UTF-8 字节数组生成入口（审计 llm-backend-4）。
+     *
+     * [nativeGenerateStream] 的 jstring 经 JNI GetStringUTFChars 得到 modified UTF-8（CESU-8），
+     * 增补平面字符（emoji 等）被拆成代理对的非法序列，喂给 tokenizer 会静默损坏模型上下文。
+     * 本入口接收 [String.toByteArray]`(Charsets.UTF_8)` 编码的 jbyteArray，native 侧经
+     * GetByteArrayRegion 取出真标准 UTF-8，emoji/生僻字完整保留。生产路径一律走这里；
+     * 旧 jstring 入口仅为兼容保留。
+     */
+    external fun nativeGenerateStreamUtf8(
+        handle: Long,
+        messagesJsonUtf8: ByteArray,
         maxTokens: Int,
         temperature: Float,
         topP: Float,

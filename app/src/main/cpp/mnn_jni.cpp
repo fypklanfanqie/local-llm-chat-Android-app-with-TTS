@@ -774,25 +774,16 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeCreate(
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStream(
-        JNIEnv *env, jobject thiz,
-        jlong handle, jstring messages_json,
+// ===== 生成主体（审计 llm-backend-4 重构）：消息 JSON 已是标准 UTF-8 字节串 =====
+// jstring 入口（GetStringUTFChars = modified UTF-8，emoji 为非法 CESU-8）与新 jbyteArray
+// 入口（Kotlin String.toByteArray(UTF_8)，真标准 UTF-8）都转发到这里。
+static jstring generate_stream_impl(
+        JNIEnv *env, Llm *llm, const std::string &json,
         jint max_tokens, jfloat temperature,
         jfloat top_p, jfloat repeat_penalty,
         jboolean enable_thinking,
         jint batch_bytes, jint batch_ms,
-        jint decode_step_tokens) {   // v2（Task 1）：末尾追加；clamp 到 [1,4]，缺省/非法值 -> 1
-
-    Llm *llm = (Llm *)handle;
-    if (!llm) return env->NewStringUTF(
-        build_failure_summary("LOAD", "LOAD_NULL_HANDLE", "null handle").c_str());
-
-    const char *jstr = env->GetStringUTFChars(messages_json, nullptr);
-    if (!jstr) return env->NewStringUTF(
-        build_failure_summary("LOAD", "LOAD_MESSAGES_JSON", "messages_json 不可读").c_str());
-    std::string json(jstr);
-    env->ReleaseStringUTFChars(messages_json, jstr);
-
+        jint decode_step_tokens) {
     ChatMessages history;
     parse_messages(json, history);
     if (history.empty()) {
@@ -876,6 +867,64 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStream(
 
     // 阶段三：finalize（KV 对齐 + 指标 + 完成原因 + v2 摘要 JSON）。
     return session_finalize(session, batcher, history);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStream(
+        JNIEnv *env, jobject thiz,
+        jlong handle, jstring messages_json,
+        jint max_tokens, jfloat temperature,
+        jfloat top_p, jfloat repeat_penalty,
+        jboolean enable_thinking,
+        jint batch_bytes, jint batch_ms,
+        jint decode_step_tokens) {   // v2（Task 1）：末尾追加；clamp 到 [1,4]，缺省/非法值 -> 1
+    (void)thiz;
+    Llm *llm = (Llm *)handle;
+    if (!llm) return env->NewStringUTF(
+        build_failure_summary("LOAD", "LOAD_NULL_HANDLE", "null handle").c_str());
+
+    // 兼容入口（jstring = modified UTF-8）：仅旧调用方使用。新路径见 nativeGenerateStreamUtf8。
+    const char *jstr = env->GetStringUTFChars(messages_json, nullptr);
+    if (!jstr) return env->NewStringUTF(
+        build_failure_summary("LOAD", "LOAD_MESSAGES_JSON", "messages_json 不可读").c_str());
+    std::string json(jstr);
+    env->ReleaseStringUTFChars(messages_json, jstr);
+
+    return generate_stream_impl(env, llm, json, max_tokens, temperature, top_p, repeat_penalty,
+                                enable_thinking, batch_bytes, batch_ms, decode_step_tokens);
+}
+
+/**
+ * 标准 UTF-8 字节数组入口（审计 llm-backend-4）：JNI 的 jstring 经 GetStringUTFChars 得到的是
+ * modified UTF-8（CESU-8），增补平面字符（emoji 等）被拆成代理对的非法序列，喂给 tokenizer
+ * 会静默损坏上下文。Kotlin 侧把消息 JSON 以 String.toByteArray(Charsets.UTF_8) 编成 jbyteArray，
+ * 此处经 GetByteArrayRegion 取出真标准 UTF-8 字节，emoji/生僻字完整保留。
+ */
+JNIEXPORT jstring JNICALL
+Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStreamUtf8(
+        JNIEnv *env, jobject thiz,
+        jlong handle, jbyteArray messages_json_utf8,
+        jint max_tokens, jfloat temperature,
+        jfloat top_p, jfloat repeat_penalty,
+        jboolean enable_thinking,
+        jint batch_bytes, jint batch_ms,
+        jint decode_step_tokens) {
+    (void)thiz;
+    Llm *llm = (Llm *)handle;
+    if (!llm) return env->NewStringUTF(
+        build_failure_summary("LOAD", "LOAD_NULL_HANDLE", "null handle").c_str());
+    if (!messages_json_utf8) return env->NewStringUTF(
+        build_failure_summary("LOAD", "LOAD_MESSAGES_JSON", "messages_json 为空").c_str());
+
+    const jsize len = env->GetArrayLength(messages_json_utf8);
+    if (len <= 0) return env->NewStringUTF(
+        build_failure_summary("LOAD", "LOAD_PARSE_EMPTY", "messages_json 为空").c_str());
+    std::string json(static_cast<size_t>(len), '\0');
+    env->GetByteArrayRegion(messages_json_utf8, 0, len,
+                            reinterpret_cast<jbyte *>(json.data()));
+
+    return generate_stream_impl(env, llm, json, max_tokens, temperature, top_p, repeat_penalty,
+                                enable_thinking, batch_bytes, batch_ms, decode_step_tokens);
 }
 
 JNIEXPORT void JNICALL

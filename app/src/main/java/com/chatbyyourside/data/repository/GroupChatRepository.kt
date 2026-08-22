@@ -1,8 +1,12 @@
 package com.chatbyyourside.data.repository
 
+import android.content.Context
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.data.model.Conversation
+import com.chatbyyourside.util.GroupCoverStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 
 /**
  * 群聊仓库（多群聊）：每个群 = 一行 `characterId = [GROUP_CHARACTER_ID]` 的 conversation（isGroup=1），
@@ -13,6 +17,7 @@ import kotlinx.coroutines.flow.Flow
  * 因此群成员发言绝不触发 Seedance 自动视频。
  */
 class GroupChatRepository(
+    private val context: Context,
     private val conversationRepository: ConversationRepository,
     private val chatRepository: ChatRepository,
 ) {
@@ -56,9 +61,13 @@ class GroupChatRepository(
         conversationRepository.setGroupCover(id, coverPath)
     }
 
-    /** 删除群及其全部消息（Seedance 任务记录不受影响）。 */
+    /** 删除群及其全部消息；封面文件一并清理（审计：删行不删文件会泄漏内部存储）。 */
     suspend fun deleteGroup(id: Long) {
+        val cover = conversationRepository.getById(id)?.coverImagePath
         conversationRepository.delete(id)
+        if (!cover.isNullOrBlank()) {
+            withContext(Dispatchers.IO) { GroupCoverStore.delete(context, cover) }
+        }
     }
 
     /** 最近一条消息预览（内容 -> 时间戳），供群列表副标题；无消息返回 null。 */

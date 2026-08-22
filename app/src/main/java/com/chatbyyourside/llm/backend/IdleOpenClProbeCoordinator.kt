@@ -6,6 +6,7 @@ import com.chatbyyourside.data.model.AutoBackendModelClass
 import com.chatbyyourside.data.model.DEFAULT_MNN_MODELS
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.provider.local.ModelPathResolver
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -46,6 +47,10 @@ class IdleOpenClProbeCoordinator(
             probeInFlight = true
             try {
                 runProbeIfNeeded()
+            } catch (e: CancellationException) {
+                // 取消必须传播（退后台取消在途探测）：吞掉会破坏结构化并发，
+                // 使已取消的协程「正常完成」并跳过后续取消语义。
+                throw e
             } catch (e: Exception) {
                 // 探测是旁路：任何异常只记日志，绝不影响主流程。
                 Log.w(TAG, "空闲 OpenCL 探测异常（忽略）: ${e.message}")

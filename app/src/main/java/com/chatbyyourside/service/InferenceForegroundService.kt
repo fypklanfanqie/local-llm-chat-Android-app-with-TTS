@@ -55,7 +55,12 @@ class InferenceForegroundService : Service() {
     }
 
     private fun acquireWakeLock() {
-        if (wakeLock != null) return
+        // 审计 llm-backend-3：每次 onStartCommand 都重新 acquire（先释放旧锁）。
+        // 旧实现以成员变量非空判重跳过重复获取，但 stopService→onDestroy 异步——上一轮生成
+        // 结束后服务未及销毁、新一轮 begin() 复用同一实例时，旧锁（10 分钟超时从首轮起算）
+        // 到期后不再续期，本轮长生成后半段 CPU 可睡眠，恰复现该服务要防的冻结症状。
+        // PARTIAL_WAKE_LOCK 非引用计数下重新 acquire 会刷新超时窗口。
+        releaseWakeLock()
         runCatching {
             val pm = getSystemService(POWER_SERVICE) as? PowerManager ?: return
             val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
