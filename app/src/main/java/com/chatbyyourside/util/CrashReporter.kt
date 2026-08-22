@@ -98,7 +98,13 @@ object CrashReporter {
             null  // 记录失败不影响主流程
         } ?: return
         mirrorToExternal(file)
-        mirrorToPublicDownloads(file)
+        // 正常路径的公共 Download 镜像异步化：CrashInitProvider 在主线程、WorkManager 初始化前
+        // 调用本函数，MediaStore 写流/查询若同步执行会拖慢「点图标→首帧」启动窗口（对已闪退的
+        // 设备雪上加霜）。内部落盘仍是同步的（取证主通道不依赖此镜像）；崩溃路径
+        // [writeCrash] 保持同步——进程将死，异步线程可能来不及完成。
+        Thread {
+            mirrorToPublicDownloads(file)
+        }.apply { isDaemon = true }.start()
     }
 
     private fun writeCrash(thread: Thread, throwable: Throwable) {
