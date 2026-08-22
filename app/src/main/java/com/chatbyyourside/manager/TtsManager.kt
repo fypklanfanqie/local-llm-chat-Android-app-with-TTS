@@ -117,8 +117,9 @@ class TtsManager(
 
         // 长文本分段合成：火山单次合成有长度上限，按句界切 ≤500 字符/段，
         // MP3 帧流可直接字节拼接（与 VolcTtsClient 内部 Chunked 逐帧拼接同理）。
+        // joinTo 显式空 separator——默认 ", " 会污染字节流。
         val audioBytes = chunkTtsText(cleanText, CLOUD_MAX_CHUNK_LENGTH)
-            .joinTo(ByteArrayOutputStream()) { chunk ->
+            .joinTo(ByteArrayOutputStream(), separator = "") { chunk ->
                 client.synthesize(chunk, characterId, ttsConfig, speakerId)
             }.toByteArray()
 
