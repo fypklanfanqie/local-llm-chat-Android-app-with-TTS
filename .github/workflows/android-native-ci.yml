@@ -69,7 +69,9 @@ jobs:
           if unzip -l "$APK" | grep -q "libQnn"; then
             echo "标准 APK 不应含 QNN 库"; exit 1
           fi
-          "$ANDROID_HOME"/build-tools/*/zipalign -c 4 "$APK"
+          # glob 会匹配多个 build-tools 版本目录造成多余参数；先取第一个再调用
+          ZIPALIGN=$(ls "$ANDROID_HOME"/build-tools/*/zipalign | head -1)
+          "$ZIPALIGN" -c 4 "$APK"
 
       - name: Emulator instrumentation (runtime tests, skip-if-no-fixture)
         uses: reactivecircus/android-emulator-runner@v2
