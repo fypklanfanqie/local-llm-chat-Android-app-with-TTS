@@ -258,6 +258,19 @@ object CrashReporter {
         appendLine("系统指纹: ${Build.FINGERPRINT}")
         appendLine("版本增量: ${Build.VERSION.INCREMENTAL}")
         appendLine("进程: ${processName()}")
+        // Track A4 启动阶段：本次启动最后到达的阶段（provider 前的 old/unknown ->
+        // application -> activity -> loaded）。「点图标即闪退」据此直接定位死亡阶段。
+        appendLine("启动阶段: ${startupPhase()}")
+    }
+
+    /** 读 startup_journal/phase（CrashWatchdog.markPhase 写入）。crashDir 与 journal 同 filesDir，
+     *  由 crashDir 父目录推导，避免额外依赖注入；读失败返回 unknown（旧版本无此标记）。 */
+    private fun startupPhase(): String = try {
+        val filesDir = crashDir?.parentFile ?: return "unknown"
+        val phaseFile = File(File(filesDir, "startup_journal"), "phase")
+        if (phaseFile.exists()) phaseFile.readText().trim() else "unknown"
+    } catch (_: Throwable) {
+        "unknown"
     }
 
     /** 当前进程名（经 ProcessNameUtil 读 /proc/self/cmdline，全 API 级别可用；
@@ -283,6 +296,13 @@ object CrashWatchdog {
     private const val MARKER_STARTED = "started"
     private const val MARKER_LOADED = "loaded"
     private const val MARKER_STREAK = "crash_streak"
+    private const val MARKER_PHASE = "phase"
+
+    /** 启动阶段名（写 phase 标记）：provider（ContentProvider 阶段）-> application -> activity -> loaded。 */
+    internal const val PHASE_PROVIDER = "provider"
+    internal const val PHASE_APPLICATION = "application"
+    internal const val PHASE_ACTIVITY = "activity"
+    internal const val PHASE_LOADED = "loaded"
 
     /** 进入「崩溃循环安全模式」的连续崩溃次数阈值：连续 2 次启动窗口内崩溃 -> 降级启动。 */
     internal const val SAFE_MODE_THRESHOLD = 2
@@ -293,6 +313,25 @@ object CrashWatchdog {
         File(dir, MARKER_STARTED).exists() && !File(dir, MARKER_LOADED).exists()
     } catch (_: Throwable) {
         false
+    }
+
+    /** 记录当前启动阶段（覆盖写；任何失败静默，绝不影响启动）。 */
+    fun markPhase(context: Context, phase: String) {
+        try {
+            val dir = journalDir(context)
+            dir.mkdirs()
+            File(dir, MARKER_PHASE).writeText(phase)
+        } catch (_: Throwable) {
+            // 阶段标记失败不影响启动主流程
+        }
+    }
+
+    /** 当前 phase 标记内容（崩溃日志头部用；读失败返回 unknown）。 */
+    fun currentPhase(context: Context): String = try {
+        val file = File(journalDir(context), MARKER_PHASE)
+        if (file.exists()) file.readText().trim() else "unknown"
+    } catch (_: Throwable) {
+        "unknown"
     }
 
     /**

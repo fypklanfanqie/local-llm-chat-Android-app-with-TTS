@@ -47,6 +47,17 @@ class CrashInitProvider : ContentProvider() {
         } catch (e: Throwable) {
             Log.e(TAG, "logEvent 失败（不影响启动）: ${e.message}")
         }
+        // Track A4 启动阶段标记：provider 阶段（崩溃日志头部据此区分「死在 ContentProvider
+        // 阶段」——即 Application.onCreate 之前、WorkManager 初始化窗口内）。
+        // 仅主进程写：:mnn_probe 与主进程共享 filesDir，探测进程短路前若覆盖此标记会
+        // 污染主进程阶段判定。
+        try {
+            if (!ProcessNameUtil.currentProcessName().endsWith(":mnn_probe")) {
+                CrashWatchdog.markPhase(appContext, CrashWatchdog.PHASE_PROVIDER)
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "markPhase 失败（不影响启动）: ${e.message}")
+        }
         return true
     }
 

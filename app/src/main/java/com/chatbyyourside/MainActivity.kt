@@ -60,6 +60,8 @@ class MainActivity : ComponentActivity() {
             android.util.Log.w("MainActivity", "上次启动在加载窗口内异常退出（可能为原生崩溃）")
         }
         CrashWatchdog.markStarted(this)
+        // Track A4 启动阶段：Activity 阶段（崩溃日志头部标注；LOADED 由 LoadingScreen 完成时写）。
+        CrashWatchdog.markPhase(this, CrashWatchdog.PHASE_ACTIVITY)
 
         // 同步读取当前主题模式，用于初始化系统栏样式（避免冷启动时系统栏图标与主题错位）。
         // DataStore 读取通常很快，加 1s 超时防止国产 ROM 文件 I/O 被拦截时阻塞 onCreate；
@@ -161,6 +163,8 @@ class MainActivity : ComponentActivity() {
                                     showLoading = false
                                     // 加载画面正常走完：记录 loaded 标记，本轮启动窗口安全通过。
                                     CrashWatchdog.markLoaded(app)
+                                    // Track A4：加载完成阶段（崩溃日志头部据此区分「死在首帧前/后」）。
+                                    CrashWatchdog.markPhase(app, CrashWatchdog.PHASE_LOADED)
                                 })
                             }
 

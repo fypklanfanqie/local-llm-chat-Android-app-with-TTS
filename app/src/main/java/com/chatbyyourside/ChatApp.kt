@@ -76,6 +76,9 @@ class ChatApp : Application() {
         // OpenClProbeService 的 companion init 独立加载，不依赖本 onCreate。
         if (isMnnProbeProcess()) return
 
+        // Track A4 启动阶段：Application 阶段起点（崩溃日志头部会标注本次启动最后到达的阶段）。
+        CrashWatchdog.markPhase(this, CrashWatchdog.PHASE_APPLICATION)
+
         // 崩溃循环安全模式（Track A3）：主进程每次启动先更新「连续启动窗口内崩溃」计数。
         // 连续 2 次启动即崩溃 -> 本次降级启动：跳过空闲 OpenCL 探测（起隔离进程碰 GPU 驱动）
         // 与问候/群聊后台调度（WorkManager 入队 + 精确闹钟），只保留最轻的 UI 启动路径，
