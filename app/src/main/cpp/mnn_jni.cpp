@@ -773,7 +773,6 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeCreate(
     return (jlong)llm;
 }
 
-JNIEXPORT jstring JNICALL
 // ===== 生成主体（审计 llm-backend-4 重构）：消息 JSON 已是标准 UTF-8 字节串 =====
 // jstring 入口（GetStringUTFChars = modified UTF-8，emoji 为非法 CESU-8）与新 jbyteArray
 // 入口（Kotlin String.toByteArray(UTF_8)，真标准 UTF-8）都转发到这里。
