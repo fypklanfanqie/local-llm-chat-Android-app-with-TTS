@@ -3,8 +3,10 @@ package com.chatbyyourside.ui.chat
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.test.assertDoesNotExist
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
@@ -44,8 +46,8 @@ class ChatStopGenerationTest {
                 onTextChange = {},
                 onSend = onSend,
                 onStop = onStop,
-                onPickImage = {},
                 onPickFile = {},
+                onOpenGifts = {},
                 onRemoveImage = {},
                 onRemoveFile = {},
             )
@@ -57,8 +59,8 @@ class ChatStopGenerationTest {
         var sendClicks = 0
         var stopClicks = 0
         chatInputBar(isStreaming = false, stopRequested = false, onSend = { sendClicks++ }, onStop = { stopClicks++ })
-        rule.onNodeWithContentDescription("发送").assertExists()
-        rule.onNodeWithContentDescription("停止生成").assertDoesNotExist()
+        rule.onNodeWithContentDescription("发送").assertIsDisplayed()
+        rule.onAllNodesWithContentDescription("停止生成").assertCountEquals(0)
         rule.onNodeWithContentDescription("发送").performClick()
         rule.waitForIdle()
         assertEquals(1, sendClicks)
@@ -80,20 +82,20 @@ class ChatStopGenerationTest {
                 onTextChange = {},
                 onSend = { sendClicks++ },
                 onStop = { stopClicks++; stopRequested = true },
-                onPickImage = {},
                 onPickFile = {},
+                onOpenGifts = {},
                 onRemoveImage = {},
                 onRemoveFile = {},
             )
         }
-        rule.onNodeWithContentDescription("发送").assertDoesNotExist()
-        rule.onNodeWithContentDescription("停止生成").assertExists().performClick()
+        rule.onAllNodesWithContentDescription("发送").assertCountEquals(0)
+        rule.onNodeWithContentDescription("停止生成").assertIsDisplayed().performClick()
         rule.waitForIdle()
         // 点击一次 -> onStop 恰好一次；之后进入「正在停止」并禁用，避免重复触发。
         assertEquals(1, stopClicks)
         assertEquals(0, sendClicks)
-        rule.onNodeWithContentDescription("正在停止").assertExists().assertIsNotEnabled()
-        rule.onNodeWithContentDescription("停止生成").assertDoesNotExist()
+        rule.onNodeWithContentDescription("正在停止").assertIsDisplayed().assertIsNotEnabled()
+        rule.onAllNodesWithContentDescription("停止生成").assertCountEquals(0)
     }
 
     @Test
@@ -101,7 +103,7 @@ class ChatStopGenerationTest {
         var stopClicks = 0
         chatInputBar(isStreaming = true, stopRequested = true, onStop = { stopClicks++ })
         // 正在停止状态：按钮存在且禁用（clickable(enabled=false) 移除 click 动作，无法再触发 onStop）。
-        rule.onNodeWithContentDescription("正在停止").assertExists().assertIsNotEnabled()
+        rule.onNodeWithContentDescription("正在停止").assertIsDisplayed().assertIsNotEnabled()
     }
 
     @Test
@@ -118,17 +120,17 @@ class ChatStopGenerationTest {
                 onTextChange = {},
                 onSend = {},
                 onStop = { stopRequested = true; isStreaming = false },
-                onPickImage = {},
                 onPickFile = {},
+                onOpenGifts = {},
                 onRemoveImage = {},
                 onRemoveFile = {},
             )
         }
-        rule.onNodeWithContentDescription("停止生成").assertExists()
+        rule.onNodeWithContentDescription("停止生成").assertIsDisplayed()
         // 模拟停止完成：isStreaming=false -> 恢复发送按钮。
         isStreaming = false
         rule.waitForIdle()
-        rule.onNodeWithContentDescription("发送").assertExists()
-        rule.onNodeWithContentDescription("停止生成").assertDoesNotExist()
+        rule.onNodeWithContentDescription("发送").assertIsDisplayed()
+        rule.onAllNodesWithContentDescription("停止生成").assertCountEquals(0)
     }
 }
