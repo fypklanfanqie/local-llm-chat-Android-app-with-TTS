@@ -241,10 +241,17 @@ cp -f "$JNI_BUILD/libmnn_jni.so"        "$OUTPUT_DIR/libmnn_jni.so"
 cp -f "$JNI_BUILD/libcpu_sys_jni.so"    "$OUTPUT_DIR/libcpu_sys_jni.so"
 
 # Matching 26.1.10909125 (r26b) libc++_shared.so (same toolchain as libMNN/JNI — ABI consistency).
+# 注意：NDK r26 sysroot 的 libc++_shared.so 是 4KB PT_LOAD 对齐（r27 起默认 16KB），
+# 会挂下方 16KiB 校验。生产 jniLibs 里已有一份 r27c 的 16KB 版（与本仓库同源），
+# 若已存在则保留不动，仅缺失时才从 NDK 兜底拷贝。
 LIBCPP_SRC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
 [[ -f "$LIBCPP_SRC" ]] || LIBCPP_SRC="$ANDROID_NDK_HOME/sources/cxx-stl/llvm-libc++/libs/$ANDROID_ABI/libc++_shared.so"
 [[ -f "$LIBCPP_SRC" ]] || die "libc++_shared.so not found in NDK"
-cp -f "$LIBCPP_SRC" "$OUTPUT_DIR/libc++_shared.so"
+if [[ -f "$OUTPUT_DIR/libc++_shared.so" ]]; then
+    log "keeping existing $OUTPUT_DIR/libc++_shared.so (already 16KiB-aligned from repo)"
+else
+    cp -f "$LIBCPP_SRC" "$OUTPUT_DIR/libc++_shared.so"
+fi
 
 # Remove any stale QNN libraries from the standard bundle (Task 11).
 rm -f "$OUTPUT_DIR"/libQnn*.so
