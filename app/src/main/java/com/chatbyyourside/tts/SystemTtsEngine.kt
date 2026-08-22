@@ -68,6 +68,9 @@ class SystemTtsEngine(private val context: Context) {
     @Volatile
     private var playing = false
 
+    /** 尚未播完的分段数：onDone/onError 逐段递减，减到 0 才复位 [playing]（分段朗读时防提前结束）。 */
+    private val pendingUtterances = java.util.concurrent.atomic.AtomicInteger(0)
+
     val isPlaying: Boolean get() = playing
 
     /** 合成并朗读（初始化懒执行）。 */
@@ -113,11 +116,12 @@ class SystemTtsEngine(private val context: Context) {
         playing = true
         // 长文本分段：系统引擎有 getMaxSpeechInputLength 上限（通常 4000 字符），超限静默失败。
         // 首段 QUEUE_FLUSH 打断上一次朗读，余段 QUEUE_ADD 排队续播；
-        // onDone/onError 按 utterance 复位 playing，末段完成即整体结束。
+        // onDone/onError 按段递减计数，末段完成才复位 playing（防 UI 提前显示「已结束」）。
         val maxLen = runCatching { engine.maxSpeechInputLength }
             .getOrDefault(DEFAULT_MAX_SPEECH_INPUT_LENGTH)
             .coerceAtLeast(MIN_CHUNK_LENGTH)
         val chunks = chunkTtsText(text, maxLen)
+        pendingUtterances.set(chunks.size)
         chunks.forEachIndexed { index, chunk ->
             val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
             engine.speak(chunk, queueMode, null, "$UTTERANCE_ID_$index")
@@ -126,6 +130,7 @@ class SystemTtsEngine(private val context: Context) {
 
     /** 停止朗读（系统引擎无暂停语义，pause 亦走此路径）。 */
     fun stop() {
+        pendingUtterances.set(0)
         runCatching {
             tts?.let { engine ->
                 engine.stop()
@@ -154,12 +159,15 @@ class SystemTtsEngine(private val context: Context) {
         }
         engine.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {}
+
             override fun onDone(utteranceId: String?) {
-                playing = false
+                if (pendingUtterances.decrementAndGet() <= 0) playing = false
             }
 
             override fun onError(utteranceId: String?) {
                 Log.w(TAG, "system tts utterance error id=$utteranceId")
+                // 单段失败即整体失败：清零计数并复位（余段不再有意义）
+                pendingUtterances.set(0)
                 playing = false
             }
         })
