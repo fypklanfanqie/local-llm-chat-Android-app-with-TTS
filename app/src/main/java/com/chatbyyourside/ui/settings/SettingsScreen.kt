@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -80,6 +81,7 @@ import com.chatbyyourside.data.model.GroupChatConfig
 import com.chatbyyourside.data.model.UserProfileConfig
 import com.chatbyyourside.util.AppStorageUsage
 import com.chatbyyourside.util.CrashReporter
+import com.chatbyyourside.util.CrashWatchdog
 import com.chatbyyourside.util.UserProfileImageStore
 import com.chatbyyourside.work.GroupChatScheduler
 import kotlinx.coroutines.Dispatchers
@@ -635,6 +637,19 @@ private fun CrashLogsDialog(onDismiss: () -> Unit) {
             ?.sortedByDescending { it.lastModified() }
             .orEmpty()
     }
+    // Track A4 启动诊断摘要：上次启动最后到达的阶段 + 连续崩溃计数 + 安全模式状态。
+    // 用户分享日志时这些信息随弹窗一眼可见，开发者可据此定位「点图标即闪退」死亡窗口。
+    val startupDiagnosis = remember {
+        val phase = CrashWatchdog.lastArchivedPhase(context)
+            ?: CrashWatchdog.currentPhase(context).takeIf { it != "unknown" }
+            ?: "无记录"
+        val streak = runCatching {
+            java.io.File(File(context.filesDir, "startup_journal"), "crash_streak")
+                .readText().trim().toInt()
+        }.getOrDefault(0)
+        "启动诊断：上次阶段=$phase，连续崩溃=$streak 次，" +
+            if (streak >= CrashWatchdog.SAFE_MODE_THRESHOLD) "已进入安全模式" else "正常"
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -649,6 +664,13 @@ private fun CrashLogsDialog(onDismiss: () -> Unit) {
                         "共 ${logFiles.size} 条。点击条目即可分享给开发者（内容含机型 / 系统 / ABI 与崩溃堆栈）。",
                         color = scheme.onSurfaceVariant,
                         fontSize = 12.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        startupDiagnosis,
+                        color = scheme.onSurface,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
                     )
                     Spacer(Modifier.height(8.dp))
                     LazyColumn(modifier = Modifier.height(280.dp)) {
