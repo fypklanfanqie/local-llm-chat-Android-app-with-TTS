@@ -11,6 +11,9 @@
     public <init>(android.content.Context, androidx.work.WorkerParameters);
 }
 
+# ContentProvider（框架按 manifest 类名反射实例化；最早期崩溃采集，缺失则整个 provider 阶段零覆盖）
+-keep public class com.chatbyyourside.util.CrashInitProvider { public <init>(...); }
+
 # JNI 桥接：类名、native 方法名、被 C 代码访问的静态成员都不能混淆
 -keep class com.chatbyyourside.llm.backend.MnnBridge { *; }
 -keep class com.chatbyyourside.llm.CpuSysBridge { *; }

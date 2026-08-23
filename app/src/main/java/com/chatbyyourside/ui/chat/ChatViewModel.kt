@@ -755,6 +755,12 @@ class ChatViewModel(
                 val isCloudProvider = container.settingsRepository.getActiveProviderNow() == ChatProviderType.CLOUD
                 // 我的形象（人设/关系）注入 system：云端与本地共用同一消息列表，一处注入两端生效
                 val userDirective = container.settingsRepository.getUserProfileNow().toDirectiveText()
+                // 世界观注入：绑定当前角色（CHARACTER 目标）的世界观，按数组序拼接
+                val worldviewDirective = buildWorldviewDirective(
+                    container.settingsRepository.getWorldviewsNow().filter {
+                        it.targetType == WorldviewTargetType.CHARACTER && it.targetId == charId
+                    },
+                )
                 // 特殊邂逅追加离线场景背景，保证后续对话持续围绕解锁的事件；自定义角色采用其编辑后的脚本。
                 val specialEvent = container.database.affinityDao().getSpecialEventByConversation(convId)
                 if (specialEvent != null && !isCloudProvider) {
@@ -765,7 +771,7 @@ class ChatViewModel(
                     "\n\n【特殊邂逅背景】\n${script.scene}\n${script.systemPrompt}\n请延续这个场景，不要跳出场景或提及好感度、事件机制。"
                 }.orEmpty()
                 val apiMessages = buildList {
-                    add(ChatMessage(role = "system", content = char.systemPrompt + eventDirective + userDirective))
+                    add(ChatMessage(role = "system", content = char.systemPrompt + eventDirective + worldviewDirective + userDirective))
                     addAll(resolvedHistory.map {
                         if (isCloudProvider) {
                             // 云端历史含 <think>（注入的推理），回传前剥离（reasoning 不应回传给对话商）。

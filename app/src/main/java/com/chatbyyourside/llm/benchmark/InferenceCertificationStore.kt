@@ -1,6 +1,8 @@
 package com.chatbyyourside.llm.benchmark
 
 import android.content.Context
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -13,7 +15,12 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.security.MessageDigest
 
-private val Context.certificationDataStore by preferencesDataStore(name = "certification_store")
+// 国产 ROM 强杀后文件可能写一半损坏：损坏即删档重建（认证自然失效，回退默认配置重跑基准，
+// 与「native 重建即认证失效」的保守语义一致）。
+private val Context.certificationDataStore by preferencesDataStore(
+    name = "certification_store",
+    corruptionHandler = ReplaceFileCorruptionHandler { _ -> emptyPreferences() },
+)
 
 /**
  * 已认证推理选项（Task 6）。

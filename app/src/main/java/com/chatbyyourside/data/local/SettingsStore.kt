@@ -13,6 +13,7 @@ import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.GroupChatConfig
 import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.UserProfileConfig
+import com.chatbyyourside.data.model.WorldviewConfig
 import com.chatbyyourside.data.model.SeedanceModelVariant
 import com.chatbyyourside.data.model.SeedanceRatio
 import com.chatbyyourside.data.model.SeedanceResolution
@@ -77,6 +78,9 @@ class SettingsStore(
         // 角色
         val ACTIVE_CHARACTER = stringPreferencesKey("active_character")
         val CUSTOM_CHARACTERS = stringPreferencesKey("custom_characters")  // JSON: List<Character>
+
+        // 世界观设定（JSON: List<WorldviewConfig>，与目标一一对应注入提示词）
+        val WORLDVIEWS = stringPreferencesKey("worldviews")
 
         // 会话：角色 -> 当前活跃会话 id
         val ACTIVE_CONVERSATIONS = stringPreferencesKey("active_conversations")  // JSON: Map<String, Long>
@@ -445,6 +449,23 @@ class SettingsStore(
             val current: List<Character> = if (raw.isBlank()) emptyList()
             else runCatching { voiceJson.decodeFromString<List<Character>>(raw) }.getOrDefault(emptyList())
             p[Keys.CUSTOM_CHARACTERS] = voiceJson.encodeToString(transform(current))
+        }
+    }
+
+    // ===== 世界观设定 =====
+    val worldviews: Flow<List<WorldviewConfig>> = dataStore.data.map { p ->
+        val raw = p[Keys.WORLDVIEWS] ?: ""
+        if (raw.isBlank()) emptyList()
+        else runCatching { voiceJson.decodeFromString<List<WorldviewConfig>>(raw) }.getOrDefault(emptyList())
+    }
+
+    /** 原子读-改-写（单 edit 事务），与 updateCustomCharacters 同机制。 */
+    suspend fun updateWorldviews(transform: (List<WorldviewConfig>) -> List<WorldviewConfig>) {
+        dataStore.edit { p ->
+            val raw = p[Keys.WORLDVIEWS] ?: ""
+            val current: List<WorldviewConfig> = if (raw.isBlank()) emptyList()
+            else runCatching { voiceJson.decodeFromString<List<WorldviewConfig>>(raw) }.getOrDefault(emptyList())
+            p[Keys.WORLDVIEWS] = voiceJson.encodeToString(transform(current))
         }
     }
 

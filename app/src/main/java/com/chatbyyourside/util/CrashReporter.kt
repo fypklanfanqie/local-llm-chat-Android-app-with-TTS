@@ -1,7 +1,10 @@
 package com.chatbyyourside.util
 
+import android.content.ContentResolver
+import android.content.ContentValues
 import android.content.Context
 import android.os.Build
+import android.provider.MediaStore
 import android.util.Log
 import java.io.File
 import java.io.PrintWriter
@@ -34,12 +37,18 @@ object CrashReporter {
     private const val TAG = "CrashReporter"
     private const val DIR_NAME = "crash"
 
+    /** 公共 Download 镜像子目录（MediaStore RELATIVE_PATH = Download/ChatLogs/）。 */
+    private const val PUBLIC_DIR_NAME = "ChatLogs"
+
     /** 镜像目录保留的最新日志份数上限（防无限膨胀；文件名含时间戳，按名排序即按时间）。 */
     private const val MIRROR_MAX_FILES = 20
 
     private val installed = AtomicBoolean(false)
     private var crashDir: File? = null
     private var externalMirrorDir: File? = null
+    /** 公共 Download 镜像用 applicationContext（install 时缓存；null = 未安装或 API<29）。 */
+    @Volatile
+    private var appContext: Context? = null
 
     /**
      * 安装全局崩溃 handler。应在 Application.onCreate 最开头调用（含 `:mnn_probe` 进程），
@@ -52,6 +61,11 @@ object CrashReporter {
         crashDir = File(context.filesDir, DIR_NAME)
         externalMirrorDir = try {
             context.getExternalFilesDir(null)?.let { File(it, DIR_NAME) }
+        } catch (_: Throwable) {
+            null
+        }
+        appContext = try {
+            context.applicationContext
         } catch (_: Throwable) {
             null
         }
@@ -74,14 +88,25 @@ object CrashReporter {
 
     /** 手动记录一条事件日志（非崩溃，如启动初始化异常兜底），与崩溃日志同目录。 */
     fun logEvent(context: Context, tag: String, message: String) {
-        try {
+        // try 结果可能为 null（记录失败静默放弃）；先收窄为非空 File 再走镜像，
+        // 避免 File? 传给 mirrorToExternal/mirrorToPublicDownloads 的类型不匹配。
+        val file: File = try {
             val dir = crashDir ?: File(context.filesDir, DIR_NAME).also { crashDir = it }
             dir.mkdirs()
-            val file = File(dir, "event_${timestamp()}.log")
-            file.writeText(buildLogHeader() + "\n[$tag] $message\n")
+            val f = File(dir, "event_${timestamp()}.log")
+            f.writeText(buildLogHeader() + "\n[$tag] $message\n")
+            f
         } catch (_: Exception) {
-            // 记录失败不影响主流程
-        }
+            null  // 记录失败不影响主流程
+        } ?: return
+        mirrorToExternal(file)
+        // 正常路径的公共 Download 镜像异步化：CrashInitProvider 在主线程、WorkManager 初始化前
+        // 调用本函数，MediaStore 写流/查询若同步执行会拖慢「点图标→首帧」启动窗口（对已闪退的
+        // 设备雪上加霜）。内部落盘仍是同步的（取证主通道不依赖此镜像）；崩溃路径
+        // [writeCrash] 保持同步——进程将死，异步线程可能来不及完成。
+        Thread {
+            mirrorToPublicDownloads(file)
+        }.apply { isDaemon = true }.start()
     }
 
     private fun writeCrash(thread: Thread, throwable: Throwable) {
@@ -98,6 +123,7 @@ object CrashReporter {
         pw.flush()
         file.writeText(sw.toString())
         mirrorToExternal(file)
+        mirrorToPublicDownloads(file)
         Log.e(TAG, "崩溃日志已写入 ${file.absolutePath}")
     }
 
@@ -110,6 +136,92 @@ object CrashReporter {
             trimMirror(mirror)
         } catch (_: Throwable) {
             // 镜像失败不追溯：内部日志已落盘，设置页仍可见
+        }
+    }
+
+    /**
+     * 公共 Download 镜像（API 29+ MediaStore，无需任何存储权限）：把崩溃/事件日志写入
+     * `Download/ChatLogs/`，OPPO/vivo 用户用**自带文件管理器**即可直接看到并发给开发者——
+     * 解决「App 打不开 → 设置页不可达；Android/data 被 MTP/厂商文件管理器屏蔽」的取证死角。
+     *
+     * - 仅 API 29+：MediaStore.Downloads 自 Q 起可用且 scoped storage 下 app 无需权限即可
+     *   写入自己的贡献；API 24-28 走 legacy 直写公共目录需 WRITE_EXTERNAL_STORAGE 运行时
+     *   权限（已随 da6ff6e 移除，不为其回加），低版本保持仅内部+外部私有镜像双通道。
+     * - 同名文件跳过（IS_PENDING 发布后重复崩溃极少同名——名字带毫秒时间戳）；写入全程
+     *   独立 try/catch，失败不影响内部落盘主流程。
+     * - 超限清理 [trimPublicDownloads]：只删本应用自己创建的条目（owner 匹配，API 29+
+     *   允许 app 删除自己的 MediaStore 贡献，无需用户确认）。
+     */
+    private fun mirrorToPublicDownloads(file: File) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val context = appContext ?: return
+        try {
+            val resolver = context.contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "chatbyyourside_${file.name}")
+                put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                put(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    "Download/${PUBLIC_DIR_NAME}",
+                )
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: return  // 插入被 ROM 拒绝：放弃公共镜像，内部日志仍在
+            resolver.openOutputStream(uri)?.use { out ->
+                file.inputStream().use { it.copyTo(out) }
+            } ?: run {
+                // 打不开输出流：清掉半截 pending 条目再返回
+                runCatching { resolver.delete(uri, null, null) }
+                return
+            }
+            values.clear()
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            trimPublicDownloads(resolver)
+        } catch (_: Throwable) {
+            // 公共镜像失败不追溯：内部 + Android/data 双通道已尽力
+        }
+    }
+
+    /** 公共 Download 目录保留最新 [MIRROR_MAX_FILES] 份，只删本应用创建的条目。 */
+    private fun trimPublicDownloads(resolver: ContentResolver) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        try {
+            val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            val projection = arrayOf(
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.OWNER_PACKAGE_NAME,
+            )
+            val pkg = appContext?.packageName
+            resolver.query(
+                collection,
+                projection,
+                "${MediaStore.MediaColumns.RELATIVE_PATH}=?",
+                arrayOf("Download/${PUBLIC_DIR_NAME}/"),
+                "${MediaStore.MediaColumns.DATE_ADDED} DESC",
+            )?.use { cursor ->
+                // OWNER_PACKAGE_NAME 个别 ROM 可能缺列：缺列即放弃清理（宁多留不误删）。
+                val idCol = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+                val ownerCol = cursor.getColumnIndex(MediaStore.MediaColumns.OWNER_PACKAGE_NAME)
+                if (idCol < 0 || ownerCol < 0) return
+                var seen = 0
+                while (cursor.moveToNext()) {
+                    seen++
+                    val isOurs = cursor.getString(ownerCol) == pkg
+                    if (seen > MIRROR_MAX_FILES && isOurs) {
+                        val id = cursor.getLong(idCol)
+                        runCatching {
+                            resolver.delete(
+                                android.content.ContentUris.withAppendedId(collection, id),
+                                null, null,
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+            // 清理失败不影响主流程：最坏情况是 Download/ChatLogs 多积几份日志
         }
     }
 
@@ -154,6 +266,19 @@ object CrashReporter {
         appendLine("系统指纹: ${Build.FINGERPRINT}")
         appendLine("版本增量: ${Build.VERSION.INCREMENTAL}")
         appendLine("进程: ${processName()}")
+        // Track A4 启动阶段：本次启动最后到达的阶段（provider 前的 old/unknown ->
+        // application -> activity -> loaded）。「点图标即闪退」据此直接定位死亡阶段。
+        appendLine("启动阶段: ${startupPhase()}")
+    }
+
+    /** 读 startup_journal/phase（CrashWatchdog.markPhase 写入）。crashDir 与 journal 同 filesDir，
+     *  由 crashDir 父目录推导，避免额外依赖注入；读失败返回 unknown（旧版本无此标记）。 */
+    private fun startupPhase(): String = try {
+        val filesDir = crashDir?.parentFile ?: return "unknown"
+        val phaseFile = File(File(filesDir, "startup_journal"), "phase")
+        if (phaseFile.exists()) phaseFile.readText().trim() else "unknown"
+    } catch (_: Throwable) {
+        "unknown"
     }
 
     /** 当前进程名（经 ProcessNameUtil 读 /proc/self/cmdline，全 API 级别可用；
@@ -178,11 +303,113 @@ object CrashWatchdog {
     private const val DIR_NAME = "startup_journal"
     private const val MARKER_STARTED = "started"
     private const val MARKER_LOADED = "loaded"
+    private const val MARKER_STREAK = "crash_streak"
+    private const val MARKER_PHASE = "phase"
+    /** 上次启动最后到达的阶段（markPhase 覆盖前归档；崩溃窗口判定用——本次启动的 provider
+     *  标记会覆盖 phase，必须从归档读上次的真相）。 */
+    private const val MARKER_LAST_PHASE = "last_phase"
 
-    /** 上次启动是否在加载窗口内异常退出（检查当下即代表上一次进程的状态）。 */
+    /** 启动阶段名（写 phase 标记）：provider（ContentProvider 阶段）-> application -> activity -> loaded。 */
+    internal const val PHASE_PROVIDER = "provider"
+    internal const val PHASE_APPLICATION = "application"
+    internal const val PHASE_ACTIVITY = "activity"
+    internal const val PHASE_LOADED = "loaded"
+
+    /** 进入「崩溃循环安全模式」的连续崩溃次数阈值：连续 2 次启动窗口内崩溃 -> 降级启动。 */
+    internal const val SAFE_MODE_THRESHOLD = 2
+
+    /**
+     * 上次启动是否在启动窗口内异常退出（检查当下即代表上一次进程的状态）。
+     *
+     * 双窗口判定：
+     * 1. 旧语义：`started` 在且 `loaded` 不在 —— MainActivity 已到但加载未完成（Activity/首帧窗口）。
+     * 2. 新语义（Track A4）：last_phase 归档停在 provider/application/activity —— 死在
+     *    ContentProvider 或 Application.onCreate 阶段（「点图标即闪退」最可能的窗口，
+     *    此时 started/loaded 是上上轮的值，旧判定会漏检）。归档由最早代码 CrashInitProvider
+     *    在写本次 phase 前完成，避免被本次标记污染。
+     *
+     * 兼容性：last_phase 缺失（旧版本升级或首次安装）-> 只走旧判定，不误判。
+     */
     fun hasCrashedLastLaunch(context: Context): Boolean = try {
         val dir = journalDir(context)
-        File(dir, MARKER_STARTED).exists() && !File(dir, MARKER_LOADED).exists()
+        val started = File(dir, MARKER_STARTED).exists()
+        val loaded = File(dir, MARKER_LOADED).exists()
+        if (started && !loaded) true
+        else when (lastArchivedPhase(context)) {
+            PHASE_PROVIDER, PHASE_APPLICATION, PHASE_ACTIVITY -> true
+            else -> false
+        }
+    } catch (_: Throwable) {
+        false
+    }
+
+    /** 记录当前启动阶段（覆盖写；任何失败静默，绝不影响启动）。 */
+    fun markPhase(context: Context, phase: String) {
+        try {
+            val dir = journalDir(context)
+            dir.mkdirs()
+            File(dir, MARKER_PHASE).writeText(phase)
+        } catch (_: Throwable) {
+            // 阶段标记失败不影响启动主流程
+        }
+    }
+
+    /**
+     * 归档「上次启动最后到达的阶段」（phase -> last_phase，只应由最早代码 CrashInitProvider
+     * 在写任何本次 phase 之前调用一次）。此后本次启动的 provider/application/... 覆盖 phase，
+     * 但 last_phase 保留上次的真相，供 [hasCrashedLastLaunch] 判定「死在 ContentProvider/
+     * Application 阶段」窗口（此时 started/loaded 是上上轮的值，旧判定漏检）。
+     */
+    fun archiveLastPhase(context: Context) {
+        try {
+            val dir = journalDir(context)
+            val phaseFile = File(dir, MARKER_PHASE)
+            if (phaseFile.exists()) {
+                dir.mkdirs()
+                phaseFile.copyTo(File(dir, MARKER_LAST_PHASE), overwrite = true)
+            }
+        } catch (_: Throwable) {
+            // 归档失败不影响启动主流程
+        }
+    }
+
+    /** 上次启动最后到达的阶段（last_phase 归档；读失败/缺失返回 null）。 */
+    fun lastArchivedPhase(context: Context): String? = try {
+        val file = File(journalDir(context), MARKER_LAST_PHASE)
+        if (file.exists()) file.readText().trim() else null
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** 当前 phase 标记内容（崩溃日志头部用；读失败返回 unknown）。 */
+    fun currentPhase(context: Context): String = try {
+        val file = File(journalDir(context), MARKER_PHASE)
+        if (file.exists()) file.readText().trim() else "unknown"
+    } catch (_: Throwable) {
+        "unknown"
+    }
+
+    /**
+     * 更新连续崩溃计数（主进程 Application.onCreate 时调用；探测进程已短路，不参与）。
+     * 上次启动在加载窗口内崩溃 -> 计数 +1；正常走完 -> 归零。计数持久化到 startup_journal。
+     */
+    fun updateCrashStreak(context: Context): Int = try {
+        val dir = journalDir(context)
+        dir.mkdirs()
+        val file = File(dir, MARKER_STREAK)
+        val prev = runCatching { file.readText().trim().toInt() }.getOrDefault(0)
+        val next = if (hasCrashedLastLaunch(context)) prev + 1 else 0
+        file.writeText(next.toString())
+        next
+    } catch (_: Throwable) {
+        0
+    }
+
+    /** 是否已进入「崩溃循环安全模式」：连续 [SAFE_MODE_THRESHOLD] 次启动窗口内崩溃。 */
+    fun isCrashLoopSafeMode(context: Context): Boolean = try {
+        val file = File(journalDir(context), MARKER_STREAK)
+        val streak = runCatching { file.readText().trim().toInt() }.getOrDefault(0)
+        streak >= SAFE_MODE_THRESHOLD
     } catch (_: Throwable) {
         false
     }

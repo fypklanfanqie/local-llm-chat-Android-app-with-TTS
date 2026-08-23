@@ -8,6 +8,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
@@ -21,9 +22,11 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Redeem
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -46,6 +49,7 @@ import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.CharacterAffinity
 import com.chatbyyourside.ui.glass.GlassLargeTitle
 import com.chatbyyourside.ui.glass.GlassSheet
+import com.chatbyyourside.ui.glass.GlassTextField
 import com.chatbyyourside.ui.glass.frostedGlass
 import com.chatbyyourside.ui.glass.monogramGradient
 import com.chatbyyourside.ui.theme.GlassShapes
@@ -56,6 +60,21 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+
+/**
+ * 角色搜索过滤：按名称 / 代号 / 职位 / 种族模糊匹配（大小写不敏感）。
+ * 顶层公开，供世界观目标选择器等处复用。
+ */
+fun filterCharacters(list: List<Character>, query: String): List<Character> {
+    val q = query.trim().lowercase()
+    if (q.isEmpty()) return list
+    return list.filter { c ->
+        c.name.lowercase().contains(q) ||
+            c.code.lowercase().contains(q) ||
+            c.role.lowercase().contains(q) ||
+            c.race.lowercase().contains(q)
+    }
+}
 
 @Composable
 fun CharactersScreen(
@@ -78,6 +97,9 @@ fun CharactersScreen(
     var showImport by remember { mutableStateOf(false) }
     var showPersona by remember { mutableStateOf<Character?>(null) }
     var toast by remember { mutableStateOf<String?>(null) }
+    var searchQuery by remember { mutableStateOf("") }
+    var editTarget by remember { mutableStateOf<Character?>(null) }
+    var deleteTarget by remember { mutableStateOf<Character?>(null) }
 
     Box(
         modifier = Modifier
@@ -111,6 +133,31 @@ fun CharactersScreen(
                 }
             }
 
+            GlassTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 4.dp),
+                placeholder = "搜索角色（名称 / 代号 / 职位 / 种族）",
+                leading = {
+                    Icon(
+                        Icons.Filled.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                },
+                trailing = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { searchQuery = "" }, modifier = Modifier.size(24.dp)) {
+                            Icon(Icons.Filled.Close, contentDescription = "清除搜索", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                },
+            )
+
+            val filteredCharacters = remember(characters, searchQuery) { filterCharacters(characters, searchQuery) }
             LazyVerticalGrid(
                 columns = GridCells.Fixed(2),
                 modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
@@ -118,7 +165,18 @@ fun CharactersScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
-                items(characters) { char ->
+                if (filteredCharacters.isEmpty()) {
+                    item(span = { GridItemSpan(2) }) {
+                        Text(
+                            "没有匹配的角色",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 13.sp,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        )
+                    }
+                }
+                items(filteredCharacters) { char ->
                     val affinityValue by container.affinityRepository.observeAffinity(char.id)
                         .collectAsState(initial = CharacterAffinity(char.id, 0f, 0L))
                     CharacterCard(
@@ -140,12 +198,10 @@ fun CharactersScreen(
                             }
                         },
                         onDelete = if (char.isCustom) {
-                            {
-                                scope.launch {
-                                    CharacterImageStore.delete(context, char.image)
-                                    container.characterRepository.removeCustom(char.id)
-                                }
-                            }
+                            { deleteTarget = char }
+                        } else null,
+                        onEdit = if (char.isCustom) {
+                            { editTarget = char }
                         } else null,
                         onViewPersona = { showPersona = char },
                         onViewAffinity = { onOpenAffinity(char.id) },
@@ -170,6 +226,47 @@ fun CharactersScreen(
             onConfirm = { c ->
                 scope.launch { container.characterRepository.addCustom(c) }
                 showCreate = false
+            },
+        )
+    }
+    editTarget?.let { target ->
+        CustomCharacterDialog(
+            editing = target,
+            onDismiss = { editTarget = null },
+            onConfirm = { c ->
+                scope.launch {
+                    container.characterRepository.updateCustom(c)
+                    // 编辑换图后清理旧图文件（编辑模式内不删，防取消即丢图）
+                    if (target.image.isNotBlank() && target.image != c.image) {
+                        CharacterImageStore.delete(context, target.image)
+                    }
+                }
+                editTarget = null
+            },
+        )
+    }
+    deleteTarget?.let { char ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            title = { Text("删除角色", color = MaterialTheme.colorScheme.onSurface) },
+            text = { Text("确定删除「${char.name}」？该操作不可恢复。", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+            confirmButton = {
+                TextButton(onClick = {
+                    scope.launch {
+                        CharacterImageStore.delete(context, char.image)
+                        container.characterRepository.removeCustom(char.id)
+                        // 删除的是当前活跃角色时回退默认角色，避免聊天页空角色态
+                        if (activeCharacter == char.id) {
+                            container.settingsRepository.setActiveCharacter(Characters.DEFAULT_CHARACTER_ID)
+                        }
+                    }
+                    deleteTarget = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) { Text("取消", color = MaterialTheme.colorScheme.onSurfaceVariant) }
             },
         )
     }
@@ -215,6 +312,7 @@ private fun CharacterCard(
     onViewAffinity: () -> Unit,
     hasUnreadAffinityEvent: Boolean = false,
     affinityValue: Float? = null,
+    onEdit: (() -> Unit)? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     Box(
@@ -317,12 +415,27 @@ private fun CharacterCard(
                 Text("使用中", color = scheme.onPrimary, fontSize = 9.5.sp, fontWeight = FontWeight.SemiBold)
             }
         }
-        if (onDelete != null) {
-            IconButton(
-                onClick = onDelete,
-                modifier = Modifier.align(Alignment.TopStart).size(26.dp),
+        if (onEdit != null || onDelete != null) {
+            Row(
+                modifier = Modifier.align(Alignment.TopStart),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Filled.Delete, contentDescription = "删除", tint = scheme.error, modifier = Modifier.size(15.dp))
+                if (onEdit != null) {
+                    IconButton(
+                        onClick = onEdit,
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(Icons.Filled.Edit, contentDescription = "编辑角色", tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                    }
+                }
+                if (onDelete != null) {
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.size(36.dp),
+                    ) {
+                        Icon(Icons.Filled.Delete, contentDescription = "删除角色", tint = scheme.error, modifier = Modifier.size(18.dp))
+                    }
+                }
             }
         }
     }
@@ -417,24 +530,26 @@ fun CharacterPortrait(
 }
 
 /**
- * 新建自定义角色弹窗
+ * 新建/编辑自定义角色弹窗：[editing] 非空为编辑模式（预填字段，id 保持不变——
+ * 改名也不换 id，避免会话 / 群成员等按 id 的引用断裂）。
  */
 @Composable
 fun CustomCharacterDialog(
     onDismiss: () -> Unit,
     onConfirm: (Character) -> Unit,
+    editing: Character? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var name by remember { mutableStateOf("") }
-    var code by remember { mutableStateOf("") }
-    var role by remember { mutableStateOf("") }
-    var race by remember { mutableStateOf("") }
-    var image by remember { mutableStateOf("") }
+    var name by remember(editing) { mutableStateOf(editing?.name ?: "") }
+    var code by remember(editing) { mutableStateOf(editing?.code ?: "") }
+    var role by remember(editing) { mutableStateOf(editing?.role ?: "") }
+    var race by remember(editing) { mutableStateOf(editing?.race ?: "") }
+    var image by remember(editing) { mutableStateOf(editing?.image ?: "") }
     var savingImage by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf(false) }
-    var systemPrompt by remember { mutableStateOf("") }
+    var systemPrompt by remember(editing) { mutableStateOf(editing?.systemPrompt ?: "") }
 
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
@@ -443,7 +558,9 @@ fun CustomCharacterDialog(
             savingImage = true
             saveError = false
             scope.launch(Dispatchers.IO) {
-                CharacterImageStore.delete(context, image)
+                // 新建模式直接删临时副本；编辑模式仅删「新选的临时副本」（≠原图），
+                // 原图由调用方在保存成功后清理，防取消编辑即丢图
+                if (editing == null || image != editing.image) CharacterImageStore.delete(context, image)
                 val saved = CharacterImageStore.save(context, uri)
                 withContext(Dispatchers.Main) {
                     if (saved != null) image = saved else saveError = true
@@ -457,7 +574,7 @@ fun CustomCharacterDialog(
         onDismissRequest = onDismiss,
         containerColor = scheme.surfaceContainerHigh,
         titleContentColor = scheme.onSurface,
-        title = { Text("新建自定义角色", color = scheme.onSurface) },
+        title = { Text(if (editing == null) "新建自定义角色" else "编辑自定义角色", color = scheme.onSurface) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -477,7 +594,8 @@ fun CustomCharacterDialog(
                         )
                     },
                     onClear = {
-                        CharacterImageStore.delete(context, image)
+                        // 编辑模式仅删「新选的临时副本」（≠原图），原图由调用方保存成功后统一清理
+                        if (editing == null || image != editing.image) CharacterImageStore.delete(context, image)
                         image = ""
                         saveError = false
                     },
@@ -501,7 +619,8 @@ fun CustomCharacterDialog(
                 enabled = !savingImage,
                 onClick = {
                     if (name.isBlank() || systemPrompt.isBlank()) return@TextButton
-                    val id = "custom-" + name.trim().replace(" ", "_")
+                    // 编辑模式沿用原 id；新建按名称生成
+                    val id = editing?.id ?: ("custom-" + name.trim().replace(" ", "_"))
                     onConfirm(
                         Character(
                             id = id,
@@ -515,7 +634,7 @@ fun CustomCharacterDialog(
                         ),
                     )
                 },
-            ) { Text("创建", color = if (savingImage) scheme.onSurfaceVariant else scheme.primary) }
+            ) { Text(if (editing == null) "创建" else "保存", color = if (savingImage) scheme.onSurfaceVariant else scheme.primary) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消", color = scheme.onSurfaceVariant) }

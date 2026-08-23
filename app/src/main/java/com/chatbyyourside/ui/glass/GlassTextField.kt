@@ -2,6 +2,8 @@ package com.chatbyyourside.ui.glass
 
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
@@ -17,7 +19,7 @@ import androidx.compose.ui.unit.dp
 import com.chatbyyourside.ui.theme.GlassShapes
 
 /**
- * 毛玻璃输入框（BasicTextField + 玻璃容器 + placeholder + 尾部槽位）。
+ * 毛玻璃输入框（BasicTextField + 玻璃容器 + placeholder + 前置/尾部槽位）。
  */
 @Composable
 fun GlassTextField(
@@ -27,6 +29,7 @@ fun GlassTextField(
     placeholder: String = "",
     singleLine: Boolean = true,
     shape: Shape = GlassShapes.cardSmall,
+    leading: (@Composable RowScope.() -> Unit)? = null,
     trailing: @Composable RowScope.() -> Unit = {},
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -36,6 +39,10 @@ fun GlassTextField(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (leading != null) {
+            leading()
+            Spacer(Modifier.width(8.dp))
+        }
         BasicTextField(
             value = value,
             onValueChange = onValueChange,

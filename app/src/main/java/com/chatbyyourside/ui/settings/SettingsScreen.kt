@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -35,6 +36,7 @@ import com.chatbyyourside.data.model.ApiConfig
 import com.chatbyyourside.data.model.TtsConfig
 import com.chatbyyourside.data.repository.ChatBackgroundConfig
 import com.chatbyyourside.data.repository.ChatBackgroundRepository
+import com.chatbyyourside.ui.glass.CollapsibleSection
 import com.chatbyyourside.ui.glass.GlassLargeTitle
 import com.chatbyyourside.ui.glass.GlassListRow
 import com.chatbyyourside.ui.glass.GlassListSection
@@ -80,6 +82,7 @@ import com.chatbyyourside.data.model.GroupChatConfig
 import com.chatbyyourside.data.model.UserProfileConfig
 import com.chatbyyourside.util.AppStorageUsage
 import com.chatbyyourside.util.CrashReporter
+import com.chatbyyourside.util.CrashWatchdog
 import com.chatbyyourside.util.UserProfileImageStore
 import com.chatbyyourside.work.GroupChatScheduler
 import kotlinx.coroutines.Dispatchers
@@ -205,7 +208,7 @@ fun SettingsScreen(
         }
 
         // ===== 本地 AI 引擎 =====
-        GlassListSection(title = "本地 AI 引擎") {
+        CollapsibleSection(title = "本地 AI 引擎", key = "local_ai", initiallyExpanded = false) {
             GlassListRow(
                 title = "推理引擎设置",
                 subtitle = "CPU / GPU / NPU 后端与参数",
@@ -226,7 +229,7 @@ fun SettingsScreen(
         }
 
         // ===== LLM API 配置 =====
-        GlassListSection(title = "LLM API 配置") {
+        CollapsibleSection(title = "LLM API 配置", key = "llm_api", initiallyExpanded = true, keepContent = true) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 FieldLabel("模型商")
                 ProviderDropdown(
@@ -338,7 +341,7 @@ fun SettingsScreen(
         }
 
         // ===== 对话 =====
-        GlassListSection(title = "对话") {
+        CollapsibleSection(title = "对话", key = "chat", initiallyExpanded = true) {
             GlassListRow(
                 title = "深度思考模式",
                 subtitle = "展示并折叠模型推理过程",
@@ -352,6 +355,9 @@ fun SettingsScreen(
             )
         }
 
+        // ===== 世界观设定（自定义叙事设定注入提示词，与目标一一对应）=====
+        WorldviewSection(container = container)
+
         GreetingSection(container = container, scope = scope)
         GroupChatSection(container = container, scope = scope)
         UserProfileSection(container = container, scope = scope)
@@ -360,7 +366,7 @@ fun SettingsScreen(
         SeedanceSettingsSection(container = container, scope = scope)
 
         // ===== 语音合成（朗读）=====
-        GlassListSection(title = "语音合成 (TTS) · 朗读") {
+        CollapsibleSection(title = "语音合成 (TTS) · 朗读", key = "tts", initiallyExpanded = false, keepContent = true) {
             GlassListRow(
                 title = "自动朗读新回复",
                 subtitle = "AI 回复完成后自动朗读（仍可用「朗读」按钮手动控制）",
@@ -466,7 +472,7 @@ fun SettingsScreen(
         TtsGuideButton()
 
         // ===== 角色双语音色 =====
-        GlassListSection(title = "角色双语音色（speaker_id）") {
+        CollapsibleSection(title = "角色双语音色（speaker_id）", key = "tts_voices", initiallyExpanded = false, keepContent = true) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
                     "为个别角色配置专属 speaker_id 可覆盖默认音色；未配置的角色朗读时自动回落上方「默认音色」。日语模式优先用日文音色，缺日文时同样回落默认音色。",
@@ -635,6 +641,19 @@ private fun CrashLogsDialog(onDismiss: () -> Unit) {
             ?.sortedByDescending { it.lastModified() }
             .orEmpty()
     }
+    // Track A4 启动诊断摘要：上次启动最后到达的阶段 + 连续崩溃计数 + 安全模式状态。
+    // 用户分享日志时这些信息随弹窗一眼可见，开发者可据此定位「点图标即闪退」死亡窗口。
+    val startupDiagnosis = remember {
+        val phase = CrashWatchdog.lastArchivedPhase(context)
+            ?: CrashWatchdog.currentPhase(context).takeIf { it != "unknown" }
+            ?: "无记录"
+        val streak = runCatching {
+            java.io.File(File(context.filesDir, "startup_journal"), "crash_streak")
+                .readText().trim().toInt()
+        }.getOrDefault(0)
+        "启动诊断：上次阶段=$phase，连续崩溃=$streak 次，" +
+            if (streak >= CrashWatchdog.SAFE_MODE_THRESHOLD) "已进入安全模式" else "正常"
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -649,6 +668,13 @@ private fun CrashLogsDialog(onDismiss: () -> Unit) {
                         "共 ${logFiles.size} 条。点击条目即可分享给开发者（内容含机型 / 系统 / ABI 与崩溃堆栈）。",
                         color = scheme.onSurfaceVariant,
                         fontSize = 12.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        startupDiagnosis,
+                        color = scheme.onSurface,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
                     )
                     Spacer(Modifier.height(8.dp))
                     LazyColumn(modifier = Modifier.height(280.dp)) {
@@ -863,7 +889,7 @@ private fun ChatBackgroundSection(container: AppContainer, scope: CoroutineScope
         }
     }
 
-    GlassListSection(title = "聊天背景") {
+    CollapsibleSection(title = "聊天背景", key = "chat_background", initiallyExpanded = true) {
         GlassListRow(
             title = "自定义背景图片",
             subtitle = "从相册选择图片作为聊天背景轮播（最多 ${ChatBackgroundRepository.MAX_BACKGROUNDS} 张）",
@@ -1020,7 +1046,7 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
         notifGranted = it
     }
 
-    GlassListSection(title = "角色问候") {
+    CollapsibleSection(title = "角色问候", key = "greeting", initiallyExpanded = false) {
         GlassListRow(
             title = "角色主动问候",
             subtitle = if (isCloud) "所选角色白天随机时间主动给你发消息。仅云端 AI 可用。"
@@ -1388,7 +1414,7 @@ private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineSco
         }
     }
 
-    GlassListSection(title = "Seedance 对话视频") {
+    CollapsibleSection(title = "Seedance 对话视频", key = "seedance", initiallyExpanded = false) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(
                 "角色回复后自动生成对应短视频（Seedance 2.0），支持火山方舟官方与中转站（如 dm1124 媒体协议），API Key 与对话模型分开配置。",
@@ -1720,7 +1746,7 @@ private fun GroupChatSection(container: AppContainer, scope: CoroutineScope) {
 
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
-    GlassListSection(title = "群聊") {
+    CollapsibleSection(title = "群聊", key = "group_chat", initiallyExpanded = false) {
         GlassListRow(
             title = "多人角色群聊",
             subtitle = if (isCloud) "勾选角色同群聊天；空闲时自动互相聊天并可主动向你提问。仅云端 AI 可用。"
@@ -1845,7 +1871,7 @@ private fun UserProfileSection(container: AppContainer, scope: CoroutineScope) {
         }
     }
 
-    GlassListSection(title = "我的形象（选填）") {
+    CollapsibleSection(title = "我的形象（选填）", key = "user_profile", initiallyExpanded = false, keepContent = true) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(
                 "以下全部为选填：留空则使用默认身份、不注入额外设定；填写后会把设定带进群聊、单聊与角色主动消息。",
@@ -1961,7 +1987,7 @@ private fun StorageSection(container: AppContainer, scope: CoroutineScope) {
     }
     LaunchedEffect(Unit) { refresh() }
 
-    GlassListSection(title = "存储管理") {
+    CollapsibleSection(title = "存储管理", key = "storage", initiallyExpanded = false) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
                 "统计聊天数据 / 图片缓存 / 视频 / 导入图片占用；模型文件请到「模型」页管理。",

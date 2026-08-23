@@ -2,6 +2,8 @@ package com.chatbyyourside.llm.benchmark
 
 import android.content.Context
 import android.util.Log
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -10,8 +12,12 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-/** 基准结果专用 DataStore（文件 benchmark_store.preferences_pb）。 */
-private val Context.benchmarkResultStore by preferencesDataStore(name = "benchmark_store")
+/** 基准结果专用 DataStore（文件 benchmark_store.preferences_pb）。国产 ROM 强杀后文件损坏
+ *  即删档重建（结果丢失可重跑基准，绝不能成为启动/基准路径闪退点）。 */
+private val Context.benchmarkResultStore by preferencesDataStore(
+    name = "benchmark_store",
+    corruptionHandler = ReplaceFileCorruptionHandler { _ -> emptyPreferences() },
+)
 
 /**
  * DataStore + JSON 基准结果持久化（Task 5 Step 4）。

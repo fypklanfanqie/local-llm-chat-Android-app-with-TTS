@@ -1,6 +1,8 @@
 package com.chatbyyourside.llm.backend
 
 import android.content.Context
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -12,7 +14,13 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
-private val Context.healthDataStore by preferencesDataStore(name = "health_store")
+// 国产 ROM（ColorOS/OriginOS）强杀进程后偏好文件可能写一半损坏：不带 CorruptionHandler 时
+// .first()/.edit 抛 CorruptionException，会在启动/探测路径闪退。损坏即删档重建（记录自然清空，
+// 健康状态回退未知，保守重新探测——与健康记录「指纹变化即失效」语义一致）。
+private val Context.healthDataStore by preferencesDataStore(
+    name = "health_store",
+    corruptionHandler = ReplaceFileCorruptionHandler { _ -> emptyPreferences() },
+)
 
 /** 后端健康状态（Task 9）。 */
 enum class HealthState { UNKNOWN, PROBE_OK, MODEL_OK, COOLDOWN, CRASH_BLACKLISTED }

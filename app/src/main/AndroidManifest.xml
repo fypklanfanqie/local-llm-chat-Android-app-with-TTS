@@ -59,6 +59,17 @@
         android:networkSecurityConfig="@xml/network_security_config"
         tools:targetApi="31">
 
+        <!-- 最早崩溃采集（Track A0）：ContentProvider 在 Application.onCreate 之前、按 initOrder 实例化。
+             WorkManager 默认初始化器（androidx.startup）在所有自定义代码前跑纯 Java 初始化；
+             若 OPPO/vivo ColorOS/OriginOS 在 ContentProvider 阶段发生 ROM 文件 I/O 拦截异常，
+             此时 CrashReporter（原在 Application.onCreate 安装）还未装上，崩溃零覆盖。
+             本 Provider 以最高 initOrder 确保先于 androidx.startup 安装崩溃 handler + 留取证痕迹。 -->
+        <provider
+            android:name=".util.CrashInitProvider"
+            android:authorities="${applicationId}.crashinit"
+            android:exported="false"
+            android:initOrder="1000" />
+
         <!-- OpenCL 探测（Task 10）：声明可选 vendor OpenCL 库；探测进程动态加载，缺库不崩溃。 -->
         <uses-native-library
             android:name="libOpenCL.so"

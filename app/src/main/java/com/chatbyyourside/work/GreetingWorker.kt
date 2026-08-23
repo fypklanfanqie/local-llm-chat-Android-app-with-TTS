@@ -13,6 +13,8 @@ import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.config.isFreeProxyBaseUrl
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.data.model.ChatProviderType
+import com.chatbyyourside.data.model.WorldviewTargetType
+import com.chatbyyourside.data.model.buildWorldviewDirective
 import com.chatbyyourside.data.remote.ChatMessageDto
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.notification.AppLifecycleObserver
@@ -253,7 +255,13 @@ class GreetingWorker(
             withTimeout(AppConfig.Greeting.GENERATE_TIMEOUT_MS) {
                 // 我的形象（人设/关系）一并注入主动问候的 system
                 val userDirective = settings.getUserProfileNow().toDirectiveText()
-                generateGreeting(container.directLlmClient, apiConfig, char, history, userDirective)
+                // 世界观注入：问候是该角色的发言，不注入会出现「对话里活在末世、早安问候却聊日常」的人格撕裂
+                val worldviewDirective = buildWorldviewDirective(
+                    settings.getWorldviewsNow().filter {
+                        it.targetType == WorldviewTargetType.CHARACTER && it.targetId == charId
+                    },
+                )
+                generateGreeting(container.directLlmClient, apiConfig, char, history, userDirective, worldviewDirective)
             }
         } catch (e: Exception) {
             null
@@ -300,6 +308,7 @@ class GreetingWorker(
         char: com.chatbyyourside.data.model.Character,
         history: List<ChatMessage>,
         userDirective: String,
+        worldviewDirective: String = "",
     ): String {
         val cal = Calendar.getInstance()
         val hour = cal.get(Calendar.HOUR_OF_DAY)
@@ -324,7 +333,7 @@ class GreetingWorker(
         }
 
         val messages = buildList {
-            add(ChatMessageDto(role = "system", content = JsonPrimitive(char.systemPrompt + userDirective + instruction)))
+            add(ChatMessageDto(role = "system", content = JsonPrimitive(char.systemPrompt + worldviewDirective + userDirective + instruction)))
             history.forEach { m ->
                 if (m.content.isBlank()) return@forEach
                 // 剥离 <think> 段（深度思考模式下云端回复会带），避免把推理过程当历史喂回

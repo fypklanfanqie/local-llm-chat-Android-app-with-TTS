@@ -8,6 +8,7 @@ import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.GroupChatConfig
 import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.UserProfileConfig
+import com.chatbyyourside.data.model.WorldviewConfig
 import com.chatbyyourside.data.model.SystemVoiceTemplate
 import com.chatbyyourside.data.model.ThemeMode
 import com.chatbyyourside.data.model.TtsConfig
@@ -47,6 +48,12 @@ class SettingsRepository(private val store: SettingsStore) {
     val ttsAutoRead: Flow<Boolean> = store.ttsAutoRead
     val activeCharacter: Flow<String> = store.activeCharacter
     val customCharacters: Flow<List<Character>> = store.customCharacters
+
+    // ===== 世界观设定 =====
+    val worldviews: Flow<List<WorldviewConfig>> = store.worldviews
+
+    suspend fun updateWorldviews(transform: (List<WorldviewConfig>) -> List<WorldviewConfig>) =
+        store.updateWorldviews(transform)
     val volume: Flow<Int> = store.volume
     val musicFavorites: Flow<Set<String>> = store.musicFavorites
     val musicRepeatMode: Flow<Int> = store.musicRepeatMode
@@ -265,6 +272,11 @@ class SettingsRepository(private val store: SettingsStore) {
     /** 同步获取自定义角色（5s 超时返回空列表，等同无自定义角色） */
     suspend fun getCustomCharactersNow(): List<Character> = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         customCharacters.first()
+    } ?: emptyList()
+
+    /** 同步获取世界观（5s 超时返回空列表，等同无世界观注入），供 Worker / 发送路径使用 */
+    suspend fun getWorldviewsNow(): List<WorldviewConfig> = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        worldviews.first()
     } ?: emptyList()
 
     // ===== 角色问候同步读取（供 GreetingWorker 用）=====
