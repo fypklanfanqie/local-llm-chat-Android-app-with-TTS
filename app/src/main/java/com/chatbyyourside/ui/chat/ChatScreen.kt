@@ -2,7 +2,9 @@ package com.chatbyyourside.ui.chat
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
+// 顶栏两处 AnimatedVisibility 位于 Column > Box 内：K2 会把调用劫持到 ColumnScope 扩展并报
+// 「cannot be called with an implicit receiver」，别名强制解析到顶层版本。
+import androidx.compose.animation.AnimatedVisibility as TopLevelAnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -455,7 +457,7 @@ fun ChatScreen(
         ) {
             Box(modifier = Modifier.fillMaxWidth()) {
                 // 完整顶栏：高度动画由 expand/shrink 驱动，消息区自动回流
-                AnimatedVisibility(
+                TopLevelAnimatedVisibility(
                     visible = !topBarCollapsed,
                     enter = expandVertically(
                         spring(Spring.DampingRatioNoBouncy, Spring.StiffnessMediumLow),
@@ -492,9 +494,9 @@ fun ChatScreen(
                     )
                 }
                 // 收起态小胶囊：原地淡入淡出盖住展开条的动画尾部
-                AnimatedVisibility(
+                TopLevelAnimatedVisibility(
                     visible = topBarCollapsed,
-                    modifier = Modifier.align(Alignment.CenterHorizontally),
+                    modifier = Modifier.align(Alignment.TopCenter),
                     enter = fadeIn(tween(220)) + scaleIn(
                         initialScale = 0.8f,
                         animationSpec = spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium),
