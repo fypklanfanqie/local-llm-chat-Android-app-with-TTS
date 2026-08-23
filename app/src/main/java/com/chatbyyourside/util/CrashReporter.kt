@@ -88,7 +88,9 @@ object CrashReporter {
 
     /** 手动记录一条事件日志（非崩溃，如启动初始化异常兜底），与崩溃日志同目录。 */
     fun logEvent(context: Context, tag: String, message: String) {
-        val file: File? = try {
+        // try 结果可能为 null（记录失败静默放弃）；先收窄为非空 File 再走镜像，
+        // 避免 File? 传给 mirrorToExternal/mirrorToPublicDownloads 的类型不匹配。
+        val file: File = try {
             val dir = crashDir ?: File(context.filesDir, DIR_NAME).also { crashDir = it }
             dir.mkdirs()
             val f = File(dir, "event_${timestamp()}.log")
