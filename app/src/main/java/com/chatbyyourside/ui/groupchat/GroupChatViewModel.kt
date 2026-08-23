@@ -11,6 +11,8 @@ import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.DisplayMessage
+import com.chatbyyourside.data.model.WorldviewTargetType
+import com.chatbyyourside.data.model.buildWorldviewDirective
 import com.chatbyyourside.data.repository.GroupChatRepository
 import com.chatbyyourside.ui.chat.PendingFinal
 import com.chatbyyourside.util.MarkdownParser
@@ -238,6 +240,12 @@ class GroupChatViewModel(
                 var history = container.chatRepository.getHistory(convId)
                 val provider = container.chatProviderManager.getActiveProvider()
                 val mentionIdSet = mentionIds.toSet()
+                // 世界观注入：绑定本群（GROUP 目标）的世界观，多说话人循环外只构建一次
+                val worldviewDirective = buildWorldviewDirective(
+                    container.settingsRepository.getWorldviewsNow().filter {
+                        it.targetType == WorldviewTargetType.GROUP && it.targetId == convId.toString()
+                    },
+                )
 
                 speakers.forEach { speaker ->
                     val targeted = speaker.id in mentionIdSet
@@ -249,6 +257,7 @@ class GroupChatViewModel(
                         userPersona = profile.persona,
                         userRelationship = profile.relationship,
                         targeted = targeted,
+                        worldviewDirective = worldviewDirective,
                     )
 
                     var lastStreamRenderMs = 0L

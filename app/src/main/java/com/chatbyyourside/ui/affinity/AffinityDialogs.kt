@@ -19,6 +19,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -121,13 +122,18 @@ fun EventEditDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        // 档案终端风深色体系（与 Affinity 页面自铺深底同源）：不指定 containerColor 时
+        // 亮色主题下弹窗为浅底，硬编码浅色标签/正文会不可读
+        containerColor = Color(0xFF161D2B),
+        titleContentColor = Color(0xFFF2F0EA),
+        textContentColor = Color(0xFFAAB4C1),
         title = { Text("编辑特殊邂逅 · ${threshold} 好感") },
         text = {
             Column(
                 Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("仅自定义角色可编辑；保存后立即生效，重进事件采用新文案。", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                Text("仅自定义角色可编辑；保存后立即生效，重进事件采用新文案。", color = Color(0xFFAAB4C1), fontSize = 11.sp)
                 EventEditField("标题", title, { title = it })
                 EventEditField("场景", scene, { scene = it })
                 EventEditField("开场白", opening, { opening = it })
@@ -160,6 +166,16 @@ private fun EventEditField(label: String, value: String, onChange: (String) -> U
             onValueChange = onChange,
             minLines = minLines,
             textStyle = MaterialTheme.typography.bodySmall.copy(color = Color(0xFFF2F0EA)),
+            // 输入框容器/指示器压入深色系，与弹窗终端风一致（默认主题色在深底上会突兀）
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = Color(0xFF0D1420),
+                unfocusedContainerColor = Color(0xFF0D1420),
+                disabledContainerColor = Color(0xFF0D1420),
+                focusedIndicatorColor = Color.Transparent,
+                unfocusedIndicatorColor = Color.Transparent,
+                disabledIndicatorColor = Color.Transparent,
+                cursorColor = Color(0xFF7C5CFF),
+            ),
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color(0xFF0D1420), RoundedCornerShape(10.dp)),

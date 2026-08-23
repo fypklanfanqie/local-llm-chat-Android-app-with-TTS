@@ -30,6 +30,7 @@ object GroupChatPromptBuilder {
         userPersona: String? = null,
         userRelationship: String? = null,
         targeted: Boolean = false,
+        worldviewDirective: String? = null,
     ): List<ChatMessage> {
         val nameById = members.associate { it.id to it.name }
         val mappedHistory = history.takeLast(AppConfig.GroupChat.MAX_CONTEXT_MESSAGES).mapNotNull { m ->
@@ -45,7 +46,7 @@ object GroupChatPromptBuilder {
             }
         }
         return buildList {
-            add(ChatMessage(role = "system", content = buildSystemPrompt(members, speaker, askUser, userPersona, userRelationship, targeted)))
+            add(ChatMessage(role = "system", content = buildSystemPrompt(members, speaker, askUser, userPersona, userRelationship, targeted, worldviewDirective)))
             addAll(mappedHistory)
         }
     }
@@ -57,11 +58,17 @@ object GroupChatPromptBuilder {
         userPersona: String? = null,
         userRelationship: String? = null,
         targeted: Boolean = false,
+        worldviewDirective: String? = null,
     ): String = buildString {
         append("这是一个角色群聊。你在群里扮演「", speaker.name, "」。\n")
         append("以下是群成员人设：\n")
         members.forEach { m ->
             append("- ", m.name, "（", m.role, "）：", m.systemPrompt.take(AppConfig.GroupChat.PERSONA_MAX_CHARS), "\n")
+        }
+        // 世界观（GROUP 目标）注入：全员人设之后、对话规则之前
+        if (!worldviewDirective.isNullOrBlank()) {
+            append(worldviewDirective)
+            append("\n")
         }
         append("对话规则：\n")
         append("- user 发言是用户说的。\n")

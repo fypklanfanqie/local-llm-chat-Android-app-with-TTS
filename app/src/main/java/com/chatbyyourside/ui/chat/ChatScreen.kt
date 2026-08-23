@@ -2,13 +2,22 @@ package com.chatbyyourside.ui.chat
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,11 +43,15 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material.icons.filled.CardGiftcard
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -208,6 +221,9 @@ fun ChatScreen(
     }
 
     val isLocal = state.activeProvider == ChatProviderType.LOCAL
+
+    // 顶栏折叠态：纯 UI 态（rememberSaveable 供进程重建恢复），不入 ViewModel
+    var topBarCollapsed by rememberSaveable { mutableStateOf(false) }
 
     // ===== 对话导出（TXT / PNG）=====
     val exportScope = rememberCoroutineScope()
@@ -437,30 +453,60 @@ fun ChatScreen(
                 .padding(top = 20.dp, bottom = bottomBarHeight)
                 .then(ClampedImeBottomPadding(WindowInsets.ime, PaddingValues(bottom = bottomBarHeight))),
         ) {
-            ChatTopBar(
-                name = state.characterName,
-                role = state.characterRole,
-                imageUrl = state.characterImage,
-                activeProvider = state.activeProvider,
-                ttsLanguage = state.ttsLanguage,
-                conversationCount = state.conversations.size,
-                deepThinkingEnabled = state.deepThinkingEnabled,
-                videoAutoEnabled = state.activeConversationAutoVideoEnabled,
-                videoToggleDisabled = isLocal,
-                specialEventActive = state.activeSpecialEventId != null,
-                onBack = onBack,
-                onClickCharacter = onNavigateToCharacters,
-                onSwitchProvider = { viewModel.switchProvider(it) },
-                onToggleLang = { viewModel.toggleTtsLanguage() },
-                onToggleDeepThinking = { viewModel.toggleDeepThinking() },
-                onToggleVideoAuto = {
-                    val convId = state.activeConversationId
-                    if (convId != null) {
-                        viewModel.setAutoVideoEnabled(convId, !state.activeConversationAutoVideoEnabled)
-                    }
-                },
-                onOpenConversations = { viewModel.toggleConversationSheet(true) },
-            )
+            Box(modifier = Modifier.fillMaxWidth()) {
+                // 完整顶栏：高度动画由 expand/shrink 驱动，消息区自动回流
+                AnimatedVisibility(
+                    visible = !topBarCollapsed,
+                    enter = expandVertically(
+                        spring(Spring.DampingRatioNoBouncy, Spring.StiffnessMediumLow),
+                    ) + fadeIn(tween(160)),
+                    exit = shrinkVertically(
+                        spring(Spring.DampingRatioNoBouncy, Spring.StiffnessMediumLow),
+                    ) + fadeOut(tween(120)),
+                ) {
+                    ChatTopBar(
+                        name = state.characterName,
+                        role = state.characterRole,
+                        imageUrl = state.characterImage,
+                        activeProvider = state.activeProvider,
+                        ttsLanguage = state.ttsLanguage,
+                        conversationCount = state.conversations.size,
+                        deepThinkingEnabled = state.deepThinkingEnabled,
+                        videoAutoEnabled = state.activeConversationAutoVideoEnabled,
+                        videoToggleDisabled = isLocal,
+                        specialEventActive = state.activeSpecialEventId != null,
+                        collapsed = topBarCollapsed,
+                        onBack = onBack,
+                        onClickCharacter = onNavigateToCharacters,
+                        onSwitchProvider = { viewModel.switchProvider(it) },
+                        onToggleLang = { viewModel.toggleTtsLanguage() },
+                        onToggleDeepThinking = { viewModel.toggleDeepThinking() },
+                        onToggleVideoAuto = {
+                            val convId = state.activeConversationId
+                            if (convId != null) {
+                                viewModel.setAutoVideoEnabled(convId, !state.activeConversationAutoVideoEnabled)
+                            }
+                        },
+                        onOpenConversations = { viewModel.toggleConversationSheet(true) },
+                        onCollapse = { topBarCollapsed = true },
+                    )
+                }
+                // 收起态小胶囊：原地淡入淡出盖住展开条的动画尾部
+                AnimatedVisibility(
+                    visible = topBarCollapsed,
+                    modifier = Modifier.align(Alignment.CenterHorizontally),
+                    enter = fadeIn(tween(220)) + scaleIn(
+                        initialScale = 0.8f,
+                        animationSpec = spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium),
+                    ),
+                    exit = fadeOut(tween(90)),
+                ) {
+                    CollapsedTopBarPill(
+                        provider = state.activeProvider,
+                        onExpand = { topBarCollapsed = false },
+                    )
+                }
+            }
 
             Box(
                 modifier = Modifier
@@ -822,6 +868,8 @@ private fun ChatTopBar(
     onToggleDeepThinking: () -> Unit,
     onToggleVideoAuto: () -> Unit,
     onOpenConversations: () -> Unit,
+    collapsed: Boolean = false,
+    onCollapse: () -> Unit = {},
 ) {
     val scheme = MaterialTheme.colorScheme
     val glass = chatGlass()
@@ -929,6 +977,48 @@ private fun ChatTopBar(
                 onToggleLang()
                 Toast.makeText(context, "语音语言已切换至${next.label}", Toast.LENGTH_SHORT).show()
             },
+        )
+
+        // 折叠顶栏按钮：箭头随折叠态旋转（展开时朝下=可收起，收起过程转 180°）
+        val chevronRotation by animateFloatAsState(
+            targetValue = if (collapsed) 180f else 0f,
+            animationSpec = spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium),
+            label = "topBarChevron",
+        )
+        IconBubble(
+            icon = Icons.Filled.ExpandMore,
+            contentDescription = "收起顶栏",
+            modifier = Modifier.rotate(chevronRotation),
+            onClick = onCollapse,
+        )
+    }
+}
+
+/** 收起态的顶栏小胶囊：显示当前云端/本地状态图标，点击展开完整顶栏。 */
+@Composable
+private fun CollapsedTopBarPill(
+    provider: ChatProviderType,
+    onExpand: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val glass = chatGlass()
+    Row(
+        modifier = modifier
+            .clip(GlassShapes.pill)
+            .liquidGlass(GlassShapes.pill, shadowElevation = glass.shadow, tint = glass.topBarTint, blurRadius = glass.blur)
+            .clickable(onClick = onExpand)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .semantics(mergeDescendants = true) { },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(provider.icon, fontSize = 14.sp)
+        Spacer(Modifier.width(6.dp))
+        Icon(
+            Icons.Filled.ExpandLess,
+            contentDescription = "展开顶栏",
+            tint = scheme.onSurfaceVariant,
+            modifier = Modifier.size(18.dp),
         )
     }
 }
@@ -1312,8 +1402,10 @@ private fun ScienceBlockView(seg: MessageSegment.Science) {
     LaunchedEffect(copied) {
         if (copied) { kotlinx.coroutines.delay(1200); copied = false }
     }
+    // 公式 token 配色（MarkdownParser.SCIENCE_COLORS）按暗底设计，亮色主题下若跟随
+    // surfaceContainerLowest（近白）正文会几乎不可见——固定深色面板（与 CodeBlockView 同思路）
     Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        color = if (LocalDarkTheme.current) Color(0xFF0C0E14) else Color(0xFF1E1E2E),
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
     ) {

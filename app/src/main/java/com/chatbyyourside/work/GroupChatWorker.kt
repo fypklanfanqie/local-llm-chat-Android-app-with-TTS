@@ -16,6 +16,8 @@ import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.GroupChatConfig
+import com.chatbyyourside.data.model.WorldviewTargetType
+import com.chatbyyourside.data.model.buildWorldviewDirective
 import com.chatbyyourside.data.remote.ChatMessageDto
 import com.chatbyyourside.data.remote.DirectLlmClient
 import com.chatbyyourside.data.repository.SettingsRepository
@@ -196,6 +198,12 @@ class GroupChatWorker(
 
         // 我的形象（人设/关系）注入每一条自动发言的 system
         val profile = settings.getUserProfileNow()
+        // 世界观注入：绑定本群（GROUP 目标）的世界观，一轮内复用同一 directive
+        val worldviewDirective = buildWorldviewDirective(
+            settings.getWorldviewsNow().filter {
+                it.targetType == WorldviewTargetType.GROUP && it.targetId == convId.toString()
+            },
+        )
 
         val wakeLock = acquireGroupWakeLock(context)
         try {
@@ -216,6 +224,7 @@ class GroupChatWorker(
                     val content = generateGroupMessage(
                         container.directLlmClient, apiConfig, members, char, history0,
                         askUser = true, userPersona = profile.persona, userRelationship = profile.relationship,
+                        worldviewDirective = worldviewDirective,
                     )
                     if (!content.isNullOrBlank()) {
                         container.groupChatRepository.sendMemberMessage(convId, char.id, content)
@@ -240,6 +249,7 @@ class GroupChatWorker(
                     val content = generateGroupMessage(
                         container.directLlmClient, apiConfig, members, char, history,
                         askUser = false, userPersona = profile.persona, userRelationship = profile.relationship,
+                        worldviewDirective = worldviewDirective,
                     )
                     if (content.isNullOrBlank()) return@repeat
                     container.groupChatRepository.sendMemberMessage(convId, char.id, content)
@@ -275,11 +285,13 @@ class GroupChatWorker(
         askUser: Boolean,
         userPersona: String?,
         userRelationship: String?,
+        worldviewDirective: String? = null,
     ): String? {
         val messages = GroupChatPromptBuilder.buildApiMessages(
             members, speaker, history, askUser,
             userPersona = userPersona,
             userRelationship = userRelationship,
+            worldviewDirective = worldviewDirective,
         ).map { ChatMessageDto(it.role, JsonPrimitive(it.content)) }
         return try {
             withTimeout(AppConfig.GroupChat.GENERATE_TIMEOUT_MS) {
