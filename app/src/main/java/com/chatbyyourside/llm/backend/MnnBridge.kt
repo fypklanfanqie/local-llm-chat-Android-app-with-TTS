@@ -113,6 +113,8 @@ class MnnBridge {
                         "MNN commit 不匹配：native=${info.mnnCommit}, 期望=$EXPECTED_MNN_COMMIT"
                     !info.capabilities.contains(CAPABILITY_SUMMARY_V2) ->
                         "native 未包含 summary_v2（旧构建），v2 遥测/步进不可用"
+                    !info.capabilities.contains(CAPABILITY_UTF8_STREAM_V1) ->
+                        "native 未包含 utf8_stream_v1（旧构建），标准 UTF-8 生成不可用"
                     else -> null
                 }
                 Log.i(TAG, "runtimeInfo abi=${info.abiVersion} commit=${info.mnnCommit} buildId=${info.nativeBuildId} caps=${info.capabilities}")
@@ -157,8 +159,14 @@ class MnnBridge {
         val hasSummaryV2Capability: Boolean
             get() = runtimeInfo?.capabilities?.contains(CAPABILITY_SUMMARY_V2) ?: false
 
-        /**
-         * 能力集标记：采样热重建（Wave 2）。native 宣告该能力后，load 配置可省略
+        /** 能力集标记：生产 nativeGenerateStreamUtf8 字节入口。 */
+        const val CAPABILITY_UTF8_STREAM_V1 = "utf8_stream_v1"
+
+        /** 是否具备生产标准 UTF-8 字节生成能力。 */
+        val hasUtf8StreamCapability: Boolean
+            get() = runtimeInfo?.capabilities?.contains(CAPABILITY_UTF8_STREAM_V1) ?: false
+
+        /** 能力集标记：采样热重建（Wave 2）。native 宣告该能力后，load 配置可省略
          * temperature/topP/repetition_penalty 标量（经每轮 session_prefill 的 set_config 生效），
          * 调参不再改变 loadConfigHash → 不再触发整模重载。旧 .so 无此能力时 Kotlin 保持
          * legacy 行为（标量进 load 配置，调参=重载，逐位不变）。
@@ -313,6 +321,30 @@ class MnnBridge {
     external fun nativeGetLastError(): String
 }
 
+internal class JniContractMismatchException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/** Pure route/exception seam for the production UTF-8 JNI call. */
+internal object MnnJniContract {
+    fun <T> callUtf8(
+        hasCapability: Boolean,
+        call: () -> T,
+    ): T {
+        if (!hasCapability) {
+            throw JniContractMismatchException(
+                "native 缺少标准 UTF-8 生成能力（utf8_stream_v1），请更新应用内置 native 组件",
+            )
+        }
+        return try {
+            call()
+        } catch (e: UnsatisfiedLinkError) {
+            throw JniContractMismatchException(
+                "native UTF-8 生成入口不可用（JNI 版本不匹配），请更新应用内置 native 组件",
+                e,
+            )
+        }
+    }
+}
+
 /**
  * Native 运行时信息（由 [MnnBridge.nativeGetRuntimeInfo] 返回的 JSON 解析）。
  *
@@ -328,6 +360,8 @@ data class MnnRuntimeInfo(
     val nativeBuildId: String,
     val capabilities: Set<String>,
 ) {
+    fun hasCapability(capability: String): Boolean = capabilities.contains(capability)
+
     companion object {
         /** 解析 nativeGetRuntimeInfo 的 JSON；格式错误返回 null（由调用方记诊断）。 */
         fun fromJson(json: String): MnnRuntimeInfo? = try {

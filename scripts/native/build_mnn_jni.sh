@@ -3,15 +3,16 @@
 # libmnn_jni.so / libcpu_sys_jni.so / libbackend_probe.so 离线重编 + 部署
 # （Wave 2：sampler_hot_update 能力串 + BUILD_ID=pinned-af0142b-samplerhot-20260824）
 #
-# 流程：同步新 libMNN.so 到 MNN_DIR → CMake 配置 app/src/main/cpp → ninja →
-#       产物拷入 jniLibs/arm64-v8a → 字符串验证
-# 命令出处：app/build.gradle.kts 注释（externalNativeBuild 已禁用，native 走离线构建）
+# 该 helper 仅保留作 Windows 本地候选构建；发布/生产身份统一由
+# build_mnn_android.sh（NDK 27.2.12479018、manifest 自动生成、四个标准 .so）管理。
 # =============================================================================
 set -euo pipefail
 
 PROJECT="/d/ai/cc Programm/本地ai聊天大众版"
 MNN_DIR="D:/mnn-matched"
-NDK="D:/android-ndk-r27c"
+# NDK 27.2.12479018 (r27c) is the canonical release toolchain; the helper
+# accepts ANDROID_NDK_HOME so it cannot silently use a different installation.
+NDK="${ANDROID_NDK_HOME:-D:/android-ndk-r27c}"
 CMAKE_BIN="C:/Users/Lfq06/AppData/Local/Android/Sdk/cmake/3.22.1/bin/cmake.exe"
 NINJA_BIN="C:/Users/Lfq06/AppData/Local/Android/Sdk/cmake/3.22.1/bin/ninja.exe"
 BUILD_DIR="D:/ai-build/mnn-jni-public"   # ASCII 路径（中文路径下 CMake 崩溃，见项目记忆）
@@ -30,6 +31,9 @@ echo "== [2/5] CMake configure =="
   -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
   -DANDROID_STL=c++_shared \
   -DMNN_DIR="$MNN_DIR" \
+  -DCHAT_MNN_COMMIT=af0142bcc7b76b7a5128373e285683dc04f55f69 \
+  -DCHAT_MNN_JNI_ABI=1 \
+  -DCHAT_MNN_BUILD_ID=pinned-af0142b-samplerhot-20260824 \
   -S "$PROJECT/app/src/main/cpp" -B "$BUILD_DIR"
 
 echo "== [3/5] Build =="

@@ -1003,7 +1003,7 @@ Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGetRuntimeInfo(
         "{\"abiVersion\":%d,"
         "\"mnnCommit\":\"%s\","
         "\"nativeBuildId\":\"%s\","
-        "\"capabilities\":[\"mmap\",\"cached_mmap\",\"reuse_kv\",\"opencl\",\"arm82\",\"summary_v2\",\"sampler_hot_update\"]}";
+        "\"capabilities\":[\"mmap\",\"cached_mmap\",\"reuse_kv\",\"opencl\",\"arm82\",\"summary_v2\",\"sampler_hot_update\",\"utf8_stream_v1\"]}";
     char buf[512];
     snprintf(buf, sizeof(buf), kFmt,
              (int)CHAT_MNN_JNI_ABI, CHAT_MNN_COMMIT, CHAT_MNN_BUILD_ID);

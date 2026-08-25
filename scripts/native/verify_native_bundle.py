@@ -47,7 +47,7 @@ MNN_COMMIT = "af0142bcc7b76b7a5128373e285683dc04f55f69"
 # NDK 版本与 build_mnn_android.sh 的 NDK_VERSION 保持单一事实源（Task 8 统一为
 # 26.1.10909125，与 native-manifest.json ndkVersion 一致）。此常量仅作为 --generate
 # 未显式传 --ndk-version 时的默认值；构建脚本总是显式传入。
-NDK_VERSION = "26.1.10909125"
+NDK_VERSION = "27.2.12479018"
 ANDROID_API = 24
 ABI = "arm64-v8a"
 MIN_PT_LOAD_ALIGN = 0x4000  # 16 KiB pages
@@ -60,9 +60,24 @@ PT_LOAD = 1
 SHT_NOTE = 7
 SHT_DYNAMIC = 6
 SHT_STRTAB = 3
+SHT_DYNSYM = 11
 NT_GNU_BUILD_ID = 3
 DT_NULL = 0
 DT_NEEDED = 1
+
+# JNI names are checked in .dynsym, not by searching arbitrary ELF strings.
+# A stale libmnn_jni.so can retain these names in .dynstr/.rodata while exporting
+# none of them, so the distinction is a release-blocking contract check.
+REQUIRED_MNN_JNI_EXPORTS = (
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeCreate",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStream",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStreamUtf8",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeStop",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeRelease",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGetMetrics",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGetLastError",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGetRuntimeInfo",
+)
 
 # DT_NEEDED entries a standard library may legitimately reference.
 # Anything outside this set is reported as a warning (not fatal) so that a new
@@ -111,6 +126,7 @@ class ElfInfo:
     pt_load_alignments: List[int] = field(default_factory=list)
     build_id: Optional[str] = None
     dt_needed: List[str] = field(default_factory=list)
+    dynamic_symbols: List[str] = field(default_factory=list)
     has_section_headers: bool = False
 
 
@@ -265,10 +281,17 @@ def parse_elf_bytes(data: bytes) -> ElfInfo:
                 sh_offset = _u64(data, base + 24)
                 sh_size = _u64(data, base + 32)
                 name = _read_cstr(shstrtab, sh_name) if sh_name < len(shstrtab) else ""
-                sections.append((name, sh_type, sh_offset, sh_size))
+                sections.append((
+                    name,
+                    sh_type,
+                    sh_offset,
+                    sh_size,
+                    _u32(data, base + 40),
+                    _u64(data, base + 56),
+                ))
 
     # Build id from any SHT_NOTE section.
-    for name, sh_type, sh_offset, sh_size in sections:
+    for name, sh_type, sh_offset, sh_size, _sh_link, _sh_entsize in sections:
         if sh_type == SHT_NOTE:
             bid = _parse_notes(data[sh_offset:sh_offset + sh_size])
             if bid:
@@ -295,6 +318,27 @@ def parse_elf_bytes(data: bytes) -> ElfInfo:
     else:
         # Fallback: no section headers. Resolve via PT_DYNAMIC + vaddr mapping.
         info.dt_needed = _parse_dynamic_via_segments(data, e_phoff, e_phnum, e_phentsize)
+
+    # Dynamic exports must come from .dynsym entries linked to .dynstr. Do not
+    # use a raw byte/string search: strings in .dynstr/.rodata are not exports.
+    dynsym = next((s for s in sections if s[0] == ".dynsym" and s[1] == SHT_DYNSYM), None)
+    if dynsym and dynstr:
+        sym_off, sym_size = dynsym[2], dynsym[3]
+        str_off, str_size = dynstr[2], dynstr[3]
+        strtab = data[str_off:str_off + str_size]
+        entsize = dynsym[5] or 24
+        if entsize < 24:
+            raise ValueError(f"invalid .dynsym entry size {entsize}")
+        for o in range(sym_off, min(sym_off + sym_size, len(data)), entsize):
+            if o + 24 > len(data):
+                break
+            st_name = _u32(data, o)
+            st_shndx = _u16(data, o + 6)
+            # SHN_UNDEF (0) entries are imports, not dynamic exports.
+            if st_name < len(strtab) and st_shndx != 0:
+                name = _read_cstr(strtab, st_name)
+                if name:
+                    info.dynamic_symbols.append(name)
 
     return info
 
@@ -343,9 +387,17 @@ def _parse_dynamic_via_segments(data, e_phoff, e_phnum, e_phentsize) -> List[str
     return [_read_cstr(data, strtab_off + v) for v in needed]
 
 
-# ---------------------------------------------------------------------------
-# ELF verification gates
-# ---------------------------------------------------------------------------
+def verify_mnn_jni_exports(info: ElfInfo) -> CheckResult:
+    """Require every production MnnBridge JNI entry in the dynamic export table."""
+    result = CheckResult()
+    exported = set(info.dynamic_symbols)
+    for symbol in REQUIRED_MNN_JNI_EXPORTS:
+        if symbol not in exported:
+            result.errors.append(f"libmnn_jni.so missing dynamic export '{symbol}'")
+    result.ok = not result.errors
+    return result
+
+
 def verify_elf(info: ElfInfo, expected_machine: str = "aarch64") -> CheckResult:
     """Check machine, 16 KiB PT_LOAD alignment and build-id presence."""
     result = CheckResult()
@@ -417,6 +469,8 @@ def verify_bundle(bundle_dir: str, manifest_path: str, readelf_path: Optional[st
     runtime.
     """
     result = CheckResult()
+    if not os.path.isdir(bundle_dir):
+        return CheckResult(ok=False, errors=[f"bundle directory not found: {bundle_dir}"])
     if not os.path.isfile(manifest_path):
         return CheckResult(ok=False, errors=[f"manifest not found: {manifest_path}"])
     with open(manifest_path, "r", encoding="utf-8") as f:
@@ -433,8 +487,12 @@ def verify_bundle(bundle_dir: str, manifest_path: str, readelf_path: Optional[st
     # Index manifest entries by name.
     entries = {e["name"]: e for e in manifest.get("files", [])}
 
-    # Files actually on disk.
+    # Files actually on disk. QNN libraries are retained in the repository for
+    # future experiments but are excluded from the standard production bundle;
+    # packaging and CI enforce that exclusion separately. Do not let those
+    # source-only artifacts mask the standard-bundle manifest gate.
     on_disk = {n for n in os.listdir(bundle_dir) if n.endswith(".so")}
+    standard_on_disk = {n for n in on_disk if not n.startswith("libQnn")}
 
     # 1. Every manifest entry must exist + hash match.
     for name, entry in entries.items():
@@ -447,18 +505,21 @@ def verify_bundle(bundle_dir: str, manifest_path: str, readelf_path: Optional[st
         if not verify_hash(data, entry.get("sha256", "")):
             result.errors.append(f"sha256 mismatch for '{name}'")
 
-    # 2. Every .so on disk must have a manifest entry.
-    for name in sorted(on_disk):
+    # 2. Every standard .so on disk must have a manifest entry. QNN files are
+    # source-only artifacts and are intentionally omitted from the standard
+    # manifest (the APK gate separately rejects them).
+    for name in sorted(standard_on_disk):
         if name not in entries:
             result.errors.append(f"unexpected .so on disk without manifest entry: '{name}'")
 
     # 3. Exactly one libc++_shared.so.
-    cpp_count = sum(1 for n in on_disk if n == "libc++_shared.so")
+    cpp_count = sum(1 for n in standard_on_disk if n == "libc++_shared.so")
     if cpp_count != 1:
         result.errors.append(f"expected exactly one libc++_shared.so, found {cpp_count}")
 
-    # 4. Per-.so ELF gates.
-    for name in sorted(on_disk):
+    # 4. Per-standard-.so ELF gates. QNN source-only files are not part of the
+    # standard bundle and may include 32-bit skeleton ELFs.
+    for name in sorted(standard_on_disk):
         path = os.path.join(bundle_dir, name)
         with open(path, "rb") as f:
             data = f.read()
@@ -484,6 +545,10 @@ def verify_bundle(bundle_dir: str, manifest_path: str, readelf_path: Optional[st
             elf_result = verify_elf(info)
             for err in elf_result.errors:
                 result.errors.append(f"{name}: {err}")
+            if name == "libmnn_jni.so":
+                export_result = verify_mnn_jni_exports(info)
+                for err in export_result.errors:
+                    result.errors.append(err)
             # Unknown DT_NEEDED -> warning for review.
             for dep in info.dt_needed:
                 if dep not in EXPECTED_DT_NEEDED:
@@ -511,7 +576,7 @@ def generate_manifest(bundle_dir: str, mnn_commit: str = MNN_COMMIT,
                  "arm82", "opencl", "16k_pages", "opencl_probe"]
     files = []
     for name in sorted(os.listdir(bundle_dir)):
-        if not name.endswith(".so"):
+        if not name.endswith(".so") or name.startswith("libQnn"):
             continue
         path = os.path.join(bundle_dir, name)
         with open(path, "rb") as f:
@@ -580,18 +645,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     if args.generate:
-        # 保留旧 manifest 的 note（重编来源/排除声明等人工维护的元信息）：
-        # 重编后 --generate 重写 manifest 时不丢失；旧文件缺失/损坏则静默跳过。
-        note = None
-        if os.path.isfile(args.manifest):
-            try:
-                with open(args.manifest, "r", encoding="utf-8") as f:
-                    note = json.load(f).get("note")
-            except (OSError, json.JSONDecodeError):
-                note = None
+        # Generate provenance from actual files; stale notes are intentionally dropped.
         manifest = generate_manifest(
             args.dir, mnn_commit=args.mnn_commit, ndk_version=args.ndk_version,
-            android_api=args.android_api, abi=args.abi, note=note,
+            android_api=args.android_api, abi=args.abi,
         )
         with open(args.manifest, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)

@@ -42,11 +42,23 @@ SHT_PROGBITS = 1
 SHT_STRTAB = 3
 SHT_DYNAMIC = 6
 SHT_NOTE = 7
+SHT_DYNSYM = 11
 
 DT_NULL = 0
 DT_NEEDED = 1
 DT_STRTAB = 5
 DT_STRSZ = 10
+
+REQUIRED_MNN_JNI_EXPORTS = (
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeCreate",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStream",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGenerateStreamUtf8",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeStop",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeRelease",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGetMetrics",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGetLastError",
+    "Java_com_chatbyyourside_llm_backend_MnnBridge_nativeGetRuntimeInfo",
+)
 
 NT_GNU_BUILD_ID = 3
 
@@ -105,22 +117,38 @@ def _build_note(build_id_hex):
 
 
 def build_minimal_elf(pt_load_align=0x4000, build_id_hex="abcdef0123456789",
-                      needed=("libc++_shared.so",), machine=EM_AARCH64):
+                      needed=("libc++_shared.so",), machine=EM_AARCH64,
+                      dynamic_symbols=(), string_only_symbols=()):
     """Build a minimal but valid ELF64 LE shared object.
 
     Contains: one PT_LOAD, one PT_NOTE (build-id), one PT_DYNAMIC, and section
-    headers for .note.gnu.build-id / .dynstr / .dynamic / .shstrtab. Used to
-    exercise the pure-Python parser deterministically.
+    headers for .note.gnu.build-id / .dynsym / .dynstr / .dynamic / .shstrtab.
+    ``string_only_symbols`` deliberately adds names to .dynstr without adding
+    .dynsym entries, so tests can prove a string-table occurrence is not an
+    export.
     """
     # 1. Section bodies.
     note_body = _build_note(build_id_hex)
 
-    # .dynstr: leading empty string, then each needed name (NUL-terminated).
+    # .dynstr: leading empty string, then dependency and symbol names.
     dynstr = b"\x00"
     needed_offsets = []
     for n in needed:
         needed_offsets.append(len(dynstr))
         dynstr += n.encode() + b"\x00"
+    symbol_offsets = {}
+    for n in tuple(dynamic_symbols) + tuple(string_only_symbols):
+        if n not in symbol_offsets:
+            symbol_offsets[n] = len(dynstr)
+            dynstr += n.encode() + b"\x00"
+
+    # .dynsym: first entry is the mandatory all-zero undefined symbol.
+    # st_info=GLOBAL|FUNC and st_shndx=1 make these defined exported symbols.
+    dynsym_body = b"\x00" * 24
+    for n in dynamic_symbols:
+        dynsym_body += struct.pack(
+            "<IBBHQQ", symbol_offsets[n], 0x12, 0, 1, 0, 0,
+        )
 
     # .dynamic: DT_NEEDED per entry + DT_STRTAB + DT_STRSZ + DT_NULL.
     # STRTAB vaddr is filled after we know the file offset; we patch below.
@@ -134,18 +162,19 @@ def build_minimal_elf(pt_load_align=0x4000, build_id_hex="abcdef0123456789",
 
     # .shstrtab
     shstrtab = b"\x00"
-    names = [".note.gnu.build-id", ".dynstr", ".dynamic", ".shstrtab"]
+    names = [".note.gnu.build-id", ".dynsym", ".dynstr", ".dynamic", ".shstrtab"]
     name_offsets = {}
     for nm in names:
         name_offsets[nm] = len(shstrtab)
         shstrtab += nm.encode() + b"\x00"
 
-    # 2. Layout: ehdr(64) | phdrs(3*56=168) | note | dynstr | dynamic | shstrtab | shdrs(5*64)
+    # 2. Layout: ehdr | phdrs | note | dynsym | dynstr | dynamic | shstrtab | shdrs.
     phoff = 64
     phnum = 3
     phdrs_size = phnum * 56
     note_off = phoff + phdrs_size
-    dynstr_off = note_off + len(note_body)
+    dynsym_off = note_off + len(note_body)
+    dynstr_off = dynsym_off + len(dynsym_body)
     dynamic_off = dynstr_off + len(dynstr)
     shstrtab_off = dynamic_off + len(dynamic_body)
     shoff = shstrtab_off + len(shstrtab)
@@ -167,13 +196,16 @@ def build_minimal_elf(pt_load_align=0x4000, build_id_hex="abcdef0123456789",
     # 4. Section headers (index 0 = SHN_UNDEF).
     shdrs = _pack_shdr(0, 0, 0, 0)  # SHN_UNDEF
     shdrs += _pack_shdr(name_offsets[".note.gnu.build-id"], SHT_NOTE, note_off, len(note_body), sh_addralign=4)
+    shdrs += _pack_shdr(name_offsets[".dynsym"], SHT_DYNSYM, dynsym_off, len(dynsym_body),
+                        sh_link=3, sh_entsize=24, sh_addralign=8)
     shdrs += _pack_shdr(name_offsets[".dynstr"], SHT_STRTAB, dynstr_off, len(dynstr), sh_addralign=1)
-    shdrs += _pack_shdr(name_offsets[".dynamic"], SHT_DYNAMIC, dynamic_off, len(dynamic_body), sh_link=name_offsets[".dynstr"], sh_entsize=16, sh_addralign=8)
+    shdrs += _pack_shdr(name_offsets[".dynamic"], SHT_DYNAMIC, dynamic_off, len(dynamic_body),
+                        sh_link=3, sh_entsize=16, sh_addralign=8)
     shdrs += _pack_shdr(name_offsets[".shstrtab"], SHT_STRTAB, shstrtab_off, len(shstrtab), sh_addralign=1)
 
-    ehdr = _pack_ehdr(phoff, shoff, phnum, 5, 4, machine=machine)
+    ehdr = _pack_ehdr(phoff, shoff, phnum, 6, 5, machine=machine)
 
-    return ehdr + phdrs + note_body + dynstr + dynamic_body + shstrtab + shdrs
+    return ehdr + phdrs + note_body + dynsym_body + dynstr + dynamic_body + shstrtab + shdrs
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +307,38 @@ class TestParseElf(unittest.TestCase):
         )
         self.assertEqual(info.dt_needed, ["libc++_shared.so", "liblog.so"])
 
+    def test_dynamic_exports_are_read_from_dynsym(self):
+        expected = REQUIRED_MNN_JNI_EXPORTS[:2]
+        info = vnb.parse_elf_bytes(build_minimal_elf(dynamic_symbols=expected))
+        self.assertEqual(set(info.dynamic_symbols), set(expected))
+
+    def test_string_table_occurrence_is_not_a_dynamic_export(self):
+        name = REQUIRED_MNN_JNI_EXPORTS[0]
+        info = vnb.parse_elf_bytes(build_minimal_elf(string_only_symbols=(name,)))
+        self.assertNotIn(name, info.dynamic_symbols)
+
+    def test_mnn_jni_export_gate_accepts_all_required_symbols(self):
+        info = vnb.parse_elf_bytes(
+            build_minimal_elf(dynamic_symbols=REQUIRED_MNN_JNI_EXPORTS)
+        )
+        result = vnb.verify_mnn_jni_exports(info)
+        self.assertTrue(result.ok, msg=result.errors)
+
+    def test_mnn_jni_export_gate_rejects_missing_symbol(self):
+        info = vnb.parse_elf_bytes(
+            build_minimal_elf(dynamic_symbols=REQUIRED_MNN_JNI_EXPORTS[:-1])
+        )
+        result = vnb.verify_mnn_jni_exports(info)
+        self.assertFalse(result.ok)
+        self.assertIn(REQUIRED_MNN_JNI_EXPORTS[-1], " ".join(result.errors))
+
+    def test_mnn_jni_export_gate_rejects_string_only_symbol(self):
+        name = REQUIRED_MNN_JNI_EXPORTS[0]
+        info = vnb.parse_elf_bytes(build_minimal_elf(string_only_symbols=(name,)))
+        result = vnb.verify_mnn_jni_exports(info)
+        self.assertFalse(result.ok)
+        self.assertIn(name, " ".join(result.errors))
+
     def test_verify_elf_accepts_16k(self):
         info = vnb.parse_elf_bytes(build_minimal_elf(pt_load_align=0x4000))
         result = vnb.verify_elf(info)
@@ -309,7 +373,7 @@ class TestManifestSchema(unittest.TestCase):
         return {
             "schemaVersion": 1,
             "mnnCommit": "af0142bcc7b76b7a5128373e285683dc04f55f69",
-            "ndkVersion": "26.1.10909125",
+            "ndkVersion": "27.2.12479018",
             "androidApi": 24,
             "abi": "arm64-v8a",
             "flags": ["llm", "low_memory", "arm82", "opencl"],
@@ -366,7 +430,7 @@ class TestVerifyBundle(unittest.TestCase):
         manifest = {
             "schemaVersion": 1,
             "mnnCommit": "af0142b",
-            "ndkVersion": "26.1.10909125",
+            "ndkVersion": "27.2.12479018",
             "androidApi": 24,
             "abi": "arm64-v8a",
             "flags": [],
@@ -445,7 +509,33 @@ class TestVerifyBundle(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(any("libstray" in e for e in result.errors))
 
-    # ---- Task 4: candidate commit ownership (--expected-commit) ----
+    def test_unexpected_qnn_source_files_are_ignored_by_standard_manifest_gate(self):
+        elf = build_minimal_elf(pt_load_align=0x4000, build_id_hex="cafe1234")
+        cpp = build_minimal_elf(pt_load_align=0x4000, build_id_hex="babe9876")
+        import hashlib
+        tmp = self._write_bundle({
+            "libMNN.so": elf,
+            "libc++_shared.so": cpp,
+            "libQnnHtp.so": elf,
+            "libQnnHtpV68Skel.so": b"legacy-qnn-source-only",
+        })
+        manifest = {
+            "schemaVersion": 1, "mnnCommit": "x", "ndkVersion": "x",
+            "androidApi": 24, "abi": "arm64-v8a", "flags": [],
+            "files": [
+                {"name": "libMNN.so", "sha256": hashlib.sha256(elf).hexdigest(),
+                 "buildId": "cafe1234", "ptLoadAlignment": "0x4000"},
+                {"name": "libc++_shared.so", "sha256": hashlib.sha256(cpp).hexdigest(),
+                 "buildId": "babe9876", "ptLoadAlignment": "0x4000"},
+            ],
+        }
+        mpath = os.path.join(tmp, "manifest.json")
+        with open(mpath, "w") as f:
+            import json
+            json.dump(manifest, f)
+        result = vnb.verify_bundle(tmp, mpath)
+        self.assertTrue(result.ok, msg=result.errors)
+
 
     def test_expected_commit_mismatch_fails(self):
         # 候选 bundle 的 manifest.mnnCommit 必须等于请求的 candidate commit；
@@ -455,7 +545,7 @@ class TestVerifyBundle(unittest.TestCase):
         tmp = self._write_bundle({"libMNN.so": elf})
         manifest = {
             "schemaVersion": 1, "mnnCommit": "af0142bcc7b76b7a5128373e285683dc04f55f69",
-            "ndkVersion": "26.1.10909125", "androidApi": 24, "abi": "arm64-v8a",
+            "ndkVersion": "27.2.12479018", "androidApi": 24, "abi": "arm64-v8a",
             "flags": [],
             "files": [{"name": "libMNN.so", "sha256": hashlib.sha256(elf).hexdigest(),
                        "buildId": "cafe1234", "ptLoadAlignment": "0x4000"}],
@@ -476,7 +566,7 @@ class TestVerifyBundle(unittest.TestCase):
         tmp = self._write_bundle({"libMNN.so": elf, "libc++_shared.so": cpp})
         manifest = {
             "schemaVersion": 1, "mnnCommit": "75e53afe568f7b6fabb1adc34894fe9f331d52f8",
-            "ndkVersion": "26.1.10909125", "androidApi": 24, "abi": "arm64-v8a",
+            "ndkVersion": "27.2.12479018", "androidApi": 24, "abi": "arm64-v8a",
             "flags": [],
             "files": [
                 {"name": "libMNN.so", "sha256": hashlib.sha256(elf).hexdigest(),
@@ -501,7 +591,7 @@ class TestVerifyBundle(unittest.TestCase):
         tmp = self._write_bundle({"libMNN.so": elf, "libc++_shared.so": cpp})
         manifest = {
             "schemaVersion": 1, "mnnCommit": "anything",
-            "ndkVersion": "26.1.10909125", "androidApi": 24, "abi": "arm64-v8a",
+            "ndkVersion": "27.2.12479018", "androidApi": 24, "abi": "arm64-v8a",
             "flags": [],
             "files": [
                 {"name": "libMNN.so", "sha256": hashlib.sha256(elf).hexdigest(),
@@ -533,7 +623,7 @@ class TestGenerateManifest(unittest.TestCase):
         # 固化 Task 8 审查修复：默认生成必须与单一事实源一致，并保留 opencl_probe
         # 旗标；不传 note 时产出物不写 note 键。
         m = vnb.generate_manifest(self._bundle_with_libmnn())
-        self.assertEqual(m["ndkVersion"], "26.1.10909125")
+        self.assertEqual(m["ndkVersion"], "27.2.12479018")
         self.assertEqual(m["mnnCommit"], "af0142bcc7b76b7a5128373e285683dc04f55f69")
         self.assertIn("opencl_probe", m["flags"])
         self.assertNotIn("note", m)
@@ -543,25 +633,23 @@ class TestGenerateManifest(unittest.TestCase):
 
     def test_note_param_is_emitted(self):
         m = vnb.generate_manifest(self._bundle_with_libmnn(),
-                                  note="rebuilt with NDK 26.1.10909125")
-        self.assertEqual(m["note"], "rebuilt with NDK 26.1.10909125")
+                                  note="rebuilt with NDK 27.2.12479018")
+        self.assertEqual(m["note"], "rebuilt with NDK 27.2.12479018")
 
-    def test_cli_generate_carries_old_manifest_note(self):
-        # --generate 重写 manifest 时保留旧 manifest 的 note（重编来源等人工元信息）。
+    def test_cli_generate_drops_stale_manifest_note(self):
+        # Manifest provenance must be generated from actual files; stale notes
+        # from a prior candidate must not survive canonical regeneration.
         import json
         tmp = self._bundle_with_libmnn()
         mpath = os.path.join(tmp, "native-manifest.json")
         with open(mpath, "w", encoding="utf-8") as f:
-            json.dump({"schemaVersion": 1, "mnnCommit": "old", "ndkVersion": "old",
-                       "androidApi": 24, "abi": "arm64-v8a", "flags": [],
-                       "note": "legacy rebuild note", "files": []}, f)
+            json.dump({"schemaVersion": 1, "note": "stale candidate claim", "files": []}, f)
         rc = vnb.main(["--generate", "--dir", tmp, "--manifest", mpath])
         self.assertEqual(rc, 0)
         with open(mpath, "r", encoding="utf-8") as f:
             new = json.load(f)
-        self.assertEqual(new["note"], "legacy rebuild note")
-        self.assertEqual(new["ndkVersion"], "26.1.10909125")
-        self.assertIn("opencl_probe", new["flags"])
+        self.assertNotIn("note", new)
+
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +700,15 @@ class TestRealBundleSmoke(unittest.TestCase):
             with open(os.path.join(JNILIB_DIR, name), "rb") as f:
                 info = vnb.parse_elf_bytes(f.read())
             self.assertEqual(info.machine, "aarch64", msg=name)
+
+    def test_real_mnn_jni_has_all_required_dynamic_exports(self):
+        p = self._lib("libmnn_jni.so")
+        if not p:
+            self.skipTest("libmnn_jni.so absent")
+        with open(p, "rb") as f:
+            info = vnb.parse_elf_bytes(f.read())
+        result = vnb.verify_mnn_jni_exports(info)
+        self.assertTrue(result.ok, msg=result.errors)
 
 
 if __name__ == "__main__":

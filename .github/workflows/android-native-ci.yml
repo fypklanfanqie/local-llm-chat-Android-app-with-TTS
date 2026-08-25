@@ -19,7 +19,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android SDK + NDK r26b
+      - name: Setup Android SDK + NDK r27c
         uses: android-actions/setup-android@v3
         with:
           api-level: 35
@@ -27,7 +27,7 @@ jobs:
           # runner 静默忽略，旧工作流的 27.2 从未真正安装过。NDK 需经 sdkmanager
           # 包语法安装，落盘于 $ANDROID_HOME/ndk/<version>（26.1 与
           # build_mnn_android.sh 的 NDK_VERSION / manifest ndkVersion 单一事实源一致）。
-          packages: "tools platform-tools ndk;26.1.10909125"
+          packages: "tools platform-tools ndk;27.2.12479018"
 
       - name: JVM unit tests
         run: |
@@ -49,10 +49,10 @@ jobs:
         env:
           # setup-android 只导出 ANDROID_HOME / ANDROID_SDK_ROOT，不导出
           # ANDROID_NDK_HOME；build_mnn_android.sh 预检要求该变量，故按 sdkmanager
-          # 安装布局显式指定（与 manifest ndkVersion 26.1.10909125 一致）。
-          ANDROID_NDK_HOME: "${{ env.ANDROID_HOME }}/ndk/26.1.10909125"
+          # 安装布局显式指定（与 manifest ndkVersion / build_mnn_android.sh 27.2.12479018 单一事实源一致）。
+          ANDROID_NDK_HOME: "${{ env.ANDROID_HOME }}/ndk/27.2.12479018"
         run: |
-          # 复用 scripts/native/build_mnn_android.sh（NDK 26.1.10909125 + pinned MNN commit + 16KiB 对齐）
+          # 复用 scripts/native/build_mnn_android.sh（NDK 27.2.12479018 + pinned MNN commit + 16KiB 对齐）
           bash scripts/native/build_mnn_android.sh
 
       - name: Native verifier (16KiB + manifest hashes)
@@ -63,14 +63,30 @@ jobs:
         run: |
           ./gradlew assembleDebug --console=plain
 
+      - name: APK debug JNI contract audit
+        run: |
+          APK=$(find app/build/outputs/apk/debug -name '*.apk' -print -quit)
+          test -n "$APK"
+          python3 scripts/native/verify_apk_native.py "$APK" --json
+
+      - name: Assemble release APK
+        run: |
+          ./gradlew assembleRelease --console=plain
+
+      - name: APK release JNI contract audit
+        run: |
+          APK=$(find app/build/outputs/apk/release -name '*.apk' -print -quit)
+          test -n "$APK"
+          python3 scripts/native/verify_apk_native.py "$APK" --json
+
       - name: APK native audit (no libQnn* + zipalign)
         run: |
-          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          APK=$(find app/build/outputs/apk/debug -name '*.apk' -print -quit)
           if unzip -l "$APK" | grep -q "libQnn"; then
             echo "标准 APK 不应含 QNN 库"; exit 1
           fi
           # glob 会匹配多个 build-tools 版本目录造成多余参数；先取第一个再调用
-          ZIPALIGN=$(ls "$ANDROID_HOME"/build-tools/*/zipalign | head -1)
+          ZIPALIGN=$(find "$ANDROID_HOME"/build-tools -name zipalign -print -quit)
           "$ZIPALIGN" -c 4 "$APK"
 
       - name: Emulator instrumentation (runtime tests, skip-if-no-fixture)
@@ -91,4 +107,5 @@ jobs:
           path: |
             app/build/reports
             app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk
             app/src/main/jniLibs/native-manifest.json

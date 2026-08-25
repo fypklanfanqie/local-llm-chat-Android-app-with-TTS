@@ -5,7 +5,7 @@
 #   libMNN.so            — MNN LLM engine (LLM + low-mem + ARM82 + OpenCL, QNN OFF)
 #   libmnn_jni.so        — MNN backend JNI wrapper (app/src/main/cpp/mnn_jni.cpp)
 #   libcpu_sys_jni.so    — CPU affinity JNI wrapper (app/src/main/cpp/cpu_affinity_jni.cpp)
-#   libc++_shared.so     — matching 26.1.10909125 (r26b) libc++ runtime
+#   libc++_shared.so     — matching 27.2.12479018 (r27c) libc++ runtime
 #
 # Every standard .so is built for Android 15 16 KiB pages (PT_LOAD p_align >= 0x4000)
 # and is recorded in app/src/main/jniLibs/native-manifest.json, then verified by
@@ -14,7 +14,7 @@
 # Design reference: docs/superpowers/specs/2026-08-08-mnn-adaptive-inference-optimization-design.md
 #
 # Environment:
-#   ANDROID_NDK_HOME (required) — path to NDK 26.1.10909125 (r26b)
+#   ANDROID_NDK_HOME (required) — path to NDK 27.2.12479018 (r27c)
 #   HTTP_PROXY / HTTPS_PROXY    — optional; respected as-is, NEVER set by this script
 #   MNN_BUILD_STAGING           — optional ASCII-only build dir (default: ~/mnn-build)
 #                                 The repo path may contain non-ASCII chars which break
@@ -27,16 +27,12 @@ set -euo pipefail
 # Pinned versions (single source of truth — keep in sync with native-manifest.json,
 # CMakeLists.txt CHAT_MNN_COMMIT, and MnnBridge.EXPECTED_MNN_COMMIT).
 #
-# NDK 版本说明（Task 8 统一）：仓库内预编译 .so 全部为本机 NDK 26.1.10909125 (r26b)
-# 重编产物（manifest note 与提交 11ddc83 "local NDK 26 rebuild" 为准；本地暂存区
-# CMakeCache 的 ANDROID_NDK 亦指向 26.1.10909125）。脚本曾写 27.2.12479018 (r27c)，
-# 但从未产出过任何入库二进制，故统一回 26.1.10909125，与 manifest ndkVersion 及
-# buildId/sha256 保持单一事实源。
-# 若未来升级 NDK 27 重编：必须同步更新 manifest 的 ndkVersion 与全部 buildId/sha256
-# （本脚本第 5 步会以 --generate 依据实际产物自动重新生成 manifest，随后 verify 校验）。
+# NDK 版本说明：生产 canonical bundle 与 app/build.gradle.kts / local.properties
+# 统一使用 NDK 27.2.12479018 (r27c)。构建脚本会在编译前检查 source.properties，
+# 并从实际输出生成 manifest；若本地没有 canonical NDK，则不伪造 hash/build ID。
 # ---------------------------------------------------------------------------
 MNN_COMMIT_DEFAULT="af0142bcc7b76b7a5128373e285683dc04f55f69"
-NDK_VERSION="26.1.10909125"
+NDK_VERSION="27.2.12479018"
 ANDROID_API=24
 ANDROID_ABI="arm64-v8a"
 
@@ -59,7 +55,7 @@ VERIFIER="$REPO_ROOT/scripts/native/verify_native_bundle.py"
 #   MNN_MANIFEST_OUT      manifest 输出路径（默认 = 生产 native-manifest.json）
 #
 # 规则（升级基础设施，不改默认行为）：
-#   * 默认调用仍构建 pinned commit 到现有路径；
+#   * 默认调用仍构建 pinned commit 到现有路径；生产输出必须在脚本末尾通过 verifier 后才可接受；
 #   * 候选构建必须显式传入独立 ASCII staging 输出（如 $HOME/mnn-candidates/<commit>/arm64-v8a
 #     与对应 manifest 路径），**绝不**写入生产 jniLibs 或生产 manifest；
 #   * 本脚本永不改写 MnnBridge.EXPECTED_MNN_COMMIT / CMakeLists CHAT_MNN_COMMIT —— runtime
@@ -70,33 +66,33 @@ MNN_COMMIT="${MNN_COMMIT_OVERRIDE:-$MNN_COMMIT_DEFAULT}"
 OUTPUT_DIR="${MNN_OUTPUT_DIR:-$JNI_LIBS_DIR}"
 MANIFEST_OUT="${MNN_MANIFEST_OUT:-$MANIFEST}"
 
-if [[ "$MNN_COMMIT" != "$MNN_COMMIT_DEFAULT" || "$OUTPUT_DIR" != "$JNI_LIBS_DIR" || "$MANIFEST_OUT" != "$MANIFEST" ]]; then
-    log "候选构建模式: commit=$MNN_COMMIT output=$OUTPUT_DIR manifest=$MANIFEST_OUT"
-    log "候选构建绝不写入生产 jniLibs / 生产 manifest；MnnBridge.EXPECTED_MNN_COMMIT 不修改。"
-fi
-
 # 16 KiB page linker flag (also applied in cpp/CMakeLists.txt).
 PAGE_FLAG="-Wl,-z,max-page-size=16384"
 
 log() { printf '\033[1;34m[build_mnn]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[build_mnn error]\033[0m %s\n' "$*" >&2; exit 1; }
 
+if [[ "$MNN_COMMIT" != "$MNN_COMMIT_DEFAULT" || "$OUTPUT_DIR" != "$JNI_LIBS_DIR" || "$MANIFEST_OUT" != "$MANIFEST" ]]; then
+    log "候选构建模式: commit=$MNN_COMMIT output=$OUTPUT_DIR manifest=$MANIFEST_OUT"
+    log "候选构建绝不写入生产 jniLibs / 生产 manifest；MnnBridge.EXPECTED_MNN_COMMIT 不修改。"
+fi
+
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
-[[ -n "${ANDROID_NDK_HOME:-}" ]] || die "ANDROID_NDK_HOME must point to NDK $NDK_VERSION (r26b)."
+[[ -n "${ANDROID_NDK_HOME:-}" ]] || die "ANDROID_NDK_HOME must point to NDK $NDK_VERSION (r27c)."
 [[ -d "$ANDROID_NDK_HOME" ]] || die "ANDROID_NDK_HOME not found: $ANDROID_NDK_HOME"
 
 # NDK 版本防漂移（fail-fast）：source.properties 的 Pkg.Revision 必须与 pinned
-# NDK_VERSION 一致。Google 的 source.properties 格式为 "Pkg.Revision = 26.1.10909125"
-# （纯点分版本号，无 r 前缀、无 "r26b" 简写），故精确匹配；一旦传入其它版本
+# NDK_VERSION 一致。Google 的 source.properties 格式为 "Pkg.Revision = 27.2.12479018"
+# （纯点分版本号，无 r 前缀、无 "r27c" 简写），故精确匹配；一旦传入其它版本
 # （如 CI 误装 27.2），在编译前即报错，避免产出与 manifest ndkVersion 不符的混源产物。
 NDK_SOURCE_PROP="$ANDROID_NDK_HOME/source.properties"
 [[ -f "$NDK_SOURCE_PROP" ]] || die "NDK source.properties not found: $NDK_SOURCE_PROP (expected NDK $NDK_VERSION)"
 NDK_INSTALLED="$(sed -n 's/^Pkg\.Revision[[:space:]]*=[[:space:]]*//p' "$NDK_SOURCE_PROP" | head -n1)"
 [[ -n "$NDK_INSTALLED" ]] || die "cannot read Pkg.Revision from $NDK_SOURCE_PROP (expected NDK $NDK_VERSION)"
 [[ "$NDK_INSTALLED" == "$NDK_VERSION" ]] \
-    || die "NDK version mismatch: $ANDROID_NDK_HOME is '$NDK_INSTALLED', expected '$NDK_VERSION' (r26b)"
+    || die "NDK version mismatch: $ANDROID_NDK_HOME is '$NDK_INSTALLED', expected '$NDK_VERSION' (r27c)"
 
 NDK_TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
 [[ -f "$NDK_TOOLCHAIN" ]] || die "NDK toolchain not found: $NDK_TOOLCHAIN (expected NDK $NDK_VERSION)"
@@ -118,7 +114,8 @@ esac
 # 与 MNN_CMAKE_FLAGS 对应：LLM / 低内存 / weight dequant / transformer fuse / ARM82 / OpenCL /
 # QNN OFF / Vulkan OFF / 16 KiB pages。改动 flag 集 = 新 build id = 新 native 身份。
 FEATURE_FLAGS="llm,low_mem,cpu_weight_dequant_gemm,transformer_fuse,arm82,opencl,qnn_off,vulkan_off,16k_pages"
-# Deterministic build id: short hash of (MNN commit + NDK + ABI + API + full flags).
+# Build ID is computed from exactly the values passed to CMake; do not hand-edit
+# native build IDs or manifests.
 BUILD_ID="$(printf '%s|%s|%s|%s|%s' "$MNN_COMMIT" "$NDK_VERSION" "$ANDROID_ABI" "$ANDROID_API" "$FEATURE_FLAGS" \
     | sha256sum | cut -c1-16)"
 log "build id: $BUILD_ID (commit=$MNN_COMMIT ndk=$NDK_VERSION abi=$ANDROID_ABI api=$ANDROID_API flags=$FEATURE_FLAGS)"
@@ -167,8 +164,7 @@ MNN_CMAKE_FLAGS=(
     -DMNN_OPENCL=ON
     -DMNN_BUILD_QNN=OFF
     -DMNN_VULKAN=OFF
-    # 16 KiB page support：NDK r26 无 ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES 变量
-    # （那是 NDK r27+ 的开关），实际对齐由下方 PAGE_FLAG 链接器参数保证。
+    # 16 KiB page support：由 NDK r27c flexible page linker 与显式 PAGE_FLAG 共同保证。
     -DCMAKE_SHARED_LINKER_FLAGS="$PAGE_FLAG"
     -DMNN_BUILD_DEMO=OFF
     -DMNN_BUILD_TESTS=OFF
@@ -239,19 +235,16 @@ mkdir -p "$OUTPUT_DIR"
 cp -f "$MNN_INSTALL/lib/libMNN.so"      "$OUTPUT_DIR/libMNN.so"
 cp -f "$JNI_BUILD/libmnn_jni.so"        "$OUTPUT_DIR/libmnn_jni.so"
 cp -f "$JNI_BUILD/libcpu_sys_jni.so"    "$OUTPUT_DIR/libcpu_sys_jni.so"
+cp -f "$JNI_BUILD/libbackend_probe.so"  "$OUTPUT_DIR/libbackend_probe.so"
 
-# Matching 26.1.10909125 (r26b) libc++_shared.so (same toolchain as libMNN/JNI — ABI consistency).
-# 注意：NDK r26 sysroot 的 libc++_shared.so 是 4KB PT_LOAD 对齐（r27 起默认 16KB），
-# 会挂下方 16KiB 校验。生产 jniLibs 里已有一份 r27c 的 16KB 版（与本仓库同源），
-# 若已存在则保留不动，仅缺失时才从 NDK 兜底拷贝。
+# Matching 27.2.12479018 (r27c) libc++_shared.so from the same toolchain.
+# NDK r27c ships a 16 KiB-aligned libc++_shared.so; do not silently retain an
+# unrelated existing library. Every standard library must come from this build's
+# toolchain, and the generated manifest records the actual bytes.
 LIBCPP_SRC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
 [[ -f "$LIBCPP_SRC" ]] || LIBCPP_SRC="$ANDROID_NDK_HOME/sources/cxx-stl/llvm-libc++/libs/$ANDROID_ABI/libc++_shared.so"
 [[ -f "$LIBCPP_SRC" ]] || die "libc++_shared.so not found in NDK"
-if [[ -f "$OUTPUT_DIR/libc++_shared.so" ]]; then
-    log "keeping existing $OUTPUT_DIR/libc++_shared.so (already 16KiB-aligned from repo)"
-else
-    cp -f "$LIBCPP_SRC" "$OUTPUT_DIR/libc++_shared.so"
-fi
+cp -f "$LIBCPP_SRC" "$OUTPUT_DIR/libc++_shared.so"
 
 # Remove any stale QNN libraries from the standard bundle (Task 11).
 rm -f "$OUTPUT_DIR"/libQnn*.so
