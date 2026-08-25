@@ -92,8 +92,8 @@ object AppStorageUsage {
             ),
             StorageItem(
                 key = "chatRecords",
-                name = "聊天记录（数据库）",
-                description = "全部单聊/群聊消息与 Seedance 任务记录",
+                name = "普通聊天记录（数据库）",
+                description = "单聊/群聊消息与 Seedance 任务记录；特殊邂逅回忆保留",
                 sizeBytes = dirSize(dbDir),
                 dir = dbDir,
             ),

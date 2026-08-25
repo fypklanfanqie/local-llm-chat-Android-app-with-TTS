@@ -208,12 +208,14 @@ private fun chatGlass(): ChatGlassScheme =
 fun ChatScreen(
     container: AppContainer,
     bottomBarHeight: Dp = 0.dp,
+    /** 回忆入口显式指定的目标会话；普通入口保持 null，继续使用活跃会话映射。 */
+    targetConversationId: Long? = null,
     onBack: () -> Unit,
     onNavigateToCharacters: () -> Unit,
 ) {
     val app = LocalContext.current.applicationContext as com.chatbyyourside.ChatApp
     val viewModel: ChatViewModel = viewModel(
-        factory = viewModelFactory { initializer { ChatViewModel(app, container) } }
+        factory = viewModelFactory { initializer { ChatViewModel(app, container, targetConversationId) } }
     )
     val state by viewModel.uiState.collectAsState()
     val focusManager = LocalFocusManager.current
@@ -640,7 +642,6 @@ fun ChatScreen(
                 onDismiss = { viewModel.toggleConversationSheet(false) },
             )
         }
-
         if (showExportConversationPicker) {
             ConversationExportSelectionDialog(
                 conversations = state.conversations,
@@ -1135,7 +1136,8 @@ internal fun MessageBubble(
     /** 用户（我）的头像（设置「我的形象」）；空串回落 monogram「我」。 */
     userImage: String = "",
     onTts: () -> Unit,
-    onDelete: () -> Unit = {},
+    /** null = 当前会话为特殊邂逅回忆，隐藏删除入口（DAO 仍兜底）。 */
+    onDelete: (() -> Unit)? = {},
     onPlayVideo: (() -> Unit)? = null,
     onFullScreenVideo: (() -> Unit)? = null,
     onExportVideo: (() -> Unit)? = null,
@@ -1314,8 +1316,9 @@ internal fun MessageBubble(
                                 onClick = onTts,
                             )
                         }
-                        // 删除单条消息（用户问题 / 助手回答）：仅持久消息提供入口（数据库Id非空）。
-                        if (message.databaseId != null) {
+                        // 删除单条消息（用户问题 / 助手回答）：仅持久消息提供入口（数据库Id非空）；
+                        // 特殊邂逅回忆会话 onDelete 为 null，整行只读。
+                        if (message.databaseId != null && onDelete != null) {
                             ActionChip(
                                 icon = Icons.Outlined.Delete,
                                 label = "删除",

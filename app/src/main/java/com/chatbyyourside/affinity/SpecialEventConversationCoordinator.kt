@@ -17,6 +17,11 @@ sealed interface SpecialEventLaunchResult {
         val opening: String,
     ) : SpecialEventLaunchResult
     data class Existing(val event: SpecialEvent) : SpecialEventLaunchResult
+    /** 已有 conversationId 指向不存在的会话，已新建并重建 opening。 */
+    data class Rebuilt(
+        val event: SpecialEvent,
+        val opening: String,
+    ) : SpecialEventLaunchResult
     data object Missing : SpecialEventLaunchResult
 }
 
@@ -35,7 +40,8 @@ class SpecialEventConversationCoordinator(
         val result = database.withTransaction {
             val event = database.affinityDao().getSpecialEvent(characterId, threshold)
                 ?: return@withTransaction SpecialEventLaunchResult.Missing
-            if (event.conversationId != null) {
+            val existingConversationId = event.conversationId
+            if (existingConversationId != null && conversations.getById(existingConversationId) != null) {
                 return@withTransaction SpecialEventLaunchResult.Existing(event.toDomain())
             }
             val script = if (character != null) {
@@ -49,19 +55,31 @@ class SpecialEventConversationCoordinator(
                 conversationId,
                 ChatMessage(role = "assistant", content = script.opening),
             )
+            val rebuilt = existingConversationId != null
+            if (rebuilt) {
+                android.util.Log.w(
+                    "SpecialEventCoordinator",
+                    "special event $characterId#$threshold had dangling conversationId=$existingConversationId; rebuilt conversationId=$conversationId",
+                )
+            }
             val updated = event.copy(
                 title = script.title,
                 sceneKey = SpecialEventCatalog.keyOf(characterId, threshold),
-                startedAt = System.currentTimeMillis(),
+                startedAt = event.startedAt ?: System.currentTimeMillis(),
                 conversationId = conversationId,
                 isRead = true,
                 openingMessageId = openingId,
             )
             database.affinityDao().updateSpecialEvent(updated)
-            SpecialEventLaunchResult.Ready(updated.toDomain(), script.opening)
+            if (rebuilt) {
+                SpecialEventLaunchResult.Rebuilt(updated.toDomain(), script.opening)
+            } else {
+                SpecialEventLaunchResult.Ready(updated.toDomain(), script.opening)
+            }
         }
         val conversationId = when (result) {
             is SpecialEventLaunchResult.Ready -> result.event.conversationId
+            is SpecialEventLaunchResult.Rebuilt -> result.event.conversationId
             is SpecialEventLaunchResult.Existing -> result.event.conversationId
             SpecialEventLaunchResult.Missing -> null
         }

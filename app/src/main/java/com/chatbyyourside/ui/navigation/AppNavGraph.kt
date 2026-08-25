@@ -257,6 +257,21 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false, crash
                             },
                         )
                     }
+                    composable(
+                        route = FeedRoute.CHAT_WITH_CONVERSATION,
+                        arguments = listOf(navArgument("conversationId") { type = NavType.LongType }),
+                    ) { entry ->
+                        val conversationId = entry.arguments?.getLong("conversationId")
+                        ChatScreen(
+                            container = container,
+                            bottomBarHeight = bottomBarHeight,
+                            targetConversationId = conversationId,
+                            onBack = { feedNavController.popBackStack() },
+                            onNavigateToCharacters = {
+                                navController.navigate(BottomTab.Characters.route) { launchSingleTop = true }
+                            },
+                        )
+                    }
                     composable(FeedRoute.CHAT) {
                         ChatScreen(
                             container = container,
@@ -371,13 +386,15 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false, crash
                         container,
                         selected,
                         onBack = { navController.popBackStack() },
-                        onOpenEventConversation = {
+                        onOpenEventConversation = { conversationId ->
                             navController.navigate(BottomTab.Chat.route) {
                                 popUpTo(BottomTab.Chat.route) { saveState = true }
                                 launchSingleTop = true
                                 restoreState = true
                             }
-                            feedNavController.navigate(FeedRoute.CHAT) {
+                            // coordinator 已将目标 conversation 写入 Settings；这里显式传入
+                            // 目标 id，避免 ChatViewModel 的 dangling fallback 自动新建普通会话。
+                            feedNavController.navigate(FeedRoute.chatRoute(conversationId)) {
                                 popUpTo(FeedRoute.FEED)
                                 launchSingleTop = true
                             }

@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Event
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -58,6 +59,7 @@ import com.chatbyyourside.data.model.GiftHistory
 import com.chatbyyourside.data.model.SpecialEvent
 import com.chatbyyourside.data.model.SpecialEventScript
 import com.chatbyyourside.ui.characters.CharacterPortrait
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 @Composable
@@ -142,11 +144,12 @@ fun AffinityEventsScreen(
     container: AppContainer,
     character: Character,
     onBack: () -> Unit,
-    onOpenEventConversation: () -> Unit,
+    onOpenEventConversation: (Long) -> Unit,
 ) {
     val affinity by container.affinityRepository.observeAffinity(character.id).collectAsState(initial = CharacterAffinity(character.id, 0f, 0L))
     val events by container.affinityRepository.observeSpecialEvents(character.id).collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
+    var launchError by remember { mutableStateOf<String?>(null) }
     // 自定义角色事件编辑（定制需求：自定义可改，内置只读）
     var editingThreshold by remember { mutableStateOf<Int?>(null) }
     val currentScript by produceState<SpecialEventScript?>(initialValue = null, editingThreshold) {
@@ -179,16 +182,35 @@ fun AffinityEventsScreen(
                 canEdit = character.isCustom,
                 onOpen = {
                     scope.launch {
-                        event?.let { container.specialEventConversationCoordinator.markRead(it.id) }
-                        when (container.specialEventConversationCoordinator.launch(character.id, threshold)) {
-                            is SpecialEventLaunchResult.Ready, is SpecialEventLaunchResult.Existing -> onOpenEventConversation()
-                            SpecialEventLaunchResult.Missing -> Unit
+                        try {
+                            event?.let { container.specialEventConversationCoordinator.markRead(it.id) }
+                            when (val result = container.specialEventConversationCoordinator.launch(character.id, threshold)) {
+                                is SpecialEventLaunchResult.Ready,
+                                is SpecialEventLaunchResult.Existing,
+                                is SpecialEventLaunchResult.Rebuilt -> onOpenEventConversation(result.event.conversationId)
+                                SpecialEventLaunchResult.Missing -> launchError = "特殊邂逅不存在或已被移除，请稍后刷新回忆档案。"
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            launchError = "打开特殊邂逅失败：${e.message ?: "请稍后重试"}"
                         }
                     }
                 },
                 onEdit = { editingThreshold = threshold },
             )
         }
+    }
+
+    launchError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { launchError = null },
+            title = { Text("无法打开回忆") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { launchError = null }) { Text("知道了") }
+            },
+        )
     }
 
     editingThreshold?.let { threshold ->

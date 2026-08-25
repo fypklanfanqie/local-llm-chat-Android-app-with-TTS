@@ -325,7 +325,7 @@ class GroupChatViewModel(
             } catch (e: Exception) {
                 if (repliesOk == 0) {
                     // 一条回复都没成功：回滚用户消息、恢复输入、报错
-                    if (userMsgId != 0L) runCatching { container.chatRepository.deleteMessage(userMsgId) }
+                    if (userMsgId != 0L) runCatching { container.chatRepository.forceDeleteMessageForRollback(userMsgId) }
                     pendingFinals.clear()
                     _uiState.update { s ->
                         val msgs = s.messages.filterNot { it.id == "streaming" }.toMutableList()

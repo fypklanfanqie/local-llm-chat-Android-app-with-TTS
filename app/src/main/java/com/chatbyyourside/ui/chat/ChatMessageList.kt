@@ -116,7 +116,12 @@ fun ChatMessageList(
                     characterName = state.characterName,
                     userImage = state.userImage,
                     onTts = { onTts(msg) },
-                    onDelete = { onDelete(msg) },
+                    // 事件回忆消息只读：UX 隐藏删除入口，DAO 仍作为最终安全层。
+                    onDelete = if (state.activeSpecialEventId != null) {
+                        null
+                    } else {
+                        { onDelete(msg) }
+                    },
                     // 视频卡回调仅在对应助手消息附带视频时注入（Task 8 接播放/全屏/导出，Task 7 接取消/重试）。
                     onPlayVideo = msg.video?.let { video -> onPlayVideo?.let { cb -> { cb(video) } } },
                     onFullScreenVideo = msg.video?.let { video -> onFullScreenVideo?.let { cb -> { cb(video) } } },

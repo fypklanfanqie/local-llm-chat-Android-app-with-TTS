@@ -39,9 +39,14 @@ class ChatRepository(private val dao: ChatDao) {
         return dao.insertAndTrim(conversationId, message.toEntity(characterId, conversationId))
     }
 
-    /** 按 id 删除单条消息（发送失败回滚用） */
+    /** 按 id 删除单条消息（普通 UI 删除；特殊事件消息由 DAO 保护）。 */
     suspend fun deleteMessage(id: Long) {
         dao.deleteById(id)
+    }
+
+    /** 发送失败回滚专用：仅由发送路径传入本次新建消息 id，绕过事件保护。 */
+    suspend fun forceDeleteMessageForRollback(id: Long) {
+        dao.forceDeleteById(id)
     }
 
     suspend fun clearHistory(conversationId: Long) {

@@ -44,6 +44,7 @@ private const val STREAM_THROTTLE_MS = 30L
 class ChatViewModel(
     application: Application,
     val container: AppContainer,
+    private val targetConversationId: Long? = null,
 ) : AndroidViewModel(application) {
 
     private val _uiState = MutableStateFlow(ChatUiState())
@@ -120,9 +121,18 @@ class ChatViewModel(
                     .combine(container.settingsRepository.activeConversations) { charId, map -> charId to map[charId] }
                     .distinctUntilChanged()
                     .collect { (charId, convId) ->
-                        val id = convId
+                        val id = targetConversationId ?: convId
                         if (id != null && container.conversationRepository.getById(id) != null) {
+                            // 回忆入口的目标会话显式验证存在且属于当前角色；不满足时不允许
+                            // 普通 active flow 偷偷创建会话，统一交给可见错误处理。
+                            val conversation = container.conversationRepository.getById(id)
+                            if (targetConversationId != null && conversation?.characterId != charId) {
+                                _uiState.update { it.copy(errorMessage = "特殊邂逅角色与回忆会话不匹配", showWelcome = false) }
+                                return@collect
+                            }
                             _activeConversationId.value = id
+                        } else if (targetConversationId != null) {
+                            _uiState.update { it.copy(errorMessage = "回忆会话不存在，请返回特殊邂逅档案后重试", showWelcome = false) }
                         } else {
                             val newId = container.conversationRepository.create(charId)
                             container.settingsRepository.setActiveConversation(charId, newId)
@@ -368,7 +378,12 @@ class ChatViewModel(
     fun deleteConversation(id: Long) {
         viewModelScope.launch {
             val charId = _uiState.value.characterId
-            container.conversationRepository.delete(id)
+            val deleted = container.conversationRepository.delete(id)
+            if (!deleted) {
+                // DAO 层拒绝（特殊邂逅会话）：提示并保留会话，不触碰活跃映射。
+                _uiState.update { it.copy(errorMessage = "特殊邂逅回忆不可删除，可在角色档案的「特殊邂逅」中查看") }
+                return@launch
+            }
             // 删除的若是当前活跃会话（或其 pending 所属会话），同步清理，防止残留串台。
             if (id == _activeConversationId.value || pendingFinal?.conversationId == id) {
                 pendingFinal = null
@@ -953,7 +968,7 @@ class ChatViewModel(
                     termReason = "出错: ${e.message ?: "请求失败"}"
                     // 回滚：删除已落库的用户消息（无对应回复，避免孤儿），恢复输入框内容，
                     // 让用户可直接重试而无需重输（重发产生新消息，不会重复）。
-                    if (userMsgId != 0L) runCatching { container.chatRepository.deleteMessage(userMsgId) }
+                    if (userMsgId != 0L) runCatching { container.chatRepository.forceDeleteMessageForRollback(userMsgId) }
                     pendingFinal = null
                     _uiState.update { s ->
                         val msgs = s.messages.filterNot { it.id == "streaming" }.toMutableList()

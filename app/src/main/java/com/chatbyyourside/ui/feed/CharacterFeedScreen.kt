@@ -59,6 +59,8 @@ import kotlinx.coroutines.launch
 object FeedRoute {
     const val FEED = "feed"
     const val CHAT = "chat_detail"
+    const val CHAT_WITH_CONVERSATION = "chat_detail/{conversationId}"
+    fun chatRoute(conversationId: Long): String = "chat_detail/$conversationId"
     const val ENCOUNTER = "encounter"
     /** 群聊列表（微信式：新建/进入已有群）。 */
     const val GROUP_LIST = "group_list"

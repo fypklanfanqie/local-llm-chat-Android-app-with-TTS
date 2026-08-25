@@ -78,10 +78,8 @@ class ConversationRepository(private val dao: ConversationDao) {
         dao.updateAutoVideoEnabled(id, enabled)
     }
 
-    /** 删除会话及其全部消息（事务性，见 ConversationDao.deleteConversation）。 */
-    suspend fun delete(id: Long) {
-        dao.deleteConversation(id)
-    }
+    /** 删除会话及其全部消息（事务性；特殊邂逅会话返回 false，见 ConversationDao）。 */
+    suspend fun delete(id: Long): Boolean = dao.deleteConversation(id)
 
     /** 清空全部聊天记录（存储管理用；Seedance 任务记录保留）。 */
     suspend fun clearAll() {

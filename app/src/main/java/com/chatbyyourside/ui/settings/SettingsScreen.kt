@@ -2072,8 +2072,8 @@ private fun StorageSection(container: AppContainer, scope: CoroutineScope) {
                 "删除",
             )
             "chatRecords" -> Triple(
-                "清空聊天记录",
-                "确定清空全部聊天记录（单聊与群聊）？此操作不可恢复；Seedance 任务记录保留。",
+                "清空普通聊天记录",
+                "确定清空全部普通聊天记录（单聊与群聊）？此操作不可恢复；特殊邂逅回忆与 Seedance 任务记录会保留。",
                 "清空",
             )
             else -> Triple("", "", "")

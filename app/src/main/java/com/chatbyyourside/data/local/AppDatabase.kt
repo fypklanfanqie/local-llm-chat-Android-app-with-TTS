@@ -79,47 +79,86 @@ data class ChatHistoryEntity(
 @Dao
 interface ChatDao {
 
-    // 取最新 N 条（DESC）再由 Repository 反转为 ASC 显示。
-    // 旧实现用 ASC LIMIT N 取的是「最旧 N 条」：当 DB 临时多于 N 条（trim 未完成/失败）
-    // 时会漏掉刚发送的最新消息，且进程被杀后可能永久不可见。改用 DESC 始终保留最新 N 条。
-    @Query("SELECT * FROM chat_history WHERE conversationId = :conversationId ORDER BY timestamp DESC LIMIT ${AppConfig.MAX_HISTORY_PER_CONVERSATION}")
+    // 普通会话取最新 N 条（DESC）再由 Repository 反转为 ASC 显示；特殊邂逅会话不受
+    // 100 条窗口限制。这里用 EXISTS 直接在 DAO SQL 层分流，避免 UI/Repository 漏掉保护。
+    @Query(
+        "SELECT * FROM chat_history WHERE conversationId = :conversationId " +
+            "ORDER BY timestamp DESC " +
+            "LIMIT (CASE WHEN EXISTS (SELECT 1 FROM special_event " +
+            "WHERE conversationId = :conversationId) THEN 2147483647 ELSE ${AppConfig.MAX_HISTORY_PER_CONVERSATION} END)"
+    )
     fun getHistory(conversationId: Long): Flow<List<ChatHistoryEntity>>
 
-    @Query("SELECT * FROM chat_history WHERE conversationId = :conversationId ORDER BY timestamp DESC LIMIT ${AppConfig.MAX_HISTORY_PER_CONVERSATION}")
+    @Query(
+        "SELECT * FROM chat_history WHERE conversationId = :conversationId " +
+            "ORDER BY timestamp DESC " +
+            "LIMIT (CASE WHEN EXISTS (SELECT 1 FROM special_event " +
+            "WHERE conversationId = :conversationId) THEN 2147483647 ELSE ${AppConfig.MAX_HISTORY_PER_CONVERSATION} END)"
+    )
     suspend fun getHistoryList(conversationId: Long): List<ChatHistoryEntity>
 
     /** 导出使用：按时间正序读取该会话全部仍保存在数据库中的消息，不受 UI 历史窗口限制。 */
     @Query("SELECT * FROM chat_history WHERE conversationId = :conversationId ORDER BY timestamp ASC")
     suspend fun getAllHistoryList(conversationId: Long): List<ChatHistoryEntity>
 
+    /** DAO 层事件判定；会话/消息的删除与裁剪都必须依赖此查询。 */
+    @Query("SELECT EXISTS(SELECT 1 FROM special_event WHERE conversationId = :conversationId)")
+    suspend fun isSpecialEventConversation(conversationId: Long): Boolean
+
     @Insert
     suspend fun insert(entity: ChatHistoryEntity): Long
 
-    @Query("DELETE FROM chat_history WHERE conversationId = :conversationId")
-    suspend fun clearHistory(conversationId: Long)
+    @Query(
+        "DELETE FROM chat_history WHERE conversationId = :conversationId AND NOT EXISTS (" +
+            "SELECT 1 FROM special_event WHERE special_event.conversationId = chat_history.conversationId" +
+            ")"
+    )
+    suspend fun clearHistory(conversationId: Long): Int
 
+    /** 普通 UI 删除入口；被特殊邂逅引用的会话永远不受此入口删除。 */
+    @Query(
+        "DELETE FROM chat_history WHERE id = :id AND NOT EXISTS (" +
+            "SELECT 1 FROM special_event WHERE special_event.conversationId = chat_history.conversationId" +
+            ")"
+    )
+    suspend fun deleteById(id: Long): Int
+
+    /**
+     * 仅供发送失败回滚的受控入口。调用方必须只传入本次刚创建的用户消息 id；不暴露给普通 UI。
+     * 回滚不能走 [deleteById]，否则特殊邂逅消息会被保护逻辑拦截。
+     */
     @Query("DELETE FROM chat_history WHERE id = :id")
-    suspend fun deleteById(id: Long)
+    suspend fun forceDeleteById(id: Long): Int
 
     @Query("SELECT COUNT(*) FROM chat_history WHERE conversationId = :conversationId")
     suspend fun count(conversationId: Long): Int
 
-    /** 删除最旧的记录，保留最新 N 条 */
-    @Query("DELETE FROM chat_history WHERE conversationId = :conversationId AND id IN (SELECT id FROM chat_history WHERE conversationId = :conversationId ORDER BY timestamp ASC LIMIT :limit)")
-    suspend fun trimOldest(conversationId: Long, limit: Int)
+    /** 删除最旧的记录；特殊会话由 DAO 层直接跳过，防止任何调用方绕过 insertAndTrim。 */
+    @Query(
+        "DELETE FROM chat_history WHERE conversationId = :conversationId AND id IN (" +
+            "SELECT id FROM chat_history WHERE conversationId = :conversationId " +
+            "ORDER BY timestamp ASC LIMIT :limit)"
+    )
+    suspend fun deleteOldest(conversationId: Long, limit: Int): Int
+
+    @Transaction
+    suspend fun trimOldest(conversationId: Long, limit: Int): Int {
+        if (isSpecialEventConversation(conversationId)) return 0
+        return deleteOldest(conversationId, limit)
+    }
 
     /**
-     * 原子地插入并修剪：把 insert + count + trim 包进单个事务。
-     * 旧实现是三次独立 DB 操作，Flow 会在 insert 后、trim 前 emit 一次中间状态
-     * （此时 DB 有 N+1 条，配合旧的 ASC 查询会漏掉最新消息，造成 UI 闪烁）；
-     * 若进程在 insert 与 trim 之间被杀，DB 永久多于 N 条。事务保证 Flow 只在提交后 emit 一次。
+     * 原子地插入并修剪：普通会话保持最多 N 条，特殊邂逅会话全量保留。
+     * Flow 只在事务提交后 emit，避免插入/裁剪中间态。
      */
     @Transaction
     suspend fun insertAndTrim(conversationId: Long, entity: ChatHistoryEntity): Long {
         val id = insert(entity)
-        val c = count(conversationId)
-        if (c > AppConfig.MAX_HISTORY_PER_CONVERSATION) {
-            trimOldest(conversationId, c - AppConfig.MAX_HISTORY_PER_CONVERSATION)
+        if (!isSpecialEventConversation(conversationId)) {
+            val c = count(conversationId)
+            if (c > AppConfig.MAX_HISTORY_PER_CONVERSATION) {
+                trimOldest(conversationId, c - AppConfig.MAX_HISTORY_PER_CONVERSATION)
+            }
         }
         return id
     }
@@ -142,14 +181,18 @@ interface ConversationDao {
     @Query("UPDATE conversation SET autoVideoEnabled = :enabled WHERE id = :id")
     suspend fun updateAutoVideoEnabled(id: Long, enabled: Boolean): Int
 
-    @Query("SELECT * FROM conversation WHERE characterId = :characterId ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM conversation WHERE characterId = :characterId AND NOT EXISTS (SELECT 1 FROM special_event WHERE special_event.conversationId = conversation.id) ORDER BY updatedAt DESC")
     fun observeByCharacter(characterId: String): Flow<List<ConversationEntity>>
 
-    @Query("SELECT * FROM conversation WHERE characterId = :characterId ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM conversation WHERE characterId = :characterId AND NOT EXISTS (SELECT 1 FROM special_event WHERE special_event.conversationId = conversation.id) ORDER BY updatedAt DESC")
     suspend fun listByCharacter(characterId: String): List<ConversationEntity>
 
     @Query("SELECT * FROM conversation WHERE id = :id")
     suspend fun getById(id: Long): ConversationEntity?
+
+    /** DAO 层事件判定；getById 故意保留事件会话，供回忆路径读取。 */
+    @Query("SELECT EXISTS(SELECT 1 FROM special_event WHERE conversationId = :conversationId)")
+    suspend fun isSpecialEventConversation(conversationId: Long): Boolean
 
     /** 全部群聊会话（多群聊，最近活跃在前）。 */
     @Query("SELECT * FROM conversation WHERE isGroup = 1 ORDER BY updatedAt DESC")
@@ -173,34 +216,38 @@ interface ConversationDao {
     @Query("SELECT COUNT(*) FROM conversation WHERE characterId = :characterId")
     suspend fun count(characterId: String): Int
 
-    @Query("DELETE FROM conversation WHERE id = :id")
-    suspend fun delete(id: Long)
+    @Query("DELETE FROM conversation WHERE id = :id AND NOT EXISTS (SELECT 1 FROM special_event WHERE special_event.conversationId = conversation.id)")
+    suspend fun delete(id: Long): Int
 
-    @Query("DELETE FROM chat_history WHERE conversationId = :conversationId")
-    suspend fun deleteMessages(conversationId: Long)
+    @Query("DELETE FROM chat_history WHERE conversationId = :conversationId AND NOT EXISTS (SELECT 1 FROM special_event WHERE special_event.conversationId = :conversationId)")
+    suspend fun deleteMessages(conversationId: Long): Int
 
     /**
-     * 事务性删除会话：先删该会话的全部消息，再删会话本身。
-     * 跨表 SQL（conversation + chat_history）在单个 @Transaction 内保证原子。
+     * 事务性删除会话：特殊邂逅会话返回 false 且不删除消息；普通会话先删消息，再删会话。
      */
     @Transaction
-    suspend fun deleteConversation(id: Long) {
+    suspend fun deleteConversation(id: Long): Boolean {
+        if (isSpecialEventConversation(id)) return false
         deleteMessages(id)
-        delete(id)
+        return delete(id) == 1
     }
 
-    /** 清空全部聊天记录（事务：先删全部消息再删全部会话），供设置页「存储管理」使用。 */
+    /** 清空全部聊天记录，仅删除没有 special_event 软关联的会话及消息。 */
     @Transaction
     suspend fun clearAllConversations() {
-        deleteAllMessages()
-        deleteAllConversations()
+        deleteAllOrdinaryMessages()
+        deleteAllOrdinaryConversations()
     }
 
-    @Query("DELETE FROM chat_history")
-    suspend fun deleteAllMessages()
+    @Query(
+        "DELETE FROM chat_history WHERE conversationId IN (" +
+            "SELECT conversation.id FROM conversation WHERE NOT EXISTS (" +
+            "SELECT 1 FROM special_event WHERE special_event.conversationId = conversation.id))"
+    )
+    suspend fun deleteAllOrdinaryMessages(): Int
 
-    @Query("DELETE FROM conversation")
-    suspend fun deleteAllConversations()
+    @Query("DELETE FROM conversation WHERE NOT EXISTS (SELECT 1 FROM special_event WHERE special_event.conversationId = conversation.id)")
+    suspend fun deleteAllOrdinaryConversations(): Int
 }
 
 @Database(

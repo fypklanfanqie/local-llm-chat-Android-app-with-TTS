@@ -60,7 +60,8 @@ fun GroupChatMessageList(
                 characterName = nameOf(msg.characterId),
                 userImage = state.userImage,
                 onTts = {},
-                onDelete = { onDelete(msg) },
+                // 群聊非特殊邂逅：删除入口恒可用（MessageBubble.onDelete 现为可空）。
+                onDelete = { onDelete(msg) } as (() -> Unit)?,
             )
         }
         if (state.showTyping) {
