@@ -54,7 +54,7 @@ import kotlinx.coroutines.withContext
 /**
  * 设置 · 世界书分区：多本世界书管理入口 + 全局参数（总开关/扫描深度/递归/token 预算）。
  *
- * 世界书全局生效（不绑定角色，覆盖内置+自定义角色）；条目管理与编辑走独立路由页
+ * 世界书支持全局生效，也可以绑定指定角色或群聊；条目管理与编辑走独立路由页
  * （lorebook/{bookId}），本分区只承载书列表与开关。导入解析见 data/lorebook/LorebookJson。
  */
 @Composable
@@ -122,7 +122,7 @@ fun LorebookSection(
         },
     ) {
         Text(
-            text = "按关键词触发的背景设定库：对话提到关键词时自动注入对应设定，对所有角色生效。" +
+            text = "按关键词触发的背景设定库：可设为全局生效，也可绑定指定角色或群聊；对话提到关键词时自动注入对应设定。" +
                 "支持导入 SillyTavern 世界书 JSON 文件。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 11.sp,

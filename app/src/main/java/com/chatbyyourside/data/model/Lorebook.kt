@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 /**
  * 世界书（Lorebook / World Info）数据模型。
  *
- * 一本 [Lorebook] 由若干关键词触发的条目组成；所有已启用的书对所有角色聊天全局生效
+ * 一本 [Lorebook] 由若干关键词触发的条目组成；已启用的书可以全局生效，也可以绑定指定角色或群聊
  * （不绑定角色，覆盖内置 + 自定义角色）。持久化于 SettingsStore 键 `lorebooks` /
  * `lorebook_config`（JSON 列表，仿 custom_characters / worldviews 模式）。
  *

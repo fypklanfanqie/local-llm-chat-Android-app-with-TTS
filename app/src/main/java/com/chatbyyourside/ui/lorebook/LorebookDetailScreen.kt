@@ -49,6 +49,7 @@ import com.chatbyyourside.data.model.LorebookScopeType
 import com.chatbyyourside.ui.glass.GlassButton
 import com.chatbyyourside.ui.glass.GlassButtonStyle
 import com.chatbyyourside.ui.glass.GlassListRow
+import com.chatbyyourside.ui.glass.GlassTextField
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -336,13 +337,48 @@ private fun ScopePickerDialog(
     val scheme = MaterialTheme.colorScheme
     var scopeType by remember { mutableStateOf(book.scopeType) }
     var selectedIds by remember { mutableStateOf(book.scopeIds.toSet()) }
+    var query by remember { mutableStateOf("") }
+
+    val characterIds = remember(characters) { characters.map { it.id }.toSet() }
+    val groupTargets = remember(groups) { groups.map { it.id.toString() to it.title.ifBlank { "群聊" } } }
+    val groupIds = remember(groupTargets) { groupTargets.map { it.first }.toSet() }
+    val filteredCharacters = remember(characters, query) {
+        filterLorebookCharacterTargets(characters, query)
+    }
+    val filteredGroups = remember(groupTargets, query) {
+        filterLorebookGroupTargets(groups, query)
+    }
+
+    fun changeScopeType(next: LorebookScopeType) {
+        scopeType = next
+        query = ""
+        selectedIds = sanitizeLorebookScopeIds(next, selectedIds, characterIds, groupIds)
+    }
 
     fun toggle(id: String) {
         selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
     }
-    // 角色模式：自定义在前内置在后（CharacterRepository 同序）；群聊模式：全部群
-    val characterTargets = characters
-    val groupTargets = groups.map { it.id.toString() to (it.title.ifBlank { "群聊" }) }
+    val visibleTargetCount = when (scopeType) {
+        LorebookScopeType.CHARACTER -> filteredCharacters.size
+        LorebookScopeType.GROUP -> filteredGroups.size
+        LorebookScopeType.ALL -> 0
+    }
+    val totalTargetCount = when (scopeType) {
+        LorebookScopeType.CHARACTER -> characters.size
+        LorebookScopeType.GROUP -> groups.size
+        LorebookScopeType.ALL -> 0
+    }
+    val hiddenSelectedCount = (selectedIds intersect when (scopeType) {
+        LorebookScopeType.CHARACTER -> characterIds
+        LorebookScopeType.GROUP -> groupIds
+        LorebookScopeType.ALL -> emptySet()
+    }).count { id ->
+        when (scopeType) {
+            LorebookScopeType.CHARACTER -> filteredCharacters.none { it.id == id }
+            LorebookScopeType.GROUP -> filteredGroups.none { it.first == id }
+            LorebookScopeType.ALL -> false
+        }
+    }
 
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
@@ -358,8 +394,24 @@ private fun ScopePickerDialog(
                         LorebookScopeType.GROUP to "指定群聊",
                     ),
                     selected = scopeType,
-                    onSelect = { scopeType = it },
+                    onSelect = ::changeScopeType,
                 )
+                if (scopeType != LorebookScopeType.ALL) {
+                    GlassTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                        placeholder = if (scopeType == LorebookScopeType.CHARACTER) "搜索角色名称、代号或人设" else "搜索群聊名称或编号",
+                    )
+                    if (query.isNotBlank() && hiddenSelectedCount > 0) {
+                        Text(
+                            "另有 $hiddenSelectedCount 个已选目标未显示（筛选不会取消选择）",
+                            color = scheme.tertiary,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
+                }
                 when (scopeType) {
                     LorebookScopeType.ALL -> {
                         Text(
@@ -370,24 +422,26 @@ private fun ScopePickerDialog(
                         )
                     }
                     LorebookScopeType.CHARACTER -> {
-                        if (characterTargets.isEmpty()) {
+                        if (totalTargetCount == 0) {
                             Text("还没有可选角色", color = scheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
+                        } else if (visibleTargetCount == 0) {
+                            Text("没有匹配的角色", color = scheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
                         } else {
                             androidx.compose.foundation.lazy.LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp).padding(top = 8.dp)) {
-                                items(characterTargets.size) { i ->
-                                    val c = characterTargets[i]
+                                items(filteredCharacters, key = { it.id }) { c ->
                                     ScopeOptionRow(label = c.name, checked = c.id in selectedIds, onToggle = { toggle(c.id) })
                                 }
                             }
                         }
                     }
                     LorebookScopeType.GROUP -> {
-                        if (groupTargets.isEmpty()) {
+                        if (totalTargetCount == 0) {
                             Text("还没有群聊，先去通讯页创建一个吧。", color = scheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
+                        } else if (visibleTargetCount == 0) {
+                            Text("没有匹配的群聊", color = scheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(top = 12.dp))
                         } else {
                             androidx.compose.foundation.lazy.LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 240.dp).padding(top = 8.dp)) {
-                                items(groupTargets.size) { i ->
-                                    val (id, name) = groupTargets[i]
+                                items(filteredGroups, key = { it.first }) { (id, name) ->
                                     ScopeOptionRow(label = name, checked = id in selectedIds, onToggle = { toggle(id) })
                                 }
                             }
