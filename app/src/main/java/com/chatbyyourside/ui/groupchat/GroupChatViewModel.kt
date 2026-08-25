@@ -14,6 +14,8 @@ import com.chatbyyourside.data.model.DisplayMessage
 import com.chatbyyourside.data.model.WorldviewTargetType
 import com.chatbyyourside.data.model.buildWorldviewDirective
 import com.chatbyyourside.data.repository.GroupChatRepository
+import com.chatbyyourside.data.model.matchesScope
+import com.chatbyyourside.llm.LorebookEngine
 import com.chatbyyourside.ui.chat.PendingFinal
 import com.chatbyyourside.util.MarkdownParser
 import kotlinx.coroutines.CancellationException
@@ -246,6 +248,21 @@ class GroupChatViewModel(
                         it.targetType == WorldviewTargetType.GROUP && it.targetId == convId.toString()
                     },
                 )
+                // 世界书激活：按作用域过滤（ALL 或 GROUP 绑定本群），多说话人循环外只构建一次。
+                // 静态头进 system；动态命中走尾部 system 消息（此路径有云端门禁），不触碰头部缓存
+                val lorebookActivation = run {
+                    val cfg = container.settingsRepository.getLorebookConfigNow()
+                    if (!cfg.masterEnabled) null else LorebookEngine.activate(
+                        books = container.settingsRepository.getLorebooksNow()
+                            .filter { it.enabled && it.matchesScope(characterId = null, groupConversationId = convId.toString()) },
+                        config = cfg,
+                        scanMessages = history.takeLast(50),
+                    )
+                }
+                val lorebookStaticHead = lorebookActivation?.staticHead.orEmpty()
+                val lorebookTailMessages = lorebookActivation?.takeIf { it.tailInjection.isNotEmpty() }
+                    ?.let { listOf(ChatMessage(role = "system", content = it.tailInjection)) }
+                    ?: emptyList()
 
                 speakers.forEach { speaker ->
                     val targeted = speaker.id in mentionIdSet
@@ -258,6 +275,8 @@ class GroupChatViewModel(
                         userRelationship = profile.relationship,
                         targeted = targeted,
                         worldviewDirective = worldviewDirective,
+                        lorebookStaticHead = lorebookStaticHead,
+                        lorebookTailMessages = lorebookTailMessages,
                     )
 
                     var lastStreamRenderMs = 0L

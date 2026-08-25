@@ -10,11 +10,13 @@ import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.config.AssetPaths
 import com.chatbyyourside.config.Characters
 import com.chatbyyourside.conversationexport.ConversationExportDocument
+import com.chatbyyourside.data.model.matchesScope
 import com.chatbyyourside.data.model.*
 import com.chatbyyourside.data.remote.ChatMessageDto
 import com.chatbyyourside.data.repository.AutoVideoOutboxDraft
 import com.chatbyyourside.data.repository.ChatCompletionRepository
 import com.chatbyyourside.data.repository.ConversationRepository
+import com.chatbyyourside.llm.LorebookEngine
 import com.chatbyyourside.provider.local.LocalChatProvider
 import com.chatbyyourside.util.MarkdownParser
 import kotlinx.coroutines.CancellationException
@@ -761,6 +763,24 @@ class ChatViewModel(
                         it.targetType == WorldviewTargetType.CHARACTER && it.targetId == charId
                     },
                 )
+                // 世界书激活：按作用域过滤（ALL 或 CHARACTER 绑定当前角色），扫描最近消息窗口。
+                // 缓存策略：静态头（constant 条目）进 system 保证头部逐字节稳定；动态命中走尾部注入，
+                // 绝不进 system——否则每轮命中变化会打破本地 anchor / 云端前缀缓存，整窗重算。
+                val lorebookActivation = run {
+                    val cfg = container.settingsRepository.getLorebookConfigNow()
+                    if (!cfg.masterEnabled) null else LorebookEngine.activate(
+                        books = container.settingsRepository.getLorebooksNow().filter {
+                            it.enabled && it.matchesScope(characterId = charId, groupConversationId = null)
+                        },
+                        config = cfg,
+                        scanMessages = history.takeLast(50),
+                    )
+                }
+                if (lorebookActivation != null && lorebookActivation.activatedCount > 0) {
+                    Log.i("ChatViewModel", "世界书命中 ${lorebookActivation.activatedCount} 条，约 ${lorebookActivation.estimatedTokens} tokens")
+                }
+                val lorebookStaticHead = lorebookActivation?.staticHead.orEmpty()
+                val lorebookTailText = lorebookActivation?.tailInjection.orEmpty()
                 // 特殊邂逅追加离线场景背景，保证后续对话持续围绕解锁的事件；自定义角色采用其编辑后的脚本。
                 val specialEvent = container.database.affinityDao().getSpecialEventByConversation(convId)
                 if (specialEvent != null && !isCloudProvider) {
@@ -770,8 +790,12 @@ class ChatViewModel(
                     val script = container.specialEventScriptStore.resolve(char, event.threshold)
                     "\n\n【特殊邂逅背景】\n${script.scene}\n${script.systemPrompt}\n请延续这个场景，不要跳出场景或提及好感度、事件机制。"
                 }.orEmpty()
+                // 云端：动态世界书作为尾部 system 消息插入（贴近对话、不触碰长头部缓存）
+                val hasLorebookTail = lorebookTailText.isNotEmpty()
                 val apiMessages = buildList {
-                    add(ChatMessage(role = "system", content = char.systemPrompt + eventDirective + worldviewDirective + userDirective))
+                    // 静态世界书头（constant 条目）拼进 system 最前：内容只随条目编辑变化，
+                    // 与对话轮次无关 → system 链逐字节稳定 → 本地 anchor / 云端前缀缓存全程复用
+                    add(ChatMessage(role = "system", content = lorebookStaticHead + char.systemPrompt + eventDirective + worldviewDirective + userDirective))
                     addAll(resolvedHistory.map {
                         if (isCloudProvider) {
                             // 云端历史含 <think>（注入的推理），回传前剥离（reasoning 不应回传给对话商）。
@@ -787,6 +811,24 @@ class ChatViewModel(
                             it
                         }
                     })
+                }.toMutableList()
+                // 世界书动态命中注入：按最终实际生效的 Provider 分流（特殊邂逅场景可能在上方把本地切到云端）。
+                // - 云端：尾部插一条 system（位于倒数第 2 条附近，贴近对话、强度高，且不触碰长头部缓存）
+                // - 本地：并入最新 user 消息头部——PromptWindowPlanner 只保留首条 system + 完整 user/assistant
+                //   轮次，中途 system 会被静默丢弃；user 是本地路径唯一可靠的动态载体
+                if (hasLorebookTail) {
+                    if (container.chatProviderManager.getActiveProvider() !is LocalChatProvider) {
+                        apiMessages.add(apiMessages.size - 1, ChatMessage(role = "system", content = lorebookTailText))
+                    } else {
+                        val lastIdx = apiMessages.indexOfLast { it.role == "user" }
+                        if (lastIdx > 0) {
+                            apiMessages[lastIdx] = apiMessages[lastIdx].copy(
+                                content = "$lorebookTailText\n\n" + apiMessages[lastIdx].content,
+                                // 动态前缀会破坏 KV 前缀解释：显式清空 modelContent 让 Planner 回退 content
+                                modelContent = null,
+                            )
+                        }
+                    }
                 }
 
                 // 性能浮窗：重置速率与日志。实时 Token 速率由浮窗读 MnnBackend 原子快照（native tps），
@@ -834,7 +876,16 @@ class ChatViewModel(
                 var localCompletionReason: com.chatbyyourside.llm.metrics.CompletionReason? = null
                 if (provider is LocalChatProvider) {
                     val localResult = provider.chatTyped(apiMessages, onChunk)
-                    displayResponse = localResult.displayText
+                    // 防回缩防线（修复「输出完瞬间消失/缩短」）：流式最后一帧（latestAccumulated）
+                    // 若比完成文本长——剧本截断/收束轮回退等场景下 finalRaw 可能短于已显示内容——
+                    // 以较长者为准落库，保证完成消息绝不比用户刚看到的内容少。
+                    displayResponse =
+                        if (localResult.displayText.length < latestAccumulated.length) {
+                            Log.w("ChatViewModel", "完成文本(${localResult.displayText.length})短于流式末帧(${latestAccumulated.length})，以末帧为准防回缩")
+                            latestAccumulated
+                        } else {
+                            localResult.displayText
+                        }
                     modelText = localResult.modelText
                     generatedTokens = localResult.generation?.generatedTokens ?: 0
                     localCompletionReason = localResult.generation?.completionReason

@@ -53,6 +53,9 @@ import com.chatbyyourside.llm.thinking.ThinkingPolicyTelemetry
 import com.chatbyyourside.llm.thinking.shouldTruncateThinking
 import com.chatbyyourside.perfmon.BackendType as PerfmonBackendType
 import com.chatbyyourside.provider.ChatProvider
+import com.chatbyyourside.util.MarkdownParser
+import com.chatbyyourside.util.MnnTmpDirJanitor
+import android.os.StatFs
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -212,11 +215,32 @@ class LocalChatProvider(
     }
 
     /**
+     * 已安装模型的 tmp 目录哈希集（供 [MnnTmpDirJanitor.sweep] 区分「已装模型缓存」与「孤儿缓存」）。
+     * 与 resolver 的 tmp 目录命名同源（MnnTmpDirJanitor.tmpDirFor + config.json 路径哈希），
+     * 加载与清扫共用一把尺子：删除模型后其 tmp 目录即时变为孤儿，下一轮 chatTyped 即被清。
+     */
+    private fun modelInstalledTmpHashes(): Set<String> {
+        val modelsDir = ModelPathResolver.getModelsDirectory(context)
+        return (modelsDir.listFiles { f -> f.isDirectory } ?: emptyArray())
+            .mapNotNull { d ->
+                val config = File(d, ModelPathResolver.MNN_CONFIG_FILE)
+                val model = File(d, ModelPathResolver.MNN_MODEL_FILE)
+                if (config.exists() && model.exists()) {
+                    MnnTmpDirJanitor.tmpDirFor(context.cacheDir, config.absolutePath)
+                        .name.substringAfter(MnnTmpDirJanitor.TMP_DIR_PREFIX)
+                } else {
+                    null
+                }
+            }.toSet()
+    }
+
+    /**
      * 本地聊天（类型化结果，Task 3 Step 4）：分离展示文本与模型原始文本。
      *
      * - [LocalChatResult.displayText]：经 `<think>` 折叠装饰的展示文本，存 `content`、驱动 UI。
      * - [LocalChatResult.modelText]：模型原始输出（与 native `syncPromptCache()` 逐字节一致），存 `modelContent`，
-     *   重放本地历史时优先取它喂回 MNN，保证 KV 前缀复用精确命中。展示装饰永不进入 toMessagesJson。
+     *   历史回放时先剥离 `<think>` 再喂回 MNN（深度思考过程不进上下文，口径对齐云端 stripThink）；
+     *   展示装饰永不进入 toMessagesJson。
      */
     suspend fun chatTyped(
         messages: List<ChatMessage>,
@@ -282,6 +306,10 @@ class LocalChatProvider(
                 thinkingPlan,
                 nativeBudgetCapability.name,
             )
+            // when-to-think 路由：AUTO 命中 TRIVIAL/SIMPLE 时本轮 enableThinking=false，
+            // 完全跳过思考段——软提示也一并省略（plan.systemInstruction 为空串）。
+            val skipThinking = thinkingPlan?.skipThinking == true
+            val firstRoundEnableThinking = deepThinking && !skipThinking
 
             // 有效线程数 = min(用户设定, 大核数, 温度上限)。
             // - 不超过大核数：多了会跑到小核，反而变慢且更耗电发热。
@@ -368,15 +396,25 @@ class LocalChatProvider(
             //    MNN 后端由模型自带 chat 模板格式化消息列表。topP/repeatPenalty 沿用默认值。
             // 本地小模型专属防「上头」：给 system prompt 追加输出规范约束（仅本地，云端大模型走
             // CloudChatProvider 不受影响），压制角色扮演滑向编造多角色剧本并无限生成。
+            // 输出规范 + 思考软收束提示（仅深度思考开启时才有 thinkingPlan，否则不追加）；
+            // 同时做深度思考剥离：assistant 历史只回放思考完成后的正文，含 <think> 的 modelContent
+            // 原始文本在规划窗口前就地剥离并清空——token 估算、anchor、最终喂 MNN 的文本三者一致，
+            // 与云端路径（ChatViewModel stripThink 口径）对齐。代价：与 native syncPromptCache 记录的
+            // 旧前缀首轮失配一次；剥离结果每轮确定，之后 KV 复用恢复稳态。
             val enhancedMessages = messages.mapIndexed { idx, msg ->
-                if (idx == 0 && msg.role == "system") {
-                    // 输出规范 + 思考软收束提示（仅深度思考开启时才有 thinkingPlan，否则不追加）。
-                    msg.copy(content = msg.content + RESPONSE_GUIDE + (thinkingPlan?.systemInstruction.orEmpty()))
-                } else msg
+                when {
+                    idx == 0 && msg.role == "system" -> {
+                        msg.copy(content = msg.content + RESPONSE_GUIDE + (thinkingPlan?.systemInstruction.orEmpty()))
+                    }
+                    msg.role == "assistant" -> {
+                        msg.copy(content = MarkdownParser.stripThink(msg.modelContent ?: msg.content), modelContent = null)
+                    }
+                    else -> msg
+                }
             }
-            // Task 5：先在保留 modelContent 的原始消息上规划窗口（估算用 modelContent ?: content），
-            // 再把选中 assistant 的原始模型文本映射到 content 喂 MNN。绝不摘要/改写历史文本。
-            val measuredText = measuredAssistantText
+            // Task 5：在规范化后的消息上规划窗口（估算与喂入同源），选窗后原样喂 MNN。绝不摘要/改写历史文本
+            // （深度思考剥离是唯一例外：剥离的是推理过程而非正文，口径见上方注释）。
+            val measuredText = measuredAssistantText?.let { MarkdownParser.stripThink(it) }
             val knownTokenCounts = if (measuredText != null && measuredAssistantTokens > 0) {
                 enhancedMessages.mapIndexedNotNull { index, message ->
                     val raw = message.modelContent ?: message.content
@@ -394,6 +432,8 @@ class LocalChatProvider(
                 is PromptWindowResult.Success -> promptResult.plan
                 is PromptWindowResult.AdmissionFailure -> throw com.chatbyyourside.llm.PromptAdmissionException(promptResult)
             }
+            // 规范化后 modelContent 已全部清空（assistant 剥离时置 null），此映射退化为防御性拷贝：
+            // 兜住未来调用方在 system/user 上携带 modelContent 的情况，保证喂 MNN 的只有 content。
             val modelMessages = promptPlan.messages.map { message ->
                 val raw = message.modelContent ?: message.content
                 message.copy(content = raw, modelContent = null)
@@ -485,7 +525,32 @@ class LocalChatProvider(
             // final review I1：每轮恒查证（不按 lookahead 开关短路）——步进认证在开关关闭时
             // 同样可达；lookahead 噪音由 resolver 的 lookahead && 未认证条件天然排除。
             val certifiedOptions = loadCertifiedOptions(modelFingerprint)
-            val resolvedPlanBase = InferenceProfileResolver(context.cacheDir, modelPath).resolve(
+            // Wave 1：tmp_path 缓存目录清扫——未安装模型缓存优先删，再按 LRU 驱逐到预算
+            // （每份 ≈ 模型大小）。预算默认保留最大一份活跃模型缓存 + 1 GiB 余量。
+            val installedTmpHashes = modelInstalledTmpHashes()
+            val swept = MnnTmpDirJanitor.sweep(
+                context.cacheDir,
+                installedTmpHashes,
+                MnnTmpDirJanitor.defaultBudgetBytes(context.cacheDir, installedTmpHashes),
+            )
+            if (swept.isNotEmpty()) {
+                Log.i(TAG, "tmp_path 清扫 ${swept.size} 个缓存目录: " + swept.joinToString { it.name })
+            }
+            // 磁盘资格（复用准入已算好的 weightWorkingSetBytes）：空闲额度足够才给该模型开
+            // tmp_path（mmap 权重落盘 + 二次加载免重排快启）；不足保持全内存驻留现状。
+            val resolvedPlanBase = InferenceProfileResolver(
+                context.cacheDir,
+                modelPath,
+                tmpPathEligible = { _ ->
+                    runCatching {
+                        val sf = StatFs(context.cacheDir.absolutePath)
+                        MnnTmpDirJanitor.eligibleFor(weightWorkingSetBytes, sf.availableBytes)
+                    }.getOrDefault(false)
+                },
+                // Wave 2：native 宣告采样热重建能力时，温度等标量不进 load 配置（调参不重载）；
+                // 旧 .so 无能力时保持 legacy 行为逐位不变。
+                samplerHotUpdateCapable = MnnBridge.hasSamplerHotUpdateCapability,
+            ).resolve(
                 // Task 8：热降级后的有效模式（MODERATE+ 恒 BALANCED，撤销 sustained）。
                 mode = decision?.effectiveMode ?: performanceMode,
                 backendPreference = preference,
@@ -631,9 +696,10 @@ class LocalChatProvider(
             }
 
             // 首轮：完整思考 + 正文（思考超预算由 runRound 内检测截断）。
+            // when-to-think 路由：AUTO+TRIVIAL/SIMPLE 直接 enable_thinking=false 作答（无思考段）。
             val firstResult = runRound(
                 roundMessages = modelMessages,
-                roundEnableThinking = deepThinking,
+                roundEnableThinking = firstRoundEnableThinking,
                 roundThinkingRequested = deepThinking,
                 roundClassifier = thinkingClassifier,
                 roundPump = renderPump,

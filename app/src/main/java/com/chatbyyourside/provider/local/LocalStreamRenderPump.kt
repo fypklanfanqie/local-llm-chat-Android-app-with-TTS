@@ -76,15 +76,22 @@ class LocalStreamRenderPump(
         signal.trySend(Unit)
     }
 
-    /** 解码线程调用：策略截断到指定长度（只缩不扩）。 */
+    /** 快照当前全文（锁定读取，供基准/结果构造）。 */
+    fun snapshot(): String = synchronized(textLock) { accumulated.toString() }
+
+    /**
+     * 解码线程调用：策略截断到指定长度（只缩不扩）并立即触发一帧重渲染。
+     *
+     * 截断让累加器变短——若不立即重渲染，UI 上的 streaming 气泡仍显示截断前的较长文本，
+     * 完成路径用 snapshot 构造最终消息时会「瞬间缩短」，用户感知为回复说完后内容消失/回缩。
+     * 置位渲染信号走既有节流协程（首帧语义与正常流式一致）。
+     */
     fun truncateTo(length: Int) {
         synchronized(textLock) {
             if (accumulated.length > length) accumulated.setLength(length)
         }
+        signal.trySend(Unit)
     }
-
-    /** 快照当前全文（锁定读取，供基准/结果构造）。 */
-    fun snapshot(): String = synchronized(textLock) { accumulated.toString() }
 
     /**
      * native 返回后收尾：取消渲染协程（丢弃 pending 信号）、等待其退出，再同步渲染最终帧。

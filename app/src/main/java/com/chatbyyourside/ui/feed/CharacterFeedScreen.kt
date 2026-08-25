@@ -23,6 +23,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import com.chatbyyourside.ui.glass.GlassButton
 import com.chatbyyourside.ui.glass.GlassButtonStyle
+import com.chatbyyourside.ui.theme.LocalDynamicAccent
+import com.chatbyyourside.util.readableForeground
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -203,6 +205,11 @@ fun CharacterFeedScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // 顶栏 chip 内容色：磨砂底 ≈ 模糊背景 + 12% 主题 tint，整体偏浅——写死白色在
+            // 浅色立绘主题（如浅青绿）上对比度近零。改为按主题色亮度自适应选黑/白：
+            // 浅主题 -> 深字，深主题 -> 白字，立绘切换时自动跟随。
+            val chipContent = (LocalDynamicAccent.current ?: MaterialTheme.colorScheme.primary)
+                .readableForeground()
             Text(
                 text = "通讯",
                 color = Color.White,
@@ -221,9 +228,9 @@ fun CharacterFeedScreen(
                 ) {
                     Text(
                         "全部角色",
-                        color = Color.White.copy(alpha = 0.92f),
+                        color = chipContent,
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = FontWeight.SemiBold,
                     )
                 }
                 GlassButton(
@@ -234,9 +241,9 @@ fun CharacterFeedScreen(
                 ) {
                     Text(
                         "邂逅",
-                        color = Color.White.copy(alpha = 0.92f),
+                        color = chipContent,
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = FontWeight.SemiBold,
                     )
                 }
                 GlassButton(
@@ -247,9 +254,9 @@ fun CharacterFeedScreen(
                 ) {
                     Text(
                         "群聊",
-                        color = Color.White.copy(alpha = 0.92f),
+                        color = chipContent,
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = FontWeight.SemiBold,
                     )
                 }
                 GlassButton(
@@ -261,15 +268,15 @@ fun CharacterFeedScreen(
                     Icon(
                         Icons.Filled.Add,
                         contentDescription = null,
-                        tint = Color.White,
+                        tint = chipContent,
                         modifier = Modifier.size(14.dp),
                     )
                     Spacer(Modifier.width(4.dp))
                     Text(
                         "新建",
-                        color = Color.White,
+                        color = chipContent,
                         fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium,
+                        fontWeight = FontWeight.SemiBold,
                     )
                 }
             }

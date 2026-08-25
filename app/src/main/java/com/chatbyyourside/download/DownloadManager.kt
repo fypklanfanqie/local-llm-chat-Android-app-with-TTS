@@ -5,6 +5,7 @@ import android.util.Log
 import com.chatbyyourside.data.model.DownloadState
 import com.chatbyyourside.data.model.ModelInfo
 import com.chatbyyourside.provider.local.ModelPathResolver
+import com.chatbyyourside.util.MnnTmpDirJanitor
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.Serializable
@@ -419,6 +420,15 @@ class DownloadManager(private val context: Context) {
         // MNN：整个目录
         val dir = ModelPathResolver.getModelDir(context, modelId)
         if (dir.exists()) dir.deleteRecursively()
+
+        // 该模型的 mnn_tmp_* 权重缓存（sync.static ≈ 模型大小）：随模型删除一并清，
+        // 避免孤儿缓存无限累积。目录命名与 resolver 加载同源（MnnTmpDirJanitor.tmpDirFor）。
+        ModelPathResolver.getConfigPath(context, modelId)?.let { configPath ->
+            val tmpDir = MnnTmpDirJanitor.tmpDirFor(context.cacheDir, configPath)
+            if (tmpDir.exists() && tmpDir.deleteRecursively()) {
+                Log.i(TAG, "删除模型同时清理 tmp_path 缓存: ${tmpDir.name}")
+            }
+        }
 
         updateState(modelId, DownloadState.NotDownloaded)
     }

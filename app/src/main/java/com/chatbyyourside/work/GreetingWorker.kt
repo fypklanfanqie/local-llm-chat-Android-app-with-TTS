@@ -14,6 +14,7 @@ import com.chatbyyourside.config.isFreeProxyBaseUrl
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.WorldviewTargetType
+import com.chatbyyourside.data.model.matchesScope
 import com.chatbyyourside.data.model.buildWorldviewDirective
 import com.chatbyyourside.data.remote.ChatMessageDto
 import com.chatbyyourside.data.repository.SettingsRepository
@@ -261,7 +262,23 @@ class GreetingWorker(
                         it.targetType == WorldviewTargetType.CHARACTER && it.targetId == charId
                     },
                 )
-                generateGreeting(container.directLlmClient, apiConfig, char, history, userDirective, worldviewDirective)
+                // 世界书激活：按作用域过滤（ALL 或 CHARACTER 绑定本角色）。问候没有「最新用户消息紧跟」
+                // 的对话语境，动态尾直接拼在同一 system 末尾（单次生成，无缓存连续性诉求）
+                val lorebookDirective = run {
+                    val cfg = settings.getLorebookConfigNow()
+                    if (!cfg.masterEnabled) ""
+                    else {
+                        val act = com.chatbyyourside.llm.LorebookEngine.activate(
+                            books = settings.getLorebooksNow().filter {
+                                it.enabled && it.matchesScope(characterId = charId, groupConversationId = null)
+                            },
+                            config = cfg,
+                            scanMessages = history.takeLast(50),
+                        )
+                        if (act.isEmpty) "" else act.staticHead + act.tailInjection
+                    }
+                }
+                generateGreeting(container.directLlmClient, apiConfig, char, history, userDirective, worldviewDirective, lorebookDirective)
             }
         } catch (e: Exception) {
             null
@@ -309,6 +326,7 @@ class GreetingWorker(
         history: List<ChatMessage>,
         userDirective: String,
         worldviewDirective: String = "",
+        lorebookDirective: String = "",
     ): String {
         val cal = Calendar.getInstance()
         val hour = cal.get(Calendar.HOUR_OF_DAY)
@@ -333,7 +351,7 @@ class GreetingWorker(
         }
 
         val messages = buildList {
-            add(ChatMessageDto(role = "system", content = JsonPrimitive(char.systemPrompt + worldviewDirective + userDirective + instruction)))
+            add(ChatMessageDto(role = "system", content = JsonPrimitive(char.systemPrompt + worldviewDirective + lorebookDirective + userDirective + instruction)))
             history.forEach { m ->
                 if (m.content.isBlank()) return@forEach
                 // 剥离 <think> 段（深度思考模式下云端回复会带），避免把推理过程当历史喂回

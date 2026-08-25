@@ -2,10 +2,14 @@ package com.chatbyyourside.ui.chat
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-// 顶栏两处 AnimatedVisibility 位于 Column > Box 内：K2 会把调用劫持到 ColumnScope 扩展并报
-// 「cannot be called with an implicit receiver」，别名强制解析到顶层版本。
+// 顶栏两处动画位于 Column > Box 内：K2 会把裸调用劫持到 ColumnScope.AnimatedVisibility 扩展
+// （跨作用域的隐式接收者被拒）。注意单名 import 连同名扩展一起导入，别名在调用点救不了；
+// 别名只在下方 HeaderVisibility 包装函数的无接收者作用域内精确命中顶层版本。
 import androidx.compose.animation.AnimatedVisibility as TopLevelAnimatedVisibility
+import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
@@ -135,6 +139,28 @@ private val BubbleTailRadius = 5.dp
 private val AiAvatarSize = 38.dp
 private val UserAvatarSize = 30.dp
 private val SuccessGreen = Color(0xFF34C759)
+
+/**
+ * 顶栏区域专用的显隐容器。独立函数作用域内没有外层 Column 的隐式接收者，
+ * 经别名转发到顶层 AnimatedVisibility，规避 K2 对跨作用域扩展调用的拒绝
+ * （详见文件头 import 处注释）。
+ */
+@Composable
+private fun HeaderVisibility(
+    visible: Boolean,
+    modifier: Modifier = Modifier,
+    enter: EnterTransition,
+    exit: ExitTransition,
+    content: @Composable AnimatedVisibilityScope.() -> Unit,
+) {
+    TopLevelAnimatedVisibility(
+        visible = visible,
+        modifier = modifier,
+        enter = enter,
+        exit = exit,
+        content = content,
+    )
+}
 
 /**
  * 聊天界面玻璃方案 · C 实体卡片：高不透明度玻璃面，最大化文字可读性。
@@ -457,7 +483,7 @@ fun ChatScreen(
         ) {
             Box(modifier = Modifier.fillMaxWidth()) {
                 // 完整顶栏：高度动画由 expand/shrink 驱动，消息区自动回流
-                TopLevelAnimatedVisibility(
+                HeaderVisibility(
                     visible = !topBarCollapsed,
                     enter = expandVertically(
                         spring(Spring.DampingRatioNoBouncy, Spring.StiffnessMediumLow),
@@ -494,7 +520,7 @@ fun ChatScreen(
                     )
                 }
                 // 收起态小胶囊：原地淡入淡出盖住展开条的动画尾部
-                TopLevelAnimatedVisibility(
+                HeaderVisibility(
                     visible = topBarCollapsed,
                     modifier = Modifier.align(Alignment.TopCenter),
                     enter = fadeIn(tween(220)) + scaleIn(

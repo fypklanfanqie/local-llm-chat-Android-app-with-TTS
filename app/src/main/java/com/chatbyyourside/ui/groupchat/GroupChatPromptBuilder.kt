@@ -21,7 +21,14 @@ object GroupChatPromptBuilder {
     /** 未知成员（已被移出群）的名字兜底。 */
     const val FALLBACK_NAME = "群聊成员"
 
-    /** 构建完整 API 消息序列：system + 尾部最近历史（assistant 带 `名字：` 前缀）。 */
+    /**
+     * 构建完整 API 消息序列：system + 尾部最近历史（assistant 带 `名字：` 前缀）。
+     *
+     * 世界书参数（缓存友好布局）：[lorebookStaticHead] 为 constant 条目静态段，拼进 system
+     * （内容只随条目编辑变化 → system 逐字节稳定 → 云端前缀缓存复用）；[lorebookTailMessages]
+     * 为动态命中段——**在 mappedHistory 之后、最新 user 之前插**（mapNotNull 会丢弃非
+     * user/assistant 角色，先插必被过滤），贴近对话且不触碰头部缓存。
+     */
     fun buildApiMessages(
         members: List<Character>,
         speaker: Character,
@@ -31,6 +38,8 @@ object GroupChatPromptBuilder {
         userRelationship: String? = null,
         targeted: Boolean = false,
         worldviewDirective: String? = null,
+        lorebookStaticHead: String = "",
+        lorebookTailMessages: List<ChatMessage> = emptyList(),
     ): List<ChatMessage> {
         val nameById = members.associate { it.id to it.name }
         val mappedHistory = history.takeLast(AppConfig.GroupChat.MAX_CONTEXT_MESSAGES).mapNotNull { m ->
@@ -45,9 +54,30 @@ object GroupChatPromptBuilder {
                 else -> null
             }
         }
-        return buildList {
-            add(ChatMessage(role = "system", content = buildSystemPrompt(members, speaker, askUser, userPersona, userRelationship, targeted, worldviewDirective)))
-            addAll(mappedHistory)
+        val systemMessage = ChatMessage(
+            role = "system",
+            content = buildSystemPrompt(members, speaker, askUser, userPersona, userRelationship, targeted, worldviewDirective, lorebookStaticHead),
+        )
+        return if (lorebookTailMessages.isEmpty()) {
+            buildList {
+                add(systemMessage)
+                addAll(mappedHistory)
+            }
+        } else {
+            // 动态世界书插在最后一条 user 消息之前（贴近对话、不触碰头部缓存）；
+            // mappedHistory 已完成映射，此处插入不会被 mapNotNull 过滤。
+            buildList {
+                add(systemMessage)
+                val lastUserIdx = mappedHistory.indexOfLast { it.role == "user" }
+                if (lastUserIdx >= 0) {
+                    addAll(mappedHistory.take(lastUserIdx))
+                    addAll(lorebookTailMessages)
+                    addAll(mappedHistory.drop(lastUserIdx))
+                } else {
+                    addAll(mappedHistory)
+                    addAll(lorebookTailMessages)
+                }
+            }
         }
     }
 
@@ -59,6 +89,7 @@ object GroupChatPromptBuilder {
         userRelationship: String? = null,
         targeted: Boolean = false,
         worldviewDirective: String? = null,
+        lorebookStaticHead: String = "",
     ): String = buildString {
         append("这是一个角色群聊。你在群里扮演「", speaker.name, "」。\n")
         append("以下是群成员人设：\n")
@@ -68,6 +99,11 @@ object GroupChatPromptBuilder {
         // 世界观（GROUP 目标）注入：全员人设之后、对话规则之前
         if (!worldviewDirective.isNullOrBlank()) {
             append(worldviewDirective)
+            append("\n")
+        }
+        // 世界书静态头（constant 条目，只随条目编辑变化）：世界观之后、对话规则之前
+        if (lorebookStaticHead.isNotBlank()) {
+            append(lorebookStaticHead)
             append("\n")
         }
         append("对话规则：\n")

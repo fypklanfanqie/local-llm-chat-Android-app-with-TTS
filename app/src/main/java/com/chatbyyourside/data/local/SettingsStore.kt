@@ -11,6 +11,8 @@ import com.chatbyyourside.data.model.ApiConfig
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.GroupChatConfig
+import com.chatbyyourside.data.model.Lorebook
+import com.chatbyyourside.data.model.LorebookGlobalConfig
 import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.UserProfileConfig
 import com.chatbyyourside.data.model.WorldviewConfig
@@ -81,6 +83,10 @@ class SettingsStore(
 
         // 世界观设定（JSON: List<WorldviewConfig>，与目标一一对应注入提示词）
         val WORLDVIEWS = stringPreferencesKey("worldviews")
+
+        // 世界书（Lorebook）：多本书 JSON List<Lorebook> 全局生效 + 全局参数 LorebookGlobalConfig
+        val LOREBOOKS = stringPreferencesKey("lorebooks")
+        val LOREBOOK_CONFIG = stringPreferencesKey("lorebook_config")
 
         // 会话：角色 -> 当前活跃会话 id
         val ACTIVE_CONVERSATIONS = stringPreferencesKey("active_conversations")  // JSON: Map<String, Long>
@@ -180,6 +186,12 @@ class SettingsStore(
         val LLM_LAST_TEMPERATURE = floatPreferencesKey("llm_last_temperature")
         // Task 7：最近一次成功加载实际应用的 plan loadConfigHash（唯一重载指纹）。
         val LLM_LAST_CONFIG_HASH = stringPreferencesKey("llm_last_config_hash")
+
+        // ===== 使用指南 =====
+        // 是否已完成首次阅读水平选择；true 后指南初始页不再弹水平选择。
+        val GUIDE_SETUP_DONE = booleanPreferencesKey("guide_setup_done")
+        // 当前阅读水平："BEGINNER" / "EXPERIENCED"；"" = 未选择（仅 setup_done=false 时合法）。
+        val GUIDE_LEVEL = stringPreferencesKey("guide_level")
     }
 
     // ===== Theme Mode =====
@@ -469,6 +481,41 @@ class SettingsStore(
         }
     }
 
+    // ===== 世界书（Lorebook）=====
+    /** 全部世界书（JSON List<Lorebook>，宽松解析，损坏回退空列表）。 */
+    val lorebooks: Flow<List<Lorebook>> = dataStore.data.map { p ->
+        val raw = p[Keys.LOREBOOKS] ?: ""
+        if (raw.isBlank()) emptyList()
+        else runCatching { voiceJson.decodeFromString<List<Lorebook>>(raw) }.getOrDefault(emptyList())
+    }
+
+    /** 原子读-改-写（单 edit 事务），与 updateWorldviews 同机制。 */
+    suspend fun updateLorebooks(transform: (List<Lorebook>) -> List<Lorebook>) {
+        dataStore.edit { p ->
+            val raw = p[Keys.LOREBOOKS] ?: ""
+            val current: List<Lorebook> = if (raw.isBlank()) emptyList()
+            else runCatching { voiceJson.decodeFromString<List<Lorebook>>(raw) }.getOrDefault(emptyList())
+            p[Keys.LOREBOOKS] = voiceJson.encodeToString(transform(current))
+        }
+    }
+
+    /** 世界书全局参数（解析失败回退默认值）。 */
+    val lorebookConfig: Flow<LorebookGlobalConfig> = dataStore.data.map { p ->
+        val raw = p[Keys.LOREBOOK_CONFIG] ?: ""
+        if (raw.isBlank()) LorebookGlobalConfig()
+        else runCatching { voiceJson.decodeFromString<LorebookGlobalConfig>(raw) }.getOrDefault(LorebookGlobalConfig())
+    }
+
+    /** 原子读-改-写全局参数。 */
+    suspend fun updateLorebookConfig(transform: (LorebookGlobalConfig) -> LorebookGlobalConfig) {
+        dataStore.edit { p ->
+            val raw = p[Keys.LOREBOOK_CONFIG] ?: ""
+            val current: LorebookGlobalConfig = if (raw.isBlank()) LorebookGlobalConfig()
+            else runCatching { voiceJson.decodeFromString<LorebookGlobalConfig>(raw) }.getOrDefault(LorebookGlobalConfig())
+            p[Keys.LOREBOOK_CONFIG] = voiceJson.encodeToString(transform(current))
+        }
+    }
+
     // ===== 音量 =====
     val volume: Flow<Int> = dataStore.data.map { p ->
         p[Keys.VOLUME] ?: 60
@@ -656,6 +703,25 @@ class SettingsStore(
 
     suspend fun setLiquidGlass(enabled: Boolean) {
         dataStore.edit { it[Keys.LIQUID_GLASS] = enabled }
+    }
+
+    // ===== 使用指南 =====
+    /** 是否已完成首次阅读水平选择（一旦 true 不再重置）。 */
+    val guideSetupDone: Flow<Boolean> = dataStore.data.map { p ->
+        p[Keys.GUIDE_SETUP_DONE] ?: false
+    }
+
+    suspend fun setGuideSetupDone(done: Boolean) {
+        dataStore.edit { it[Keys.GUIDE_SETUP_DONE] = done }
+    }
+
+    /** 阅读水平原始串："BEGINNER" / "EXPERIENCED"；未选择时为空串（UI 侧映射枚举并兜底 BEGINNER）。 */
+    val guideLevel: Flow<String> = dataStore.data.map { p ->
+        p[Keys.GUIDE_LEVEL] ?: ""
+    }
+
+    suspend fun setGuideLevel(level: String) {
+        dataStore.edit { it[Keys.GUIDE_LEVEL] = level }
     }
 
     // ===== 通讯界面自定义背景 =====

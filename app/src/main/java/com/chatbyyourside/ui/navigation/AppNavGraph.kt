@@ -61,6 +61,8 @@ import com.chatbyyourside.ui.glass.GlassNavItem
 import com.chatbyyourside.ui.groupchat.GroupChatScreen
 import com.chatbyyourside.ui.groupchat.GroupListScreen
 import com.chatbyyourside.ui.groupchat.GroupNavigationBus
+import com.chatbyyourside.ui.lorebook.LorebookDetailScreen
+import com.chatbyyourside.ui.lorebook.LorebookEntryEditScreen
 import com.chatbyyourside.ui.models.ModelManagerScreen
 import com.chatbyyourside.ui.music.MusicScreen
 import com.chatbyyourside.ui.settings.BackendSettingsScreen
@@ -93,6 +95,13 @@ private fun affinityRoute(characterId: String): String = "affinity/${android.net
 private fun affinityGiftsRoute(characterId: String): String = "affinity_gifts/${android.net.Uri.encode(characterId)}"
 private fun affinityEventsRoute(characterId: String): String = "affinity_events/${android.net.Uri.encode(characterId)}"
 private val affinityDestinations = setOf(CHECKIN_SHOP_ROUTE, AFFINITY_ROUTE, AFFINITY_GIFTS_ROUTE, AFFINITY_EVENTS_ROUTE)
+
+// ===== 世界书路由（条目管理 / 条目编辑，entryId="new" 表新建）=====
+private const val LOREBOOK_DETAIL_ROUTE = "lorebook/{bookId}"
+private const val LOREBOOK_ENTRY_ROUTE = "lorebook/{bookId}/entry/{entryId}"
+private fun lorebookDetailRoute(bookId: String): String = "lorebook/${android.net.Uri.encode(bookId)}"
+private fun lorebookEntryRoute(bookId: String, entryId: String): String =
+    "lorebook/${android.net.Uri.encode(bookId)}/entry/${android.net.Uri.encode(entryId)}"
 
 @Composable
 fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false, crashNotice: Boolean = false) {
@@ -389,6 +398,9 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false, crash
                         onNavigateToBackendSettings = {
                             navController.navigate("backend_settings") { launchSingleTop = true }
                         },
+                        onNavigateToLorebook = { bookId ->
+                            navController.navigate(lorebookDetailRoute(bookId)) { launchSingleTop = true }
+                        },
                     )
                 }
             }
@@ -396,6 +408,38 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false, crash
                 Box(tabBottomPadding) {
                     BackendSettingsScreen(
                         container = container,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
+            }
+            composable(
+                route = LOREBOOK_DETAIL_ROUTE,
+                arguments = listOf(navArgument("bookId") { type = NavType.StringType }),
+            ) { entry ->
+                Box(tabBottomPadding) {
+                    LorebookDetailScreen(
+                        container = container,
+                        bookId = entry.arguments?.getString("bookId").orEmpty(),
+                        onBack = { navController.popBackStack() },
+                        onOpenEntry = { entryId ->
+                            val bookId = entry.arguments?.getString("bookId").orEmpty()
+                            navController.navigate(lorebookEntryRoute(bookId, entryId)) { launchSingleTop = true }
+                        },
+                    )
+                }
+            }
+            composable(
+                route = LOREBOOK_ENTRY_ROUTE,
+                arguments = listOf(
+                    navArgument("bookId") { type = NavType.StringType },
+                    navArgument("entryId") { type = NavType.StringType },
+                ),
+            ) { entry ->
+                Box(tabBottomPadding) {
+                    LorebookEntryEditScreen(
+                        container = container,
+                        bookId = entry.arguments?.getString("bookId").orEmpty(),
+                        entryId = entry.arguments?.getString("entryId").orEmpty(),
                         onBack = { navController.popBackStack() },
                     )
                 }

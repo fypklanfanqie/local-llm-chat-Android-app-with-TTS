@@ -11,8 +11,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * [LocalThinkingPolicyResolver] 纯逻辑测试：复杂度分类、档位解析、软收束提示语义。
- * 全部为纯 Kotlin，不触 Android 运行时。
+ * [LocalThinkingPolicyResolver] 纯逻辑测试：复杂度分类（含平凡门）、档位解析、软收束提示语义。
+ * 全部为纯 Kotlin，不触 Android 运行时。与聊天终端孪生项目同名测试保持同步。
  */
 class LocalThinkingPolicyResolverTest {
 
@@ -30,6 +30,19 @@ class LocalThinkingPolicyResolverTest {
     fun shortDailyQuestionIsSimple() {
         assertEquals(QuestionComplexity.SIMPLE, resolver.classify("今天天气怎么样？"))
         assertEquals(QuestionComplexity.SIMPLE, resolver.classify("帮我翻译成英文"))
+    }
+
+    @Test
+    fun greetingsAndSymbolsRouteTrivial() {
+        // 平凡门：寒暄/附和/纯符号/极短口算 -> TRIVIAL（AUTO 下与 SIMPLE 一同跳过思考）。
+        assertEquals(QuestionComplexity.TRIVIAL, resolver.classify("你好"))
+        assertEquals(QuestionComplexity.TRIVIAL, resolver.classify("晚安～"))
+        assertEquals(QuestionComplexity.TRIVIAL, resolver.classify("嗯嗯好的哈哈"))
+        assertEquals(QuestionComplexity.TRIVIAL, resolver.classify("！！！"))
+        assertEquals(QuestionComplexity.TRIVIAL, resolver.classify("1+1"))
+        // 短但带任务内容的消息不得误判平凡；开头寒暄也不行（整条全匹配而非子串）。
+        assertNotEquals(QuestionComplexity.TRIVIAL, resolver.classify("帮我写个快排"))
+        assertNotEquals(QuestionComplexity.TRIVIAL, resolver.classify("你好，帮我翻译一段话"))
     }
 
     @Test
@@ -57,13 +70,12 @@ class LocalThinkingPolicyResolverTest {
 
                 def put(self, key, value):
                     if key in self.cache:
-                        self.order.move_to_end(key)
+                        self.order[key] = value
                     elif len(self.cache) >= self.capacity:
                         oldest = next(iter(self.order))
                         self.order.popitem(last=False)
                         del self.cache[oldest]
-                    self.cache[key] = value
-                    self.order[key] = None
+                    self.cache[key] = None
             ```
             验收点：
             1. 写 5 个单元测试覆盖命中、未命中、容量淘汰和 put 更新。
@@ -94,16 +106,31 @@ class LocalThinkingPolicyResolverTest {
 
     @Test
     fun autoRoutesByComplexity() {
+        // 高效推理 routing：AUTO+TRIVIAL/SIMPLE 跳过思考；STANDARD->SHORT；COMPLEX->MEDIUM。
         val simple = resolver.resolve(true, LocalThinkingLevel.AUTO, "今天天气怎么样", false)!!
         assertEquals(LocalThinkingLevel.SHORT, simple.effectiveLevel)
         assertEquals(QuestionComplexity.SIMPLE, simple.complexity)
+        assertTrue("SIMPLE 应回路由跳过思考", simple.skipThinking)
+        assertEquals(0L, simple.thinkingBudgetBytes)
+        assertEquals("", simple.systemInstruction)
 
         val standard = resolver.resolve(true, LocalThinkingLevel.AUTO, standardQuestion, false)!!
-        assertEquals(LocalThinkingLevel.MEDIUM, standard.effectiveLevel)
+        assertEquals(LocalThinkingLevel.SHORT, standard.effectiveLevel)
+        assertFalse("STANDARD 不跳过", standard.skipThinking)
 
         val complex = resolver.resolve(true, LocalThinkingLevel.AUTO, longTaskText(), false)!!
-        assertEquals(LocalThinkingLevel.LONG, complex.effectiveLevel)
+        assertEquals(LocalThinkingLevel.MEDIUM, complex.effectiveLevel)
         assertEquals(QuestionComplexity.COMPLEX, complex.complexity)
+        assertFalse(complex.skipThinking)
+    }
+
+    @Test
+    fun manualLevelsNeverSkipThinking() {
+        for (level in listOf(LocalThinkingLevel.SHORT, LocalThinkingLevel.MEDIUM, LocalThinkingLevel.LONG)) {
+            val plan = resolver.resolve(true, level, "今天天气怎么样", false)!!
+            assertFalse("手动档 ${level} 是用户显式意图，永不跳过", plan.skipThinking)
+            assertTrue(plan.thinkingBudgetBytes > 0L)
+        }
     }
 
     @Test
@@ -128,17 +155,22 @@ class LocalThinkingPolicyResolverTest {
 
     @Test
     fun allLevelsOnlyChangeSoftGuidance() {
-        val allPlans = LocalThinkingLevel.entries.map { level ->
+        val allPlans = listOf(
+            LocalThinkingLevel.AUTO,
+            LocalThinkingLevel.SHORT,
+            LocalThinkingLevel.MEDIUM,
+            LocalThinkingLevel.LONG,
+        ).map { level ->
             resolver.resolve(true, level, standardQuestion, nativeBudgetAvailable = false)!!
         }
 
-        // 手动档 SHORT/MEDIUM/LONG 软提示两两不同（描述生效思考节奏）。
+        // 手动档 SHORT/MEDIUM/LONG 软提示两两不同（要点上限随档位变化）。
         val manualPlans = allPlans.filter { it.requestedLevel != LocalThinkingLevel.AUTO }
         assertEquals(3, manualPlans.map { it.systemInstruction }.distinct().size)
-        // AUTO 按复杂度路由后，提示与其解析出的生效档位一致（AUTO+标准题 -> MEDIUM）。
+        // AUTO 按复杂度路由后（STANDARD->SHORT），提示与其解析出的生效档位一致。
         val autoPlan = allPlans.first { it.requestedLevel == LocalThinkingLevel.AUTO }
         assertEquals(
-            manualPlans.first { it.requestedLevel == LocalThinkingLevel.MEDIUM }.systemInstruction,
+            manualPlans.first { it.requestedLevel == LocalThinkingLevel.SHORT }.systemInstruction,
             autoPlan.systemInstruction,
         )
         allPlans.forEach { plan ->
@@ -151,10 +183,10 @@ class LocalThinkingPolicyResolverTest {
     }
 
     @Test
-    fun autoStandardTargetFallsWithin5To15Seconds() {
+    fun autoStandardTargetFallsWithin3To15Seconds() {
         val standard = resolver.resolve(true, LocalThinkingLevel.AUTO, standardQuestion, false)!!
-        // 普通问题目标范围：5–15 秒（调优目标，不是硬 SLA）。
-        assertTrue(standard.targetMinMs >= 5_000L)
+        // 降档后 AUTO+标准题走短思考：约 3–9 秒（调优目标，不是硬 SLA）。
+        assertTrue(standard.targetMinMs >= 3_000L)
         assertTrue(standard.targetMaxMs <= 15_000L)
         assertTrue(standard.targetMinMs < standard.targetMaxMs)
     }
@@ -163,22 +195,30 @@ class LocalThinkingPolicyResolverTest {
 
     @Test
     fun instructionConstrainsOnlyThinkingAndPreservesFinalAnswer() {
-        val plan = resolver.resolve(true, LocalThinkingLevel.AUTO, "你好", false)!!
+        val plan = resolver.resolve(true, LocalThinkingLevel.MEDIUM, standardQuestion, false)!!
         val instr = plan.systemInstruction
 
         // 只约束思考阶段。
         assertTrue(instr.contains("只约束你的内部思考过程"))
-        assertTrue(instr.contains("不改变最终回答的格式、篇幅或内容要求"))
-        // 先做必要核验。
-        assertTrue(instr.contains("必要") && instr.contains("核验"))
-        // 软预算后收束到最终答案。
-        assertTrue(instr.contains("停止扩展更多旁支") && instr.contains("最终答案"))
-        // 不得省略用户要求的最终答案。
-        assertTrue(instr.contains("不得因思考被缩短而省略或简化重要结论"))
-        // 不得包含虚假能力。
+        assertTrue(instr.contains("不改变最终回答"))
+        // 结构化微模板：固定骨架 + 负向禁令（succinct-CoT / Chain-of-Draft）。
+        assertTrue(instr.contains("思考模板"))
+        assertTrue(instr.contains("目标：<") && instr.contains("要点：<") && instr.contains("结论：<"))
+        assertTrue(instr.contains("禁止：复述问题原文"))
+        // 收束要求。
+        assertTrue(instr.contains("立即停止") && instr.contains("最终答案"))
+        // 不得省略用户要求的最终答案；不得包含虚假能力。
+        assertTrue(instr.contains("不得因思考简短而省略重要结论"))
         assertFalse(instr.contains("强制停止"))
         assertFalse(instr.contains("精确"))
         assertFalse(instr.contains("token"))
+    }
+
+    @Test
+    fun skippedPlanCarriesNoBudgetButKeepsTemplateForTelemetry() {
+        val plan = resolver.resolve(true, LocalThinkingLevel.AUTO, "今天天气怎么样", false)!!
+        assertTrue(plan.skipThinking)
+        assertEquals(0L, plan.thinkingBudgetBytes)
     }
 
     // ===== 手动档范围差异 =====
@@ -211,9 +251,9 @@ class LocalThinkingPolicyResolverTest {
         val standard = resolver.resolve(true, LocalThinkingLevel.AUTO, standardQuestion, false)!!
         val complex = resolver.resolve(true, LocalThinkingLevel.AUTO, longTaskText(), false)!!
 
-        assertEquals(LocalThinkingLevel.SHORT, simple.effectiveLevel)
-        assertEquals(LocalThinkingLevel.MEDIUM, standard.effectiveLevel)
-        assertEquals(LocalThinkingLevel.LONG, complex.effectiveLevel)
+        // 跳过档预算 0；STANDARD->SHORT(1536B)；COMPLEX->MEDIUM(3072B)，保持单调。
+        assertEquals(LocalThinkingLevel.SHORT, standard.effectiveLevel)
+        assertEquals(LocalThinkingLevel.MEDIUM, complex.effectiveLevel)
         assertTrue(simple.thinkingBudgetBytes < standard.thinkingBudgetBytes)
         assertTrue(standard.thinkingBudgetBytes < complex.thinkingBudgetBytes)
     }

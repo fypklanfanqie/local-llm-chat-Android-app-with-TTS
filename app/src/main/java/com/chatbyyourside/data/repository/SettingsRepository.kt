@@ -6,6 +6,8 @@ import com.chatbyyourside.data.model.ApiConfig
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.GroupChatConfig
+import com.chatbyyourside.data.model.Lorebook
+import com.chatbyyourside.data.model.LorebookGlobalConfig
 import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.UserProfileConfig
 import com.chatbyyourside.data.model.WorldviewConfig
@@ -54,6 +56,18 @@ class SettingsRepository(private val store: SettingsStore) {
 
     suspend fun updateWorldviews(transform: (List<WorldviewConfig>) -> List<WorldviewConfig>) =
         store.updateWorldviews(transform)
+
+    // ===== 世界书（Lorebook）=====
+    val lorebooks: Flow<List<Lorebook>> = store.lorebooks
+
+    suspend fun updateLorebooks(transform: (List<Lorebook>) -> List<Lorebook>) =
+        store.updateLorebooks(transform)
+
+    val lorebookConfig: Flow<LorebookGlobalConfig> = store.lorebookConfig
+
+    suspend fun updateLorebookConfig(transform: (LorebookGlobalConfig) -> LorebookGlobalConfig) =
+        store.updateLorebookConfig(transform)
+
     val volume: Flow<Int> = store.volume
     val musicFavorites: Flow<Set<String>> = store.musicFavorites
     val musicRepeatMode: Flow<Int> = store.musicRepeatMode
@@ -80,6 +94,12 @@ class SettingsRepository(private val store: SettingsStore) {
     val localThinkingLevel: Flow<LocalThinkingLevel> = store.localThinkingLevel
     /** 性能浮窗液态玻璃开关（默认开）。 */
     val liquidGlass: Flow<Boolean> = store.liquidGlass
+
+    // ===== 使用指南 =====
+    /** 是否已完成首次阅读水平选择。 */
+    val guideSetupDone: Flow<Boolean> = store.guideSetupDone
+    /** 阅读水平原始串（"BEGINNER"/"EXPERIENCED"/"" 未选）。 */
+    val guideLevel: Flow<String> = store.guideLevel
     /** 推理参数是否相对上次成功加载已变更（供设置页展示"将自动重载"横幅）*/
     val llmConfigChanged: Flow<Boolean> = store.llmConfigChanged
 
@@ -187,6 +207,9 @@ class SettingsRepository(private val store: SettingsStore) {
 
     suspend fun setLiquidGlass(enabled: Boolean) = store.setLiquidGlass(enabled)
 
+    suspend fun setGuideSetupDone(done: Boolean) = store.setGuideSetupDone(done)
+    suspend fun setGuideLevel(level: String) = store.setGuideLevel(level)
+
     suspend fun setGreetingEnabled(enabled: Boolean) = store.setGreetingEnabled(enabled)
     suspend fun setGreetingCharacterIds(ids: Set<String>) = store.setGreetingCharacterIds(ids)
     suspend fun setGreetingDailyCount(count: Int) = store.setGreetingDailyCount(count)
@@ -278,6 +301,16 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun getWorldviewsNow(): List<WorldviewConfig> = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         worldviews.first()
     } ?: emptyList()
+
+    /** 同步获取全部世界书（5s 超时返回空列表，等同无世界书注入），供发送路径 / Worker 使用 */
+    suspend fun getLorebooksNow(): List<Lorebook> = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        lorebooks.first()
+    } ?: emptyList()
+
+    /** 同步获取世界书全局参数（5s 超时回退默认值）。 */
+    suspend fun getLorebookConfigNow(): LorebookGlobalConfig = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        lorebookConfig.first()
+    } ?: LorebookGlobalConfig()
 
     // ===== 角色问候同步读取（供 GreetingWorker 用）=====
     /** 已开启?（超时返回 null 而非 false——Worker 据此区分「明确关闭」与「暂时读不到」）。 */

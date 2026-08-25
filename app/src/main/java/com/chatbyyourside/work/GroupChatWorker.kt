@@ -18,6 +18,7 @@ import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.GroupChatConfig
 import com.chatbyyourside.data.model.WorldviewTargetType
 import com.chatbyyourside.data.model.buildWorldviewDirective
+import com.chatbyyourside.data.model.matchesScope
 import com.chatbyyourside.data.remote.ChatMessageDto
 import com.chatbyyourside.data.remote.DirectLlmClient
 import com.chatbyyourside.data.repository.SettingsRepository
@@ -204,6 +205,23 @@ class GroupChatWorker(
                 it.targetType == WorldviewTargetType.GROUP && it.targetId == convId.toString()
             },
         )
+        // 世界书激活：按作用域过滤（ALL 或 GROUP 绑定本群）。Worker 恒云端（上方门禁）；
+        // 静态头进 system，动态命中走尾部 system 消息。一轮内复用同一激活结果
+        // （discuss 轮内 history 增量不回扫，与世界观同口径）
+        val lorebookActivation = run {
+            val cfg = settings.getLorebookConfigNow()
+            if (!cfg.masterEnabled) null else com.chatbyyourside.llm.LorebookEngine.activate(
+                books = settings.getLorebooksNow().filter {
+                    it.enabled && it.matchesScope(characterId = null, groupConversationId = convId.toString())
+                },
+                config = cfg,
+                scanMessages = history0.takeLast(50),
+            )
+        }
+        val lorebookStaticHead = lorebookActivation?.staticHead.orEmpty()
+        val lorebookTailMessages = lorebookActivation?.takeIf { it.tailInjection.isNotEmpty() }
+            ?.let { listOf(ChatMessage(role = "system", content = it.tailInjection)) }
+            ?: emptyList()
 
         val wakeLock = acquireGroupWakeLock(context)
         try {
@@ -225,6 +243,8 @@ class GroupChatWorker(
                         container.directLlmClient, apiConfig, members, char, history0,
                         askUser = true, userPersona = profile.persona, userRelationship = profile.relationship,
                         worldviewDirective = worldviewDirective,
+                        lorebookStaticHead = lorebookStaticHead,
+                        lorebookTailMessages = lorebookTailMessages,
                     )
                     if (!content.isNullOrBlank()) {
                         container.groupChatRepository.sendMemberMessage(convId, char.id, content)
@@ -250,6 +270,8 @@ class GroupChatWorker(
                         container.directLlmClient, apiConfig, members, char, history,
                         askUser = false, userPersona = profile.persona, userRelationship = profile.relationship,
                         worldviewDirective = worldviewDirective,
+                        lorebookStaticHead = lorebookStaticHead,
+                        lorebookTailMessages = lorebookTailMessages,
                     )
                     if (content.isNullOrBlank()) return@repeat
                     container.groupChatRepository.sendMemberMessage(convId, char.id, content)
@@ -286,12 +308,16 @@ class GroupChatWorker(
         userPersona: String?,
         userRelationship: String?,
         worldviewDirective: String? = null,
+        lorebookStaticHead: String = "",
+        lorebookTailMessages: List<ChatMessage> = emptyList(),
     ): String? {
         val messages = GroupChatPromptBuilder.buildApiMessages(
             members, speaker, history, askUser,
             userPersona = userPersona,
             userRelationship = userRelationship,
             worldviewDirective = worldviewDirective,
+            lorebookStaticHead = lorebookStaticHead,
+            lorebookTailMessages = lorebookTailMessages,
         ).map { ChatMessageDto(it.role, JsonPrimitive(it.content)) }
         return try {
             withTimeout(AppConfig.GroupChat.GENERATE_TIMEOUT_MS) {

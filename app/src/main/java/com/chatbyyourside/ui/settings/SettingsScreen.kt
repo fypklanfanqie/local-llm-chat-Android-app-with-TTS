@@ -92,6 +92,7 @@ import kotlinx.coroutines.withContext
 fun SettingsScreen(
     container: AppContainer,
     onNavigateToBackendSettings: () -> Unit,
+    onNavigateToLorebook: (String) -> Unit = {},
 ) {
     val scheme = MaterialTheme.colorScheme
     val apiConfig by container.settingsRepository.apiConfig.collectAsState(initial = ApiConfig())
@@ -358,6 +359,9 @@ fun SettingsScreen(
         // ===== 世界观设定（自定义叙事设定注入提示词，与目标一一对应）=====
         WorldviewSection(container = container)
 
+        // ===== 世界书（关键词触发式背景库，全局生效，支持 SillyTavern 导入）=====
+        LorebookSection(container = container, onNavigateToLorebook = onNavigateToLorebook)
+
         GreetingSection(container = container, scope = scope)
         GroupChatSection(container = container, scope = scope)
         UserProfileSection(container = container, scope = scope)
@@ -563,7 +567,7 @@ fun SettingsScreen(
     }
 
     if (showGuide) {
-        GuideDialog(onDismiss = { showGuide = false })
+        GuideDialog(container = container, onDismiss = { showGuide = false })
     }
 
     if (showThemePicker) {
