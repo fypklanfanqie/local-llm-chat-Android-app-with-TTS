@@ -226,7 +226,11 @@ class GroupChatViewModel(
             try {
                 val profile = container.settingsRepository.getUserProfileNow()
                 val memberNames = members.map { it.name }
+                // 同名成员不静默覆盖（associate 后者覆盖前者会把 @ 解析到错误角色）：
+                // 检测到重复名时该名字不参与 @ 解析，宁可少回复也不串人。
+                val duplicateNames = memberNames.groupingBy { it }.eachCount().filterValues { it > 1 }.keys
                 val nameToId = members.associate { it.name to it.id }
+                    .filterKeys { it !in duplicateNames }
                 val mentionIds = GroupChatPromptBuilder.extractMentions(text, memberNames)
                     .mapNotNull { nameToId[it] }
                 val count = GroupSpeakerPicker.randomReplyCount(members.size, mentionIds.size)
@@ -303,7 +307,17 @@ class GroupChatViewModel(
                     }
 
                     val displayResponse = provider.chat(apiMessages, onChunk)
-                    val clean = GroupChatPromptBuilder.stripSpeakerPrefix(displayResponse, memberNames)
+                    // 结构化身份解析：只认当前 speaker 的前缀；检测到其他成员前缀（模型串人设）
+                    // 不静默归属——跳过该条并提示，绝不按当前 speaker 落库。
+                    val parsed = GroupChatPromptBuilder.parseSpeakerResponse(displayResponse, speaker.name, memberNames)
+                    val clean = when (parsed) {
+                        is GroupChatPromptBuilder.SpeakerResponseParse.Ok -> parsed.text
+                        is GroupChatPromptBuilder.SpeakerResponseParse.ForeignSpeaker -> {
+                            android.util.Log.w(TAG, "speaker identity mismatch: expected=${speaker.name} detected=${parsed.detectedName}, skip")
+                            _uiState.update { it.copy(errorMessage = "角色身份不一致，${speaker.name} 本轮发言已跳过") }
+                            return@forEach
+                        }
+                    }
                     val rowId = container.groupChatRepository.sendMemberMessage(convId, speaker.id, clean)
                     repliesOk++
                     container.settingsRepository.setGroupLastSpeakerId(speaker.id)

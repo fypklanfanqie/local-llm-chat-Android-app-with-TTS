@@ -11,12 +11,13 @@ import kotlinx.coroutines.flow.map
  */
 class CharacterRepository(private val settings: SettingsRepository) {
 
-    /** 自定义 + 预设角色（自定义在前，预设按展示顺序在后） */
+    /** 自定义 + 预设角色（自定义在前，预设按展示顺序排好；ID 冲突时预设优先）。 */
     val characters: Flow<List<Character>> = settings.customCharacters.map { custom ->
-        // getOrderedList() 已返回按展示顺序排好的 List<Character>，无需再用 ALL 重新索引
-        // （旧写法 mapNotNull { Characters.ALL[it] } 中 it 是 Character，而 ALL 的 key 是 String，
-        //  类型不匹配会导致编译错误）
-        custom + Characters.getOrderedList()
+        // 导入 JSON 可能携带与内置角色相同的 id。若直接 custom + builtin，Compose key 会重复，
+        // getNow() 又优先返回 builtin，最终会出现列表/人设不一致；这里统一按 id 去重且 builtin 优先。
+        val builtin = Characters.getOrderedList()
+        val builtinIds = builtin.asSequence().map { it.id }.toSet()
+        custom.filter { it.id !in builtinIds }.distinctBy { it.id } + builtin
     }
 
     suspend fun getNow(id: String): Character? {

@@ -322,8 +322,22 @@ class GroupChatWorker(
         return try {
             withTimeout(AppConfig.GroupChat.GENERATE_TIMEOUT_MS) {
                 client.chatOnce(apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, messages)
-                    .let { GroupChatPromptBuilder.stripSpeakerPrefix(it, members.map { c -> c.name }) }
-            }.takeIf { it.isNotBlank() }
+                    // 后台轮身份解析与前台一致：只认当前 speaker 前缀；其他成员前缀视为
+                    // 串人设，返回 null 跳过该条（不落库、不通知）。
+                    .let { GroupChatPromptBuilder.parseSpeakerResponse(it, speaker.name, members.map { c -> c.name }) }
+                    .let { parsed ->
+                        when (parsed) {
+                            is GroupChatPromptBuilder.SpeakerResponseParse.Ok -> parsed.text
+                            is GroupChatPromptBuilder.SpeakerResponseParse.ForeignSpeaker -> {
+                                android.util.Log.w(
+                                    "GroupChatWorker",
+                                    "speaker identity mismatch: expected=${speaker.name} detected=${parsed.detectedName}, skip",
+                                )
+                                null
+                            }
+                        }
+                    }
+            }.takeIf { !it.isNullOrBlank() }
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
