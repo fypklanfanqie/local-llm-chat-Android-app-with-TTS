@@ -19,6 +19,7 @@ import com.chatbyyourside.llm.LorebookEngine
 import com.chatbyyourside.ui.chat.PendingFinal
 import com.chatbyyourside.ui.chat.RequestGenerationGuard
 import com.chatbyyourside.util.MarkdownParser
+import com.chatbyyourside.util.UserFacingErrorMapper.userFacingError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -161,7 +162,7 @@ class GroupChatViewModel(
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "群信息加载失败", e)
-            _uiState.update { it.copy(errorMessage = "群信息加载失败：${e.message}") }
+            _uiState.update { it.copy(errorMessage = "群信息加载失败：" + userFacingError(e, "请稍后重试")) }
         }
     }
 
@@ -384,7 +385,7 @@ class GroupChatViewModel(
                             messages = msgs,
                             isStreaming = false,
                             showTyping = false,
-                            errorMessage = e.message ?: "请求失败",
+                            errorMessage = userFacingError(e),
                             inputText = text,
                             typingCharacterId = null,
                         )

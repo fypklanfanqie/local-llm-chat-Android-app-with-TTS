@@ -545,7 +545,7 @@ fun BackendSettingsScreen(
                             } catch (ce: CancellationException) {
                                 throw ce
                             } catch (e: Exception) {
-                                LookaheadCertificationDecision.NotCertified(listOf("基准异常：${e.message}"))
+                                LookaheadCertificationDecision.NotCertified(listOf("基准异常：" + com.chatbyyourside.util.UserFacingErrorMapper.userFacingError(e, "请稍后重试")))
                             }
                         }
                         benchmarkOutcome = result
@@ -585,7 +585,7 @@ fun BackendSettingsScreen(
                             } catch (ce: CancellationException) {
                                 throw ce
                             } catch (e: Exception) {
-                                DecodeOptionCertificationOutcome.NotCertified(listOf("基准异常：${e.message}"))
+                                DecodeOptionCertificationOutcome.NotCertified(listOf("基准异常：" + com.chatbyyourside.util.UserFacingErrorMapper.userFacingError(e, "请稍后重试")))
                             }
                         }
                         decodeOutcome = result
@@ -668,7 +668,7 @@ fun BackendSettingsScreen(
                             } catch (ce: CancellationException) {
                                 throw ce
                             } catch (e: Exception) {
-                                GpuPreheatCoordinator.PreheatResult.Skipped("预热异常：${e.message}")
+                                GpuPreheatCoordinator.PreheatResult.Skipped("预热异常：" + com.chatbyyourside.util.UserFacingErrorMapper.userFacingError(e, "请稍后重试"))
                             }
                         }
                         preheatOutcome = outcome
@@ -797,7 +797,7 @@ fun BackendSettingsScreen(
                                 } catch (ce: CancellationException) {
                                     throw ce
                                 } catch (e: Exception) {
-                                    PrefillBenchmarkOutcome.Skipped("基准异常：${e.message}")
+                                    PrefillBenchmarkOutcome.Skipped("基准异常：" + com.chatbyyourside.util.UserFacingErrorMapper.userFacingError(e, "请稍后重试"))
                                 }
                             }
                             prefillBenchOutcome = outcome

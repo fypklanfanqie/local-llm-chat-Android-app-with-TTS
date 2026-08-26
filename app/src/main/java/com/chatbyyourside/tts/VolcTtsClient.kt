@@ -115,8 +115,9 @@ class VolcTtsClient(
             val body = response.body ?: throw Exception("火山引擎 TTS 返回空响应体")
             val logId = response.header("X-Tt-Logid")
             if (!response.isSuccessful) {
-                val snippet = body.bytes().decodeToString().take(500)
-                throw Exception("TTS HTTP ${response.code}: $snippet${logId?.let { "（LogID: $it）" } ?: ""}")
+                // 失败详情（响应片段/LogID）只进日志，不进用户文案。
+                android.util.Log.w("VolcTtsClient", "TTS HTTP ${response.code}: ${body.bytes().decodeToString().take(500)}")
+                throw Exception("TTS HTTP ${response.code}")
             }
             parseChunkedResponse(body, logId)
         }
@@ -164,9 +165,9 @@ class VolcTtsClient(
         errorInfo?.let { error ->
             val code = error["code"]?.jsonPrimitive?.intOrNull ?: "未知"
             val message = error["message"]?.jsonPrimitive?.contentOrNull.orEmpty()
-            throw Exception("火山引擎错误 $code: $message${logId?.let { "（LogID: $it）" } ?: ""}")
+            throw Exception("语音服务返回错误（$code）") // message/LogID 只进日志
         }
-        if (output.size() == 0) throw Exception("火山引擎返回无音频数据${logId?.let { "（LogID: $it）" } ?: ""}")
+        if (output.size() == 0) throw Exception("语音服务未返回音频数据")
         return output.toByteArray()
     }
 }

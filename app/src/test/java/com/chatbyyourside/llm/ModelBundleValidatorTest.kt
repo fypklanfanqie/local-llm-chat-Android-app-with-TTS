@@ -6,6 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
+import java.nio.file.Files
 
 /** 模型包完整性校验测试（Task 12 Step 1）。 */
 class ModelBundleValidatorTest {
@@ -14,7 +15,7 @@ class ModelBundleValidatorTest {
 
     @Before
     fun setUp() {
-        root = createTempDir()
+        root = Files.createTempDirectory("model-bundle").toFile()
     }
 
     private fun file(rel: String, content: String = "x") {
@@ -112,14 +113,40 @@ class ModelBundleValidatorTest {
     }
 
     @Test
-    fun partialPartFilesRemainAreWarningNotHardFailure() {
+    fun barePartFilesWithoutSplitInfoFailHard_sigsegvGuard() {
+        // SIGSEGV 防线（原「仅警告」语义收紧为硬失败）：裸 .partN 残留 = 下载未完成/合并失败，
+        // 放行会在 MNN PipelineModule::load 反序列化时原生崩溃。必须拒绝进入 native。
         validMinimal()
         file("llm.mnn.weight.part1")
 
         val r = ModelBundleValidator.validate(root)
 
-        assertTrue("残留分片只是警告", r.valid)
-        assertTrue(r.warnings.any { it.contains("分片") })
+        assertFalse("残留分片必须阻断加载", r.valid)
+        assertTrue(r.errors.any { it.contains("重新下载") })
+    }
+
+    @Test
+    fun splitInfoJsonPresentIsHardFailure_sigsegvGuard() {
+        // SIGSEGV 防线：splits_info.json 在而分片未合并 -> 必须拒绝进入 native 加载。
+        validMinimal()
+        file("splits_info.json", "{}")
+
+        val r = ModelBundleValidator.validate(root)
+
+        assertFalse(r.valid)
+        assertTrue(r.errors.any { it.contains("尚未合并") })
+    }
+
+    @Test
+    fun barePartFilesWithoutSplitInfoAreHardFailureToo() {
+        // 兜底：清单丢失但 .partN 仍在 -> 同样拒绝（下载中断目录不得放行）。
+        validMinimal()
+        file("llm.mnn.weight.part2")
+
+        val r = ModelBundleValidator.validate(root)
+
+        assertFalse(r.valid)
+        assertTrue(r.errors.any { it.contains("重新下载") })
     }
 
     @Test

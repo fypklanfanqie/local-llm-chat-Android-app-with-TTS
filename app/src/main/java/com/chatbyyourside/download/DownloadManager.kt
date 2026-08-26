@@ -100,7 +100,7 @@ class DownloadManager(private val context: Context) {
                     retry++
                     Log.w(TAG, "Download ${model.id} failed (attempt $retry): ${e.message}")
                     if (retry >= MAX_RETRY) {
-                        updateState(model.id, DownloadState.Failed(e.message ?: "下载失败"))
+                        updateState(model.id, DownloadState.Failed(com.chatbyyourside.util.UserFacingErrorMapper.userFacingError(e, "下载失败，请检查网络后重试")))
                         return@launch
                     }
                     delay(2000L * retry)
@@ -217,7 +217,7 @@ class DownloadManager(private val context: Context) {
         val response = call.execute()
         try {
             if (response.code == 416) return true // 文件已完整
-            if (!response.isSuccessful) throw Exception("HTTP ${response.code} @ $url")
+            if (!response.isSuccessful) throw Exception("HTTP ${response.code}") // URL 只进日志，不进用户文案（由 mapper 转中文）
             val body = response.body ?: throw Exception("响应体为空")
             val supportRange = response.code == 206
             val currentStart = if (supportRange) startBytes else 0L

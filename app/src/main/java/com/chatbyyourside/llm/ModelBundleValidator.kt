@@ -83,6 +83,14 @@ object ModelBundleValidator {
             }
         }
 
+        // 2b. 分片残留硬校验（SIGSEGV 防线）：存在 splits_info.json 说明权重分片尚未合并——
+        // 此时 llm.mnn.weight 必然缺失/不完整，放行会在 MNN PipelineModule::load 反序列化时
+        // 触发 Java 层无法捕获的原生崩溃。下载中断/合并失败都落在这里，必须阻断。
+        val splitInfoFile = File(root, "splits_info.json")
+        if (splitInfoFile.exists()) {
+            errors += "模型分片尚未合并，请删除后重新下载"
+        }
+
         // 3. 必需文件 = 默认集 + config 引用；逐项校验（缺失即错误）。
         val required = (DEFAULT_REQUIRED + referenced).distinct()
         for (rel in required) {
@@ -95,9 +103,12 @@ object ModelBundleValidator {
             }
         }
 
-        // 4. 分片残留 -> 警告（下载未完成/合并失败）。
+        // 4. 分片残留：无 splits_info.json 的裸 .partN 也说明下载未完成——同样硬失败
+        // （有 splits_info 时上面 2b 已报错；这里兜住清单文件丢失但分片仍在的目录）。
         val parts = root.listFiles { f -> PART_SUFFIX.containsMatchIn(f.name) }?.toList() ?: emptyList()
-        if (parts.isNotEmpty()) {
+        if (parts.isNotEmpty() && splitInfoFile.exists().not()) {
+            errors += "存在 ${parts.size} 个未合并分片，请删除后重新下载"
+        } else if (parts.isNotEmpty()) {
             warnings += "存在 ${parts.size} 个未合并分片（.partN）"
         }
 

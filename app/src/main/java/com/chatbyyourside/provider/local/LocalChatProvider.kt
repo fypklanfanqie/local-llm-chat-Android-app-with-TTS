@@ -264,7 +264,7 @@ class LocalChatProvider(
 
         // 2. 检查 MNN 引擎 native 就绪（libMNN.so）
         if (!backendManager.mnnCpuSupported) {
-            throw Exception("MNN 引擎未就绪。当前版本未集成 libMNN.so，请等待后续版本。")
+            throw Exception("本地 AI 引擎未就绪，请更新应用后重试。")
         }
 
         // native 加载与推理均为阻塞调用，必须切到 IO 调度器，否则在主线程上会 ANR。

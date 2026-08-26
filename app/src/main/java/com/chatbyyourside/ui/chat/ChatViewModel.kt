@@ -19,6 +19,7 @@ import com.chatbyyourside.data.repository.ConversationRepository
 import com.chatbyyourside.llm.LorebookEngine
 import com.chatbyyourside.provider.local.LocalChatProvider
 import com.chatbyyourside.util.MarkdownParser
+import com.chatbyyourside.util.UserFacingErrorMapper.userFacingError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -99,7 +100,7 @@ class ChatViewModel(
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 Log.e(TAG, "activeCharacter flow 异常", e)
-                _uiState.update { it.copy(errorMessage = "角色数据加载失败：${e.message}", showWelcome = false) }
+                _uiState.update { it.copy(errorMessage = "角色数据加载失败：" + userFacingError(e, "请稍后重试"), showWelcome = false) }
             }
         }
         // 我的形象（设置「我的形象」）：用户头像 -> 用户气泡显示。
@@ -142,7 +143,7 @@ class ChatViewModel(
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 Log.e(TAG, "活跃会话 flow 异常", e)
-                _uiState.update { it.copy(errorMessage = "会话数据加载失败：${e.message}", showWelcome = false) }
+                _uiState.update { it.copy(errorMessage = "会话数据加载失败：" + userFacingError(e, "请稍后重试"), showWelcome = false) }
             }
         }
         // 监听活跃会话 + 聊天记录 + 会话内 Seedance 视频（flatMapLatest 保证会话切换时取消旧订阅，
@@ -168,7 +169,7 @@ class ChatViewModel(
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 Log.e(TAG, "聊天记录 flow 异常", e)
-                _uiState.update { it.copy(errorMessage = "聊天记录加载失败：${e.message}", showWelcome = false) }
+                _uiState.update { it.copy(errorMessage = "聊天记录加载失败：" + userFacingError(e, "请稍后重试"), showWelcome = false) }
             }
         }
         // 监听当前角色的会话列表（供抽屉展示 + 同步当前会话标题）
@@ -183,7 +184,7 @@ class ChatViewModel(
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 Log.e(TAG, "会话列表 flow 异常", e)
-                _uiState.update { it.copy(errorMessage = "会话列表加载失败：${e.message}") }
+                _uiState.update { it.copy(errorMessage = "会话列表加载失败：" + userFacingError(e, "请稍后重试")) }
             }
         }
         // 监听活跃会话变化 -> 同步标题/高亮（切换/新建/删除后立即生效）
@@ -204,7 +205,7 @@ class ChatViewModel(
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 Log.e(TAG, "providerType flow 异常", e)
-                _uiState.update { it.copy(errorMessage = "Provider 切换失败：${e.message}") }
+                _uiState.update { it.copy(errorMessage = "切换对话服务失败：" + userFacingError(e, "请稍后重试")) }
             }
         }
         // 监听 TTS 语言
@@ -345,7 +346,7 @@ class ChatViewModel(
             } catch (e: Exception) {
                 // Task 5：新建会话的 Room/DataStore IO 异常只提示，不让默认 handler 杀进程。
                 Log.w(TAG, "新建会话失败（非致命）：${e.message}")
-                _uiState.update { it.copy(errorMessage = "新建会话失败：${e.message ?: "请稍后重试"}") }
+                _uiState.update { it.copy(errorMessage = "新建会话失败：" + userFacingError(e, "请稍后重试")) }
             } finally {
                 _uiState.update {
                     it.copy(
@@ -382,7 +383,7 @@ class ChatViewModel(
             } catch (e: Exception) {
                 // Task 5：切换会话的 DataStore IO 异常只提示，不让默认 handler 杀进程。
                 Log.w(TAG, "切换会话失败（非致命）：${e.message}")
-                _uiState.update { it.copy(errorMessage = "切换会话失败：${e.message ?: "请稍后重试"}") }
+                _uiState.update { it.copy(errorMessage = "切换会话失败：" + userFacingError(e, "请稍后重试")) }
             } finally {
                 _uiState.update {
                     it.copy(
@@ -431,7 +432,7 @@ class ChatViewModel(
             } catch (e: Exception) {
                 // Task 5：删除会话的 Room/DataStore IO 异常只提示，不让默认 handler 杀进程。
                 Log.w(TAG, "删除会话失败（非致命）：${e.message}")
-                _uiState.update { it.copy(errorMessage = "删除会话失败：${e.message ?: "请稍后重试"}") }
+                _uiState.update { it.copy(errorMessage = "删除会话失败：" + userFacingError(e, "请稍后重试")) }
             }
         }
     }
@@ -448,7 +449,7 @@ class ChatViewModel(
             } catch (e: Exception) {
                 // Task 5：重命名 Room IO 异常只提示，不让默认 handler 杀进程。
                 Log.w(TAG, "重命名会话失败（非致命）：${e.message}")
-                _uiState.update { it.copy(errorMessage = "重命名失败：${e.message ?: "请稍后重试"}") }
+                _uiState.update { it.copy(errorMessage = "重命名失败：" + userFacingError(e, "请稍后重试")) }
             }
         }
     }
@@ -509,7 +510,7 @@ class ChatViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _uiState.update { it.copy(errorMessage = "礼物已送出，感谢回复生成失败：${e.message ?: "请稍后重试"}") }
+                _uiState.update { it.copy(errorMessage = "礼物已送出，感谢回复生成失败：" + userFacingError(e, "请稍后重试")) }
             }
         }
     }
@@ -564,7 +565,7 @@ class ChatViewModel(
             } catch (e: Exception) {
                 // Task 5：准入检查/开关写入的 IO 异常只提示，不让默认 handler 杀进程。
                 Log.w(TAG, "开启自动视频失败（非致命）：${e.message}")
-                _uiState.update { it.copy(errorMessage = "开启自动视频失败：${e.message ?: "请稍后重试"}") }
+                _uiState.update { it.copy(errorMessage = "开启自动视频失败：" + userFacingError(e, "请稍后重试")) }
             }
         }
     }
@@ -623,7 +624,7 @@ class ChatViewModel(
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "重试视频任务失败（非致命）：${e.message}")
-                _uiState.update { it.copy(errorMessage = "重试视频任务失败：${e.message ?: "请稍后重试"}") }
+                _uiState.update { it.copy(errorMessage = "重试视频任务失败：" + userFacingError(e, "请稍后重试")) }
             }
         }
     }
@@ -709,7 +710,7 @@ class ChatViewModel(
             } catch (e: Exception) {
                 // Task 5：Provider 切换 DataStore IO 异常只提示，不让默认 handler 杀进程。
                 Log.w(TAG, "切换 Provider 失败（非致命）：${e.message}")
-                _uiState.update { it.copy(errorMessage = "切换 Provider 失败：${e.message ?: "请稍后重试"}") }
+                _uiState.update { it.copy(errorMessage = "切换对话服务失败：" + userFacingError(e, "请稍后重试")) }
             } finally {
                 _uiState.update { s ->
                     s.copy(
@@ -1101,7 +1102,7 @@ class ChatViewModel(
                             showTyping = false,
                             stopRequested = false,
                             activeGenerationId = null,
-                            errorMessage = e.message ?: "请求失败",
+                            errorMessage = userFacingError(e),
                             inputText = text,
                             uploadedImages = images,
                             uploadedFiles = files,
@@ -1443,7 +1444,7 @@ class ChatViewModel(
                         ttsPlayingIndex = -1,
                         ttsSubtitleJp = "",
                         ttsSubtitleCn = "",
-                        errorMessage = "TTS 失败: ${e.message}",
+                        errorMessage = "语音朗读失败：" + userFacingError(e, "请稍后重试"),
                     )
                 }
             }
