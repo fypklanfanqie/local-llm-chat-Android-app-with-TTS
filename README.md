@@ -18,6 +18,8 @@
 
 - **🧠 端侧 MNN 自适应推理引擎** — CPU / OpenCL GPU / QNN NPU 三后端自适应调度、自动回退链、GPU 自愈健康、一键预热。完全离线推理，数据不出设备。
   **On-device MNN adaptive inference** — auto CPU/OpenCL-GPU/QNN-NPU scheduling with fallback chains, self-healing GPU health and one-tap preheat. Fully offline.
+- **🩹 本地推理稳定性修复 · Local inference stability fix** — 修复本地 MNN 大模型「运行一会后闪退」的 native SIGSEGV：生成路径回退到稳定 JNI 入口；模型下载增加完整性硬校验（权重文件缺失 / 文件截断在加载前拦截，杜绝残缺模型触发原生崩溃）。
+  Fixed a native SIGSEGV crash when running the local MNN model: generation reverted to the stable JNI entry, plus hard download-integrity checks (missing weights / truncated files caught before load).
 - **🚀 本地深度思考 · Local deep thinking** — 思考分级（AUTO / SHORT / MEDIUM / LONG）＋字节预算截断，推理过程以可折叠「思考过程」块展示。
   Thinking-depth levels with byte-budget control; reasoning rendered as collapsible blocks.
 - **🎬 角色视频生成 · Seedance video** — 聊天回复自动触发角色短片生成（「邂逅」时间线：播放 / 导出 / 历史），自定义参考图与场景。

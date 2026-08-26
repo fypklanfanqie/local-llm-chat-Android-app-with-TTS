@@ -287,17 +287,12 @@ class MnnBackend(
                 null
             } else {
                 // native 不再返回完整回复，只回紧凑 GenerationSummary JSON；文本走流式回调。
-                // 审计 llm-backend-4：走 UTF-8 字节数组入口——jstring 经 JNI 是 modified UTF-8，
-                // emoji 等增补平面字符会以非法 CESU-8 序列喂给 tokenizer 静默损坏上下文。
-                val summaryJson = MnnJniContract.callUtf8(
-                    hasCapability = MnnBridge.hasUtf8StreamCapability,
-                ) {
-                    bridge.nativeGenerateStreamUtf8(
-                        handle, messagesJson.toByteArray(Charsets.UTF_8),
-                        maxTokens, temperature, topP, repeatPenalty, enableThinking,
-                        batchMaxBytes, batchMaxMs, decodeStepTokens,
-                    )
-                }
+                // 回退到 jstring 入口（nativeGenerateStream）：nativeGenerateStreamUtf8 字节数组入口
+                // 在部分设备上「运行一会后」触发 native SIGSEGV（与参考稳定版对齐，见 crash 排查）。
+                val summaryJson = bridge.nativeGenerateStream(
+                    handle, messagesJson, maxTokens, temperature, topP, repeatPenalty, enableThinking,
+                    batchMaxBytes, batchMaxMs, decodeStepTokens,
+                )
                 completedNormally = true
                 parsed = NativeGenerationSummary.parse(summaryJson)
                 if (parsed == null) {

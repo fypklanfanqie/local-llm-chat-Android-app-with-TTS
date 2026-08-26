@@ -44,6 +44,17 @@ class DownloadManager(private val context: Context) {
         private val SKIP_FILES = setOf(
             ".gitattributes", ".gitignore", "README.md", "README", "LICENSE",
         )
+
+        /** 大模型权重文件阈值（移植双胞胎）：超过此字节数的模型权重与图分离，`llm.mnn.weight`
+         *  必须存在。缺 weight 会在 MNN `PipelineModule::load` 反序列化时原生 SIGSEGV
+         *  （try/catch 拦不住），故此处硬失败；低于阈值的小模型可能内嵌权重于 llm.mnn，豁免。
+         *  500MB 以下允许缺失仅告警（如 SmolLM2-360M）。 */
+        private const val WEIGHT_FILE_REQUIRED_THRESHOLD = 500L * 1024 * 1024
+
+        /** 目录总大小校验容差-低（移植双胞胎）：实际/期望比值低于此值判定下载不完整（HTTP 截断）。 */
+        private const val SIZE_TOLERANCE_LOW = 0.9
+        /** 目录总大小校验容差-高：实际/期望比值高于此值判定异常（多下载了无关文件）。 */
+        private const val SIZE_TOLERANCE_HIGH = 1.1
     }
 
     private val client = OkHttpClient.Builder()
@@ -429,11 +440,33 @@ class DownloadManager(private val context: Context) {
             updateState(model.id, DownloadState.Failed("模型文件不完整：缺 config.json 或 llm.mnn"))
             return
         }
-        // llm.mnn.weight 缺失告警：多数 taobao-mnn 模型权重与图分离，缺 weight 会在 MNN
-        // PipelineModule::load 反序列化时原生崩溃（try/catch 拦不住 SIGSEGV）。少数模型权重内嵌
-        // 于 llm.mnn 则无此文件，故仅告警不阻断（真实完整性以下载逐文件完成保证）。
-        if (!File(dir, "llm.mnn.weight").exists()) {
-            Log.w(TAG, "MNN 模型 ${model.id} 缺 llm.mnn.weight（可能内嵌；若加载崩溃请重新下载）")
+        // llm.mnn.weight 缺失硬校验（移植双胞胎）：大模型权重与图分离，缺 weight 会在 MNN
+        // PipelineModule::load 反序列化时原生崩溃（try/catch 拦不住 SIGSEGV）。仅在 >阈值 时硬失败；
+        // 低于阈值允许内嵌（如 SmolLM2-360M），仅告警。真截断靠下方大小闸 + manifest 兜住。
+        val weightFile = File(dir, "llm.mnn.weight")
+        if (!weightFile.exists() && model.size > WEIGHT_FILE_REQUIRED_THRESHOLD) {
+            updateState(model.id, DownloadState.Failed("模型权重文件 llm.mnn.weight 缺失，请删除后重新下载"))
+            return
+        }
+        if (!weightFile.exists()) {
+            Log.w(TAG, "MNN 模型 ${model.id} 缺 llm.mnn.weight（小模型可能内嵌；若加载崩溃请重新下载）")
+        }
+        // 目录总大小校验（移植双胞胎）：检测 HTTP 提前断连导致的截断——OkHttp source.read() 返回 -1
+        // 即认为完成，但服务器提前关闭连接时文件残缺，会被标记 Completed -> MNN 加载时 SIGSEGV。
+        // 无此闸则「残缺但 Completed」的模型会进 native 崩掉。
+        updateState(model.id, DownloadState.Verifying(0.6f))
+        val actualSize = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        val expectedSize = model.size
+        if (expectedSize > 0) {
+            val ratio = actualSize.toDouble() / expectedSize.toDouble()
+            if (ratio < SIZE_TOLERANCE_LOW || ratio > SIZE_TOLERANCE_HIGH) {
+                val actMb = actualSize / (1024 * 1024)
+                val expMb = expectedSize / (1024 * 1024)
+                updateState(model.id, DownloadState.Failed(
+                    "模型文件大小校验失败：期望约 ${expMb}MB，实际 ${actMb}MB（偏差 ${((ratio - 1) * 100).toInt()}%），" +
+                        "文件可能下载不完整，请删除后重新下载"))
+                return
+            }
         }
         // 完整性清单：逐文件记录 size + sha256 前缀，加载前对照校验（下载损坏的「大小对、
         // 内容坏」权重会在 MNN load 时 SIGSEGV，必须在此截图留证并在加载入口拦截）。
