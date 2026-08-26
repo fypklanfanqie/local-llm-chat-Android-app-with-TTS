@@ -184,13 +184,22 @@ fun AffinityEventsScreen(
                     scope.launch {
                         try {
                             event?.let { container.specialEventConversationCoordinator.markRead(it.id) }
-                            when (val result = container.specialEventConversationCoordinator.launch(character.id, threshold)) {
+                            val conversationId: Long? = when (val result = container.specialEventConversationCoordinator.launch(character.id, threshold)) {
                                 // 三个成功分支都携带 event；不能合并写——多分支 is 组合不做智能转换，
                                 // result.event 会 Unresolved（编译错）。
-                                is SpecialEventLaunchResult.Ready -> onOpenEventConversation(result.event.conversationId)
-                                is SpecialEventLaunchResult.Existing -> onOpenEventConversation(result.event.conversationId)
-                                is SpecialEventLaunchResult.Rebuilt -> onOpenEventConversation(result.event.conversationId)
-                                SpecialEventLaunchResult.Missing -> launchError = "特殊邂逅不存在或已被移除，请稍后刷新回忆档案。"
+                                is SpecialEventLaunchResult.Ready -> result.event.conversationId
+                                is SpecialEventLaunchResult.Existing -> result.event.conversationId
+                                is SpecialEventLaunchResult.Rebuilt -> result.event.conversationId
+                                SpecialEventLaunchResult.Missing -> {
+                                    launchError = "特殊邂逅不存在或已被移除，请稍后刷新回忆档案。"
+                                    null
+                                }
+                            }
+                            if (conversationId != null) {
+                                onOpenEventConversation(conversationId)
+                            } else if (launchError == null) {
+                                // 理论上 Ready/Existing/Rebuilt 都保证非空；这里兜底数据损坏场景。
+                                launchError = "回忆会话尚未就绪，请稍后重试。"
                             }
                         } catch (e: CancellationException) {
                             throw e
