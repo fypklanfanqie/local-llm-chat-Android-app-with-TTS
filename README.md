@@ -1,5 +1,7 @@
 # Chat by your side
 
+**Languages: [简体中文](./README.md) · [English](./README.en.md)**
+
 > 一款苹果风液态玻璃 UI 的安卓 **本地 AI 角色扮演聊天**应用，端侧 MNN 大模型推理 + 云端双引擎 · An Apple-style liquid-glass **on-device LLM** roleplay chat app for Android (MNN local inference + cloud dual engine)
 
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0.0-7F52FF?logo=kotlin)](https://kotlinlang.org)
@@ -40,7 +42,9 @@
 
 ## 🧠 本地 LLM 推理 · On-device Local LLM
 
-> 基于 [MNN](https://github.com/alibaba/MNN) 的自适应端侧推理栈：从设备能力探测、内存准入、后端调度、健康自愈，到基准认证、性能遥测的一整套工程化闭环。全部推理在设备本地完成，**对话数据不离开手机**。
+> **本地模型代码来源**：本应用的端侧本地模型推理代码基于 **[Alibaba MNN](https://github.com/alibaba/MNN)**（开源项目，MIT License）构建，本地模型的加载与推理相关实现均来源于该开源项目。
+>
+> 基于 MNN 的自适应端侧推理栈：从设备能力探测、内存准入、后端调度、健康自愈，到基准认证、性能遥测的一整套工程化闭环。全部推理在设备本地完成，**对话数据不离开手机**。
 
 ### 自适应后端调度 · Adaptive backend scheduling
 
