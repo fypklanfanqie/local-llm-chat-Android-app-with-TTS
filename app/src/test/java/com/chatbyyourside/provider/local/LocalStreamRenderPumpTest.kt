@@ -100,4 +100,77 @@ class LocalStreamRenderPumpTest {
         p.finish()   // 未追加任何内容：不触发 onChunk
         assertTrue(rendered.isEmpty())
     }
+
+    // ===== Task 5：回调异常不逃逸 =====
+
+    @Test
+    fun throwingOnChunkDoesNotEscapeAndPumpKeepsRendering() = runTest {
+        val rendered = mutableListOf<String>()
+        var failFirst = true
+        val p = pump(backgroundScope, clock = { testScheduler.currentTime })
+        p.decorate = { it }
+        p.onChunk = { text ->
+            if (failFirst) {
+                failFirst = false
+                throw IllegalStateException("宿主 UI 回调炸了")
+            }
+            rendered += text
+        }
+        p.start()
+        // 第一帧 onChunk 抛异常：不得沿渲染协程逃逸（否则 backgroundScope 子协程失败、测试报错）。
+        p.append("第一帧")
+        runCurrent()
+        assertTrue(rendered.isEmpty())
+        // 推进虚拟时间越过节流窗口后下一帧仍正常渲染：泵未被一次回调异常打断。
+        // 注意：pump 回调的是「全文快照」（第一帧+第二帧），异常首帧的文本不丢——
+        // 权威累积在 pump 内，UI 层按快照覆盖渲染。
+        advanceTimeBy(31)
+        p.append("第二帧")
+        runCurrent()
+        assertEquals(listOf("第一帧第二帧"), rendered)
+        p.finish()
+    }
+
+    @Test
+    fun throwingDecorateSkipsFrameWithoutKillingRenderLoop() = runTest {
+        var failNext = true
+        val rendered = mutableListOf<String>()
+        val p = pump(backgroundScope, clock = { testScheduler.currentTime })
+        p.decorate = { raw ->
+            if (failNext) {
+                failNext = false
+                throw IllegalArgumentException("装饰解析失败")
+            }
+            "[$raw]"
+        }
+        p.onChunk = { rendered += it }
+        p.start()
+        // 首帧装饰抛异常：本帧放弃（onChunk 不被调用），渲染协程存活。
+        p.append("a")
+        runCurrent()
+        assertTrue(rendered.isEmpty())
+        // 下一帧装饰恢复后继续渲染。
+        p.append("b")
+        runCurrent()
+        assertEquals(1, rendered.size)
+        assertTrue(rendered[0].startsWith("["))
+        p.finish()
+    }
+
+    @Test
+    fun normalCancellationStillPropagatesFromCallback() = runTest {
+        val p = pump(backgroundScope, clock = { testScheduler.currentTime })
+        var sawCancel = false
+        p.decorate = { it }
+        p.onChunk = { throw kotlinx.coroutines.CancellationException("宿主取消") }
+        p.start()
+        try {
+            p.append("x")
+            // finish 内部 doRender 同步调用 onChunk -> CancellationException 上抛。
+            p.finish()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            sawCancel = true
+        }
+        assertTrue("正常取消必须传播", sawCancel)
+    }
 }

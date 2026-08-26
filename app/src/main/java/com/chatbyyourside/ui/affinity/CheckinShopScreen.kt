@@ -83,9 +83,16 @@ fun CheckinShopScreen(
                 checkedIn = checkedIn,
                 onClaim = {
                     scope.launch {
-                        message = when (container.affinityRepository.claimDailyCheckin()) {
-                            is CheckinResult.Claimed -> "签到成功，获得 10,000 金币"
-                            is CheckinResult.AlreadyClaimed -> "今日已领取"
+                        // Task 5：签到 Room IO 异常只提示，不让默认 handler 杀进程。
+                        message = try {
+                            when (container.affinityRepository.claimDailyCheckin()) {
+                                is CheckinResult.Claimed -> "签到成功，获得 10,000 金币"
+                                is CheckinResult.AlreadyClaimed -> "今日已领取"
+                            }
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            "签到失败：${e.message ?: "请稍后重试"}"
                         }
                     }
                 },
@@ -106,10 +113,17 @@ fun CheckinShopScreen(
             items(gifts.size, key = { gifts[it].definition.id }) { index ->
                 GiftShopCard(gifts[index]) {
                     scope.launch {
-                        message = when (container.affinityRepository.buyGift(gifts[index].definition.id)) {
-                            is GiftPurchaseResult.Purchased -> "购买成功，已加入库存"
-                            GiftPurchaseResult.InsufficientFunds -> "金币不足"
-                            GiftPurchaseResult.GiftMissing -> "礼物档案不存在"
+                        // Task 5：购买 Room IO 异常只提示，不让默认 handler 杀进程。
+                        message = try {
+                            when (container.affinityRepository.buyGift(gifts[index].definition.id)) {
+                                is GiftPurchaseResult.Purchased -> "购买成功，已加入库存"
+                                GiftPurchaseResult.InsufficientFunds -> "金币不足"
+                                GiftPurchaseResult.GiftMissing -> "礼物档案不存在"
+                            }
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            "购买失败：${e.message ?: "请稍后重试"}"
                         }
                     }
                 }
@@ -122,9 +136,14 @@ fun CheckinShopScreen(
             onDismiss = { showCreate = false },
             onCreate = { name, description, path, price ->
                 scope.launch {
-                    runCatching { container.affinityRepository.createGift(name, description, path, price) }
-                        .onSuccess { message = "礼物档案已建立"; showCreate = false }
-                        .onFailure { message = it.message ?: "礼物创建失败" }
+                    try {
+                        container.affinityRepository.createGift(name, description, path, price)
+                        message = "礼物档案已建立"; showCreate = false
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        message = e.message ?: "礼物创建失败"
+                    }
                 }
             },
         )

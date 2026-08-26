@@ -1,5 +1,6 @@
 package com.chatbyyourside.provider.local
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -25,7 +26,8 @@ import kotlinx.coroutines.sync.withLock
  * 线程模型：`accumulated` 由解码线程写入、渲染线程读取，全部经 [textLock] 保护；
  * [onChunk] 只由渲染协程与 [finish]（解码线程收尾）调用，二者经 [renderLock] 串行。
  *
- * 纯 JVM 可测：无 Android 依赖；[clock] 可注入（测试用虚拟时钟）。
+ * 纯 JVM 可测：无 Android 依赖（回调异常经 [onError] 通知，缺省忽略）；[clock] 可注入
+ * （测试用虚拟时钟）。
  */
 class LocalStreamRenderPump(
     private val scope: CoroutineScope,
@@ -54,6 +56,13 @@ class LocalStreamRenderPump(
     /** UI 回调（如 ChatViewModel.onChunk）：仅在渲染节流放行时调用。 */
     @Volatile
     var onChunk: ((String) -> Unit)? = null
+
+    /**
+     * 回调异常通知（Task 5）：decorate/onChunk 抛出普通异常时调用（CancellationException 不算），
+     * 生产侧接日志/遥测；测试据此断言异常被收口。本类自身不依赖 android.util.Log。
+     */
+    @Volatile
+    var onError: ((Throwable) -> Unit)? = null
 
     /** 启动渲染协程（幂等）。 */
     fun start() {
@@ -107,8 +116,24 @@ class LocalStreamRenderPump(
         renderLock.withLock {
             val raw = snapshot()
             if (raw.isEmpty()) return
-            val decorated = decorate?.invoke(raw) ?: raw
-            onChunk?.invoke(decorated)
+            // Task 5：装饰/UI 回调异常独立收口——宿主回调（Markdown 解析、StateFlow 更新）抛出时
+            // 绝不让异常沿渲染协程逃逸（否则 SupervisorJob 子协程失败会中断后续渲染帧）；
+            // CancellationException 原样 rethrow 保持取消传播。经 onError 通知后本帧放弃，下一信号继续。
+            val decorated = try {
+                decorate?.invoke(raw) ?: raw
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Exception) {
+                runCatching { onError?.invoke(e) }
+                return
+            }
+            try {
+                onChunk?.invoke(decorated)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Exception) {
+                runCatching { onError?.invoke(e) }
+            }
             lastRenderMs = clock()
         }
     }

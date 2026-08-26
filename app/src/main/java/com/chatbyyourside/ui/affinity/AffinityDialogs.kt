@@ -37,6 +37,7 @@ import com.chatbyyourside.affinity.OwnedGift
 import com.chatbyyourside.affinity.formatAffinity
 import com.chatbyyourside.data.model.SpecialEventScript
 import com.chatbyyourside.ui.glass.GlassSheet
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 @Composable
@@ -53,7 +54,15 @@ fun DailyCheckinDialog(
             text = { Text("今日可领取 10,000 金币。现在领取，或稍后从角色页进入每日签到。") },
             confirmButton = {
                 TextButton(onClick = {
-                    scope.launch { container.affinityRepository.claimDailyCheckin() }
+                    // Task 5：签到 Room IO 异常只记录，不让默认 handler 杀进程。
+                    scope.launch {
+                        try {
+                            container.affinityRepository.claimDailyCheckin()
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                        }
+                    }
                     onDismiss()
                 }) { Text("领取") }
             },

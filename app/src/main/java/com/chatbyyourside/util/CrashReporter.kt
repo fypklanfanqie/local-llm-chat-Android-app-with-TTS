@@ -290,12 +290,17 @@ object CrashReporter {
 }
 
 /**
- * 启动存活日志（Track A2）：捕获 Java handler 拦不住的启动窗口原生崩溃。
+ * 启动存活日志（Track A2；Task 5 会话化改造）。
  *
- * 机制：MainActivity.onCreate 写 `started` 标记、LoadingScreen 完成后写 `loaded` 标记。
- * 下次启动检查：`started` 在且 `loaded` 不在 -> 上次启动在加载窗口内进程死掉（极可能原生崩溃），
- * 首页据此显示「上次启动异常退出」提示，引导用户去设置查看崩溃日志。
- * 检查后由 [markStarted] 重置（删 loaded、重写 started），标记天然一次性。
+ * 机制：MainActivity.onCreate 写 `started` 标记并把会话升级为 foreground_active、
+ * LoadingScreen 完成后写 `loaded` 标记。下次启动检查归档的会话快照：
+ * - 会话类型 foreground_active 且无 loaded -> 上次启动在加载窗口内进程死掉（极可能原生崩溃）；
+ * - 后台 Worker / 未确认前台 / unknown -> 不计（修复：WorkManager 冷启动主进程停在
+ *   application 被下一次前台启动误判崩溃、误入安全模式）。
+ * 检查后由 [markStarted] 重置（开始新一轮会话），标记天然一次性。
+ *
+ * 兼容性：旧版本 journal 无 session_kind 标记时保留原 started/loaded 双标记判定；
+ * 历史遗留的 application 阶段归档绝不直接算新崩溃（可能是后台 Worker 会话）。
  */
 object CrashWatchdog {
 
@@ -305,9 +310,14 @@ object CrashWatchdog {
     private const val MARKER_LOADED = "loaded"
     private const val MARKER_STREAK = "crash_streak"
     private const val MARKER_PHASE = "phase"
-    /** 上次启动最后到达的阶段（markPhase 覆盖前归档；崩溃窗口判定用——本次启动的 provider
-     *  标记会覆盖 phase，必须从归档读上次的真相）。 */
+    /** 上次启动最后到达的阶段（markPhase 覆盖前归档；诊断展示用——崩溃判定已改走会话类型）。 */
     private const val MARKER_LAST_PHASE = "last_phase"
+    /** 本轮会话类型（session kind；Task 5 新增）。 */
+    private const val MARKER_SESSION_KIND = "session_kind"
+    /** 上次启动 MainActivity 是否已进入（started 归档；旧语义兼容判定用）。 */
+    private const val MARKER_LAST_STARTED = "last_started"
+    /** 上次启动的会话类型（归档侧；Task 5 新增，缺失 = 旧版本 journal）。 */
+    private const val MARKER_LAST_KIND = "last_kind"
 
     /** 启动阶段名（写 phase 标记）：provider（ContentProvider 阶段）-> application -> activity -> loaded。 */
     internal const val PHASE_PROVIDER = "provider"
@@ -321,32 +331,26 @@ object CrashWatchdog {
     /**
      * 上次启动是否在启动窗口内异常退出（检查当下即代表上一次进程的状态）。
      *
-     * 双窗口判定：
-     * 1. 旧语义：`started` 在且 `loaded` 不在 —— MainActivity 已到但加载未完成（Activity/首帧窗口）。
-     * 2. 新语义（Track A4）：last_phase 归档停在 provider/application/activity —— 死在
-     *    ContentProvider 或 Application.onCreate 阶段（「点图标即闪退」最可能的窗口，
-     *    此时 started/loaded 是上上轮的值，旧判定会漏检）。归档由最早代码 CrashInitProvider
-     *    在写本次 phase 前完成，避免被本次标记污染。
-     *
-     * 兼容性：last_phase 缺失（旧版本升级或首次安装）-> 只走旧判定，不误判。
+     * 判定走 [CrashSessionClassifier.classify]：
+     * 1. 新语义（Task 5）：按归档的会话类型——只有 foreground_active 且未 loaded 才算崩溃；
+     *    background_worker/foreground_pending/unknown 一律不计。
+     * 2. 旧语义兼容（Task 5 前安装或首次写入前的存量 journal）：无 session_kind 时保留原
+     *    started&&!loaded 判定，历史 application 归档不直接算新崩溃。
      */
-    fun hasCrashedLastLaunch(context: Context): Boolean = try {
-        val dir = journalDir(context)
-        val started = File(dir, MARKER_STARTED).exists()
-        val loaded = File(dir, MARKER_LOADED).exists()
-        if (started && !loaded) true
-        else when (lastArchivedPhase(context)) {
-            PHASE_PROVIDER, PHASE_APPLICATION, PHASE_ACTIVITY -> true
-            else -> false
-        }
-    } catch (_: Throwable) {
-        false
+    fun hasCrashedLastLaunch(context: Context): Boolean =
+        hasCrashedLastLaunch(journalDir(context))
+
+    /** [hasCrashedLastLaunch] 的目录核心（JVM 测试注入真实临时目录）。 */
+    internal fun hasCrashedLastLaunch(dir: File): Boolean {
+        val verdict = CrashSessionClassifier.classify(archivedSession(dir))
+        return verdict == CrashSessionClassifier.Verdict.CRASH
     }
 
     /** 记录当前启动阶段（覆盖写；任何失败静默，绝不影响启动）。 */
-    fun markPhase(context: Context, phase: String) {
+    fun markPhase(context: Context, phase: String) = markPhase(journalDir(context), phase)
+
+    internal fun markPhase(dir: File, phase: String) {
         try {
-            val dir = journalDir(context)
             dir.mkdirs()
             File(dir, MARKER_PHASE).writeText(phase)
         } catch (_: Throwable) {
@@ -355,14 +359,16 @@ object CrashWatchdog {
     }
 
     /**
-     * 归档「上次启动最后到达的阶段」（phase -> last_phase，只应由最早代码 CrashInitProvider
-     * 在写任何本次 phase 之前调用一次）。此后本次启动的 provider/application/... 覆盖 phase，
-     * 但 last_phase 保留上次的真相，供 [hasCrashedLastLaunch] 判定「死在 ContentProvider/
-     * Application 阶段」窗口（此时 started/loaded 是上上轮的值，旧判定漏检）。
+     * 归档「上次启动」的诊断信息（phase -> last_phase，只应由最早代码 CrashInitProvider 在写
+     * 任何本次 phase 之前调用一次）。此后本次启动的 provider/application/... 覆盖 phase，
+     * 但 last_phase 保留上次的真相供崩溃日志头部展示。
+     *
+     * 注意：崩溃**判定**不再依赖 last_phase（改走会话类型），本函数只服务诊断展示。
      */
-    fun archiveLastPhase(context: Context) {
+    fun archiveLastPhase(context: Context) = archiveLastPhase(journalDir(context))
+
+    internal fun archiveLastPhase(dir: File) {
         try {
-            val dir = journalDir(context)
             val phaseFile = File(dir, MARKER_PHASE)
             if (phaseFile.exists()) {
                 dir.mkdirs()
@@ -374,8 +380,104 @@ object CrashWatchdog {
     }
 
     /** 上次启动最后到达的阶段（last_phase 归档；读失败/缺失返回 null）。 */
-    fun lastArchivedPhase(context: Context): String? = try {
-        val file = File(journalDir(context), MARKER_LAST_PHASE)
+    fun lastArchivedPhase(context: Context): String? = lastArchivedPhase(journalDir(context))
+
+    internal fun lastArchivedPhase(dir: File): String? = try {
+        val file = File(dir, MARKER_LAST_PHASE)
+        if (file.exists()) file.readText().trim() else null
+    } catch (_: Throwable) {
+        null
+    }
+
+    /**
+     * 读归档的上轮会话快照（分类输入；任何读取失败都退化为「不计」的安全默认值）。
+     *
+     * 快照读**归档侧**标记（last_kind / last_started / loaded / last_phase），
+     * 与本轮的 session_kind/started 完全隔离——CrashInitProvider 在 ChatApp.onCreate 判定
+     * （updateCrashStreak）之前就把本轮 session_kind 覆盖为 foreground_pending，判定绝不能
+     * 被本轮标记污染。loaded 无归档副本：它由 markLoaded 写、下轮 MainActivity.markStarted
+     * 才删除，而 provider 归档先于该删除发生——provider 时刻盘面上的 loaded 正是「上一进程
+     * 退出后」的真相（上上轮加载完成后一直保留到下一次前台 markStarted）。session_kind 缺失
+     * （旧版本 journal）-> kind=null，分类器走兼容分支。
+     */
+    internal fun archivedSession(dir: File): CrashSessionClassifier.ArchivedSession = try {
+        val kindFile = File(dir, MARKER_LAST_KIND)
+        // 旧版本 journal 兼容：无 last_kind 时 last_started 尚不存在（旧版只写 started），
+        // started 回退读当前标记——provider 归档时刻的盘面就是旧版留下的现场。
+        val startedFile = if (kindFile.exists()) {
+            File(dir, MARKER_LAST_STARTED)
+        } else {
+            File(dir, MARKER_STARTED)
+        }
+        CrashSessionClassifier.ArchivedSession(
+            kind = if (kindFile.exists()) kindFile.readText().trim() else null,
+            started = startedFile.exists(),
+            loaded = File(dir, MARKER_LOADED).exists(),
+            lastPhase = lastArchivedPhase(dir),
+        )
+    } catch (_: Throwable) {
+        CrashSessionClassifier.ArchivedSession(
+            kind = null,
+            started = false,
+            loaded = false,
+            lastPhase = null,
+        )
+    }
+
+    private fun archivedSession(context: Context): CrashSessionClassifier.ArchivedSession =
+        archivedSession(journalDir(context))
+
+    /**
+     * 把当前 session_kind 归档到 last_kind（只应由最早代码 CrashInitProvider 在覆盖
+     * session_kind 为本轮 pending **之前**调用一次）。此后本轮的 foreground_active/
+     * background_worker 覆盖 session_kind，但 last_kind 保留上轮真相供 [archivedSession] 判定。
+     */
+    fun archiveArchivedKindIfNeeded(context: Context) =
+        archiveArchivedKindIfNeeded(journalDir(context))
+
+    internal fun archiveArchivedKindIfNeeded(dir: File) {
+        try {
+            val kindFile = File(dir, MARKER_SESSION_KIND)
+            dir.mkdirs()
+            val archive = File(dir, MARKER_LAST_KIND)
+            if (kindFile.exists()) {
+                kindFile.copyTo(archive, overwrite = true)
+            } else {
+                archive.delete()
+            }
+        } catch (_: Throwable) {
+            // 归档失败不影响启动主流程
+        }
+    }
+
+    /**
+     * 写本次会话类型（各组件在自己最早时机调用）：
+     * - CrashInitProvider -> foreground_pending（新会话初始态）；
+     * - MainActivity.onCreate（经 markStarted）-> foreground_active（最早的前台证据）；
+     * - Worker doWork -> background_worker（经 [CrashSessionClassifier.shouldMarkBackgroundWorker]
+     *   门禁，绝不覆盖已进入前台的活跃会话）。
+     * 同时把当前 started 状态镜像到 last_started（归档侧，供下轮兼容判定）。
+     * 任何失败静默，不影响启动。
+     */
+    fun markSessionKind(context: Context, kind: String) =
+        markSessionKind(journalDir(context), kind)
+
+    internal fun markSessionKind(dir: File, kind: String) {
+        try {
+            if (!CrashSessionClassifier.shouldMarkBackgroundWorker(currentSessionKind(dir))) return
+            dir.mkdirs()
+            File(dir, MARKER_SESSION_KIND).writeText(kind)
+            mirrorStartedToArchive(dir)
+        } catch (_: Throwable) {
+            // 会话类型标记失败不影响启动主流程
+        }
+    }
+
+    /** 当前会话类型标记内容（读失败/缺失返回 null）。 */
+    fun currentSessionKind(context: Context): String? = currentSessionKind(journalDir(context))
+
+    internal fun currentSessionKind(dir: File): String? = try {
+        val file = File(dir, MARKER_SESSION_KIND)
         if (file.exists()) file.readText().trim() else null
     } catch (_: Throwable) {
         null
@@ -391,14 +493,16 @@ object CrashWatchdog {
 
     /**
      * 更新连续崩溃计数（主进程 Application.onCreate 时调用；探测进程已短路，不参与）。
-     * 上次启动在加载窗口内崩溃 -> 计数 +1；正常走完 -> 归零。计数持久化到 startup_journal。
+     * 上次启动在启动窗口内崩溃（会话化判定，见 [hasCrashedLastLaunch]）-> 计数 +1；
+     * 正常走完 -> 归零。计数持久化到 startup_journal。
      */
-    fun updateCrashStreak(context: Context): Int = try {
-        val dir = journalDir(context)
+    fun updateCrashStreak(context: Context): Int = updateCrashStreak(journalDir(context))
+
+    internal fun updateCrashStreak(dir: File): Int = try {
         dir.mkdirs()
         val file = File(dir, MARKER_STREAK)
         val prev = runCatching { file.readText().trim().toInt() }.getOrDefault(0)
-        val next = if (hasCrashedLastLaunch(context)) prev + 1 else 0
+        val next = if (hasCrashedLastLaunch(dir)) prev + 1 else 0
         file.writeText(next.toString())
         next
     } catch (_: Throwable) {
@@ -406,34 +510,55 @@ object CrashWatchdog {
     }
 
     /** 是否已进入「崩溃循环安全模式」：连续 [SAFE_MODE_THRESHOLD] 次启动窗口内崩溃。 */
-    fun isCrashLoopSafeMode(context: Context): Boolean = try {
-        val file = File(journalDir(context), MARKER_STREAK)
+    fun isCrashLoopSafeMode(context: Context): Boolean =
+        isCrashLoopSafeMode(journalDir(context))
+
+    internal fun isCrashLoopSafeMode(dir: File): Boolean = try {
+        val file = File(dir, MARKER_STREAK)
         val streak = runCatching { file.readText().trim().toInt() }.getOrDefault(0)
         streak >= SAFE_MODE_THRESHOLD
     } catch (_: Throwable) {
         false
     }
 
-    /** 开始新一轮启动：写 started 标记，清空上一次的 loaded 标记。 */
-    fun markStarted(context: Context) {
+    /**
+     * 开始新一轮前台启动：写 started 标记、清空上一次的 loaded 标记，并把会话升级为
+     * foreground_active（MainActivity 最早时机调用——此后后台 Worker 不可再覆盖会话类型）。
+     */
+    fun markStarted(context: Context) = markStarted(journalDir(context))
+
+    internal fun markStarted(dir: File) {
         try {
-            val dir = journalDir(context)
             dir.mkdirs()
             File(dir, MARKER_STARTED).writeText("1")
             File(dir, MARKER_LOADED).delete()
+            File(dir, MARKER_SESSION_KIND).writeText(CrashSessionClassifier.KIND_FOREGROUND_ACTIVE)
+            mirrorStartedToArchive(dir)
         } catch (_: Throwable) {
             Log.w(TAG, "写 started 标记失败")
         }
     }
 
     /** 加载画面正常走完：写 loaded 标记，表示启动窗口安全通过。 */
-    fun markLoaded(context: Context) {
+    fun markLoaded(context: Context) = markLoaded(journalDir(context))
+
+    internal fun markLoaded(dir: File) {
         try {
-            val dir = journalDir(context)
             dir.mkdirs()
             File(dir, MARKER_LOADED).writeText("1")
         } catch (_: Throwable) {
             Log.w(TAG, "写 loaded 标记失败")
+        }
+    }
+
+    /** 把当前 started 存在性镜像到 last_started（归档侧；供下轮启动的旧语义兼容判定）。 */
+    private fun mirrorStartedToArchive(dir: File) {
+        try {
+            val startedFile = File(dir, MARKER_STARTED)
+            val archive = File(dir, MARKER_LAST_STARTED)
+            if (startedFile.exists()) startedFile.copyTo(archive, overwrite = true) else archive.delete()
+        } catch (_: Throwable) {
+            // 镜像失败不影响主流程：缺失按未进入处理（不计崩溃）
         }
     }
 

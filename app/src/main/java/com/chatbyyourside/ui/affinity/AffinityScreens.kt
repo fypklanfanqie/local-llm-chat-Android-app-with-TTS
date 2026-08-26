@@ -221,24 +221,37 @@ fun AffinityEventsScreen(
             current = script,
             onSave = { title, scene, opening, systemPrompt ->
                 scope.launch {
-                    container.specialEventScriptStore.upsert(
-                        SpecialEventScriptEntity(
-                            characterId = character.id,
-                            threshold = threshold,
-                            title = title,
-                            scene = scene,
-                            opening = opening,
-                            systemPrompt = systemPrompt,
-                            updatedAt = System.currentTimeMillis(),
-                        ),
-                    )
-                    editingThreshold = null
+                    try {
+                        container.specialEventScriptStore.upsert(
+                            SpecialEventScriptEntity(
+                                characterId = character.id,
+                                threshold = threshold,
+                                title = title,
+                                scene = scene,
+                                opening = opening,
+                                systemPrompt = systemPrompt,
+                                updatedAt = System.currentTimeMillis(),
+                            ),
+                        )
+                        editingThreshold = null
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // Task 5：脚本保存 Room IO 异常只提示，不让默认 handler 杀进程。
+                        launchError = "保存事件内容失败：${e.message ?: "请稍后重试"}"
+                    }
                 }
             },
             onReset = {
                 scope.launch {
-                    container.specialEventScriptStore.delete(character.id, threshold)
-                    editingThreshold = null
+                    try {
+                        container.specialEventScriptStore.delete(character.id, threshold)
+                        editingThreshold = null
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        launchError = "重置事件内容失败：${e.message ?: "请稍后重试"}"
+                    }
                 }
             },
             onDismiss = { editingThreshold = null },

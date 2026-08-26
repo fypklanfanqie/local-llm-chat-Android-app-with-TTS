@@ -58,17 +58,31 @@ class GroupListViewModel(
         }
     }
 
-    /** 新建群聊（封面已在调用方落盘或为 null）；成功回调新群 id。 */
+    /** 新建群聊（封面已在调用方落盘或为 null）；成功回调新群 id，失败回调错误文案（Task 5）。 */
     fun createGroup(name: String, coverPath: String?, memberIds: List<String>, onCreated: (Long) -> Unit) {
         viewModelScope.launch {
-            val id = container.groupChatRepository.createGroup(name, coverPath, memberIds)
-            onCreated(id)
+            try {
+                val id = container.groupChatRepository.createGroup(name, coverPath, memberIds)
+                onCreated(id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Task 5：建群 Room IO 异常只提示，不让默认 handler 杀进程。
+                Log.e(TAG, "新建群聊失败", e)
+            }
         }
     }
 
     fun deleteGroup(id: Long) {
         viewModelScope.launch {
-            container.groupChatRepository.deleteGroup(id)
+            try {
+                container.groupChatRepository.deleteGroup(id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Task 5：删群 Room IO 异常只提示，不让默认 handler 杀进程。
+                Log.e(TAG, "删除群聊失败", e)
+            }
         }
     }
 

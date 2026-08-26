@@ -96,6 +96,17 @@ class GreetingWorker(
         val settings = container.settingsRepository
         val context = applicationContext
 
+        // Task 5 会话化：本 Worker 冷启动主进程时把会话标记为 background_worker（不覆盖已进入
+        // 前台的 active 会话），防止「停在 application 阶段」被下一次前台启动误判为崩溃。
+        // 标记失败静默——绝不影响问候投递主流程。
+        try {
+            com.chatbyyourside.util.CrashWatchdog.markSessionKind(
+                context,
+                com.chatbyyourside.util.CrashSessionClassifier.KIND_BACKGROUND_WORKER,
+            )
+        } catch (_: Throwable) {
+        }
+
         // 测试模式：10s 预览，独立于日常周期链
         if (inputData.getBoolean(GreetingScheduler.KEY_TEST, false)) {
             return runTestGreeting(container, settings, context)
@@ -280,6 +291,10 @@ class GreetingWorker(
                 }
                 generateGreeting(container.directLlmClient, apiConfig, char, history, userDirective, worldviewDirective, lorebookDirective)
             }
+        } catch (ce: CancellationException) {
+            // Task 5：Worker 被取消（系统停止/约束不再满足）必须传播——吞掉会让 WorkManager
+            // 把「取消」当「生成失败」处理，且破坏结构化取消。
+            throw ce
         } catch (e: Exception) {
             null
         } finally {

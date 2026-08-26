@@ -246,10 +246,18 @@ class ChatViewModel(
             )
         }
         viewModelScope.launch {
-            val event = id?.let { container.database.affinityDao().getSpecialEventByConversation(it) }
-            _uiState.update { state -> state.copy(activeSpecialEventId = event?.id) }
-            if (event != null && container.settingsRepository.getActiveProviderNow() != ChatProviderType.CLOUD) {
-                container.chatProviderManager.switchProvider(ChatProviderType.CLOUD)
+            try {
+                val event = id?.let { container.database.affinityDao().getSpecialEventByConversation(it) }
+                _uiState.update { state -> state.copy(activeSpecialEventId = event?.id) }
+                if (event != null && container.settingsRepository.getActiveProviderNow() != ChatProviderType.CLOUD) {
+                    container.chatProviderManager.switchProvider(ChatProviderType.CLOUD)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Task 5：特殊邂逅查询/Provider 切换失败只记录，不让 Room/DataStore IO 异常
+                // 经默认 handler 杀进程。
+                Log.w(TAG, "活跃会话元信息同步失败（非致命）：${e.message}")
             }
         }
     }
@@ -324,24 +332,33 @@ class ChatViewModel(
     /** 新建会话并切换为活跃。清空输入/附件，历史自然为空。 */
     fun newConversation() {
         viewModelScope.launch {
-            val charId = _uiState.value.characterId
-            streamingJob?.cancel()
-            container.chatProviderManager.cancelAll()
-            pendingFinal = null
-            val newId = container.conversationRepository.create(charId)
-            container.settingsRepository.setActiveConversation(charId, newId)
-            _activeConversationId.value = newId
-            _uiState.update {
-                it.copy(
-                    inputText = "",
-                    uploadedImages = emptyList(),
-                    uploadedFiles = emptyList(),
-                    showConversationSheet = false,
-                    isStreaming = false,
-                    showTyping = false,
-                    stopRequested = false,
-                    activeGenerationId = null,
-                )
+            try {
+                val charId = _uiState.value.characterId
+                streamingJob?.cancel()
+                container.chatProviderManager.cancelAll()
+                pendingFinal = null
+                val newId = container.conversationRepository.create(charId)
+                container.settingsRepository.setActiveConversation(charId, newId)
+                _activeConversationId.value = newId
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Task 5：新建会话的 Room/DataStore IO 异常只提示，不让默认 handler 杀进程。
+                Log.w(TAG, "新建会话失败（非致命）：${e.message}")
+                _uiState.update { it.copy(errorMessage = "新建会话失败：${e.message ?: "请稍后重试"}") }
+            } finally {
+                _uiState.update {
+                    it.copy(
+                        inputText = "",
+                        uploadedImages = emptyList(),
+                        uploadedFiles = emptyList(),
+                        showConversationSheet = false,
+                        isStreaming = false,
+                        showTyping = false,
+                        stopRequested = false,
+                        activeGenerationId = null,
+                    )
+                }
             }
         }
     }
@@ -353,20 +370,29 @@ class ChatViewModel(
             return
         }
         viewModelScope.launch {
-            streamingJob?.cancel()
-            container.chatProviderManager.cancelAll()
-            pendingFinal = null
-            val charId = _uiState.value.characterId
-            container.settingsRepository.setActiveConversation(charId, id)
-            _activeConversationId.value = id
-            _uiState.update {
-                it.copy(
-                    showConversationSheet = false,
-                    isStreaming = false,
-                    showTyping = false,
-                    stopRequested = false,
-                    activeGenerationId = null,
-                )
+            try {
+                streamingJob?.cancel()
+                container.chatProviderManager.cancelAll()
+                pendingFinal = null
+                val charId = _uiState.value.characterId
+                container.settingsRepository.setActiveConversation(charId, id)
+                _activeConversationId.value = id
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Task 5：切换会话的 DataStore IO 异常只提示，不让默认 handler 杀进程。
+                Log.w(TAG, "切换会话失败（非致命）：${e.message}")
+                _uiState.update { it.copy(errorMessage = "切换会话失败：${e.message ?: "请稍后重试"}") }
+            } finally {
+                _uiState.update {
+                    it.copy(
+                        showConversationSheet = false,
+                        isStreaming = false,
+                        showTyping = false,
+                        stopRequested = false,
+                        activeGenerationId = null,
+                    )
+                }
             }
         }
     }
@@ -377,27 +403,35 @@ class ChatViewModel(
      */
     fun deleteConversation(id: Long) {
         viewModelScope.launch {
-            val charId = _uiState.value.characterId
-            val deleted = container.conversationRepository.delete(id)
-            if (!deleted) {
-                // DAO 层拒绝（特殊邂逅会话）：提示并保留会话，不触碰活跃映射。
-                _uiState.update { it.copy(errorMessage = "特殊邂逅回忆不可删除，可在角色档案的「特殊邂逅」中查看") }
-                return@launch
-            }
-            // 删除的若是当前活跃会话（或其 pending 所属会话），同步清理，防止残留串台。
-            if (id == _activeConversationId.value || pendingFinal?.conversationId == id) {
-                pendingFinal = null
-            }
-            if (id == _activeConversationId.value) {
-                val remaining = container.conversationRepository.listByCharacter(charId)
-                val target = remaining.firstOrNull()
-                if (target != null) {
-                    container.settingsRepository.setActiveConversation(charId, target.id)
-                    _activeConversationId.value = target.id
-                } else {
-                    container.settingsRepository.clearActiveConversation(charId)
-                    _activeConversationId.value = null
+            try {
+                val charId = _uiState.value.characterId
+                val deleted = container.conversationRepository.delete(id)
+                if (!deleted) {
+                    // DAO 层拒绝（特殊邂逅会话）：提示并保留会话，不触碰活跃映射。
+                    _uiState.update { it.copy(errorMessage = "特殊邂逅回忆不可删除，可在角色档案的「特殊邂逅」中查看") }
+                    return@launch
                 }
+                // 删除的若是当前活跃会话（或其 pending 所属会话），同步清理，防止残留串台。
+                if (id == _activeConversationId.value || pendingFinal?.conversationId == id) {
+                    pendingFinal = null
+                }
+                if (id == _activeConversationId.value) {
+                    val remaining = container.conversationRepository.listByCharacter(charId)
+                    val target = remaining.firstOrNull()
+                    if (target != null) {
+                        container.settingsRepository.setActiveConversation(charId, target.id)
+                        _activeConversationId.value = target.id
+                    } else {
+                        container.settingsRepository.clearActiveConversation(charId)
+                        _activeConversationId.value = null
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Task 5：删除会话的 Room/DataStore IO 异常只提示，不让默认 handler 杀进程。
+                Log.w(TAG, "删除会话失败（非致命）：${e.message}")
+                _uiState.update { it.copy(errorMessage = "删除会话失败：${e.message ?: "请稍后重试"}") }
             }
         }
     }
@@ -406,8 +440,16 @@ class ChatViewModel(
     fun renameConversation(id: Long, title: String) {
         val t = title.trim().ifBlank { ConversationRepository.DEFAULT_TITLE }
         viewModelScope.launch {
-            container.conversationRepository.rename(id, t)
-            // observeByCharacter Flow 会刷新列表 -> syncActiveMeta 更新标题
+            try {
+                container.conversationRepository.rename(id, t)
+                // observeByCharacter Flow 会刷新列表 -> syncActiveMeta 更新标题
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Task 5：重命名 Room IO 异常只提示，不让默认 handler 杀进程。
+                Log.w(TAG, "重命名会话失败（非致命）：${e.message}")
+                _uiState.update { it.copy(errorMessage = "重命名失败：${e.message ?: "请稍后重试"}") }
+            }
         }
     }
 
@@ -424,37 +466,50 @@ class ChatViewModel(
         onError: (String) -> Unit,
     ) {
         viewModelScope.launch {
-            runCatching { container.conversationExportService.prepare(conversationId) }
-                .onSuccess(onReady)
-                .onFailure { onError(it.message ?: "无法准备对话导出") }
+            try {
+                onReady(container.conversationExportService.prepare(conversationId))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Task 5：导出准备失败走 onError 回调，不经默认 handler。
+                onError(e.message ?: "无法准备对话导出")
+            }
         }
     }
 
     /**
      * 赠送礼物后让角色 AI 生成一段自然道谢，落库为礼物的 thankYouText 并追加进聊天。
+     * Task 5：全路径 safe catch + CancellationException 透传——原 `runCatching{}.onSuccess{}`
+     * 写法里 onSuccess 内的 Room 写异常不会被 runCatching 捕获（onSuccess 在 try 外执行），
+     * 会沿默认 handler 杀进程。
      */
     fun sendGiftThanks(gift: GiftHistory) {
         val convId = _activeConversationId.value ?: return
         if (_uiState.value.isStreaming || convId != gift.conversationId) return
         viewModelScope.launch {
-            val char = container.characterRepository.getNow(_uiState.value.characterId) ?: return@launch
-            val history = container.chatRepository.getHistory(convId)
-            val provider = container.chatProviderManager.getActiveProvider()
-            val userDirective = container.settingsRepository.getUserProfileNow().toDirectiveText()
-            val prompt = """你的朋友刚刚赠送了你一件礼物：${gift.giftName}${gift.giftDescription.takeIf { it.isNotBlank() }?.let { "（$it）" } ?: ""}。
-请以角色身份自然、真诚地感谢对方，保持简短，不提及好感度、价格、金币、系统或游戏机制。"""
-            val messages = buildList {
-                add(ChatMessage(role = "system", content = char.systemPrompt + userDirective))
-                addAll(history.takeLast(AppConfig.MAX_CONTEXT_MESSAGES).map { ChatMessage(role = it.role, content = it.content) })
-                add(ChatMessage(role = "user", content = prompt))
-            }
-            runCatching { provider.chat(messages) {} }.onSuccess { response ->
+            try {
+                val char = container.characterRepository.getNow(_uiState.value.characterId) ?: return@launch
+                val history = container.chatRepository.getHistory(convId)
+                val provider = container.chatProviderManager.getActiveProvider()
+                val userDirective = container.settingsRepository.getUserProfileNow().toDirectiveText()
+                val giftDirective = "你的朋友刚刚赠送了你一件礼物：" +
+                    gift.giftName +
+                    (gift.giftDescription.takeIf { it.isNotBlank() }?.let { "（$it）" } ?: "") +
+                    "。请以角色身份自然、真诚地感谢对方，保持简短，不提及好感度、价格、金币、系统或游戏机制。"
+                val messages = buildList {
+                    add(ChatMessage(role = "system", content = char.systemPrompt + userDirective))
+                    addAll(history.takeLast(AppConfig.MAX_CONTEXT_MESSAGES).map { ChatMessage(role = it.role, content = it.content) })
+                    add(ChatMessage(role = "user", content = giftDirective))
+                }
+                val response = provider.chat(messages) {}
                 container.affinityRepository.saveGiftThankYouText(gift.id, response)
-                val rowId = container.chatRepository.addMessage(char.id, convId, ChatMessage(role = "assistant", content = response))
+                container.chatRepository.addMessage(char.id, convId, ChatMessage(role = "assistant", content = response))
                 container.conversationRepository.touch(convId)
                 // Room Flow 会回填该消息。不要再手动 append 同一 databaseId，否则 LazyColumn key 重复并崩溃。
-            }.onFailure { error ->
-                _uiState.update { it.copy(errorMessage = "礼物已送出，感谢回复生成失败：${error.message ?: "请稍后重试"}") }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.update { it.copy(errorMessage = "礼物已送出，感谢回复生成失败：${e.message ?: "请稍后重试"}") }
             }
         }
     }
@@ -472,42 +527,64 @@ class ChatViewModel(
             return
         }
         if (!enabled) {
-            viewModelScope.launch { container.conversationRepository.setAutoVideoEnabled(conversationId, false) }
+            viewModelScope.launch {
+                try {
+                    container.conversationRepository.setAutoVideoEnabled(conversationId, false)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "关闭自动视频失败（非致命）: ${e.message}")
+                }
+            }
             return
         }
         viewModelScope.launch {
-            val seedance = container.settingsRepository.getSeedanceConfigNow()
-            if (seedance.apiKey.isBlank()) {
-                _uiState.update {
-                    it.copy(errorMessage = "未配置 Seedance API Key，请先到「设置」中配置后再开启自动视频")
+            try {
+                val seedance = container.settingsRepository.getSeedanceConfigNow()
+                if (seedance.apiKey.isBlank()) {
+                    _uiState.update {
+                        it.copy(errorMessage = "未配置 Seedance API Key，请先到「设置」中配置后再开启自动视频")
+                    }
+                    return@launch
                 }
-                return@launch
-            }
-            val charId = _uiState.value.characterId
-            val char = container.characterRepository.getNow(charId)
-            val hasCharacterImage = if (char == null) false
-            else if (char.isCustom) char.image.isNotBlank()
-            else AssetPaths.PICTURES[charId] != null
-            if (!hasCharacterImage) {
-                _uiState.update {
-                    it.copy(errorMessage = "该角色未设置立绘图片，请先到角色页配置后再开启自动视频")
+                val charId = _uiState.value.characterId
+                val char = container.characterRepository.getNow(charId)
+                val hasCharacterImage = if (char == null) false
+                else if (char.isCustom) char.image.isNotBlank()
+                else AssetPaths.PICTURES[charId] != null
+                if (!hasCharacterImage) {
+                    _uiState.update {
+                        it.copy(errorMessage = "该角色未设置立绘图片，请先到角色页配置后再开启自动视频")
+                    }
+                    return@launch
                 }
-                return@launch
+                container.conversationRepository.setAutoVideoEnabled(conversationId, true)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Task 5：准入检查/开关写入的 IO 异常只提示，不让默认 handler 杀进程。
+                Log.w(TAG, "开启自动视频失败（非致命）：${e.message}")
+                _uiState.update { it.copy(errorMessage = "开启自动视频失败：${e.message ?: "请稍后重试"}") }
             }
-            container.conversationRepository.setAutoVideoEnabled(conversationId, true)
         }
     }
 
     /** 取消排队中的 Seedance 视频任务（仅 QUEUED 可发起；结果以服务端状态为准）。 */
     fun cancelVideoTask(taskId: Long) {
         viewModelScope.launch {
-            val claimed = container.seedanceVideoRepository.claim(
-                taskId,
-                SeedanceVideoState.QUEUED,
-                SeedanceVideoState.CANCEL_REQUESTED,
-            )
-            if (claimed) {
-                container.seedanceVideoScheduler.enqueue(taskId)
+            try {
+                val claimed = container.seedanceVideoRepository.claim(
+                    taskId,
+                    SeedanceVideoState.QUEUED,
+                    SeedanceVideoState.CANCEL_REQUESTED,
+                )
+                if (claimed) {
+                    container.seedanceVideoScheduler.enqueue(taskId)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "取消视频任务失败（非致命）：${e.message}")
             }
         }
     }
@@ -528,19 +605,26 @@ class ChatViewModel(
      */
     fun retryVideoTask(taskId: Long) {
         viewModelScope.launch {
-            val video = container.seedanceVideoRepository.getById(taskId) ?: return@launch
-            val entry = retryEntryStateOf(video.state) ?: return@launch
-            container.seedanceVideoRepository.update(
-                video.prepareRetry(entry).copy(
-                    state = entry,
-                    errorStage = null,
-                    errorCode = null,
-                    errorMessage = null,
-                    retryDisposition = null,
-                    nextRetryAt = null,
-                ),
-            )
-            container.seedanceVideoScheduler.enqueue(taskId)
+            try {
+                val video = container.seedanceVideoRepository.getById(taskId) ?: return@launch
+                val entry = retryEntryStateOf(video.state) ?: return@launch
+                container.seedanceVideoRepository.update(
+                    video.prepareRetry(entry).copy(
+                        state = entry,
+                        errorStage = null,
+                        errorCode = null,
+                        errorMessage = null,
+                        retryDisposition = null,
+                        nextRetryAt = null,
+                    ),
+                )
+                container.seedanceVideoScheduler.enqueue(taskId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "重试视频任务失败（非致命）：${e.message}")
+                _uiState.update { it.copy(errorMessage = "重试视频任务失败：${e.message ?: "请稍后重试"}") }
+            }
         }
     }
 
@@ -595,9 +679,15 @@ class ChatViewModel(
 
     fun toggleTtsLanguage() {
         viewModelScope.launch {
-            val current = container.settingsRepository.getTtsLanguageNow()
-            val newLang = if (current == TtsLanguage.ZH) TtsLanguage.JA else TtsLanguage.ZH
-            container.settingsRepository.setTtsLanguage(newLang)
+            try {
+                val current = container.settingsRepository.getTtsLanguageNow()
+                val newLang = if (current == TtsLanguage.ZH) TtsLanguage.JA else TtsLanguage.ZH
+                container.settingsRepository.setTtsLanguage(newLang)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "切换朗读语言失败（非致命）：${e.message}")
+            }
         }
     }
 
@@ -607,20 +697,29 @@ class ChatViewModel(
             return
         }
         viewModelScope.launch {
-            // 与 switchConversation/newConversation 一致：切换前取消当前推理，避免旧 provider
-            // 的 onToken 回调继续更新 UI 造成状态混乱。
-            streamingJob?.cancel()
-            container.chatProviderManager.cancelAll()
-            pendingFinal = null
-            container.chatProviderManager.switchProvider(type)
-            _uiState.update { s ->
-                s.copy(
-                    isStreaming = false,
-                    showTyping = false,
-                    stopRequested = false,
-                    activeGenerationId = null,
-                    messages = s.messages.filterNot { it.id == "streaming" },
-                )
+            try {
+                // 与 switchConversation/newConversation 一致：切换前取消当前推理，避免旧 provider
+                // 的 onToken 回调继续更新 UI 造成状态混乱。
+                streamingJob?.cancel()
+                container.chatProviderManager.cancelAll()
+                pendingFinal = null
+                container.chatProviderManager.switchProvider(type)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Task 5：Provider 切换 DataStore IO 异常只提示，不让默认 handler 杀进程。
+                Log.w(TAG, "切换 Provider 失败（非致命）：${e.message}")
+                _uiState.update { it.copy(errorMessage = "切换 Provider 失败：${e.message ?: "请稍后重试"}") }
+            } finally {
+                _uiState.update { s ->
+                    s.copy(
+                        isStreaming = false,
+                        showTyping = false,
+                        stopRequested = false,
+                        activeGenerationId = null,
+                        messages = s.messages.filterNot { it.id == "streaming" },
+                    )
+                }
             }
         }
     }
@@ -628,8 +727,14 @@ class ChatViewModel(
     /** 切换深度思考模式（本地 + 云端通用）。Flow 收集器负责更新 UI 态与重渲染。 */
     fun toggleDeepThinking() {
         viewModelScope.launch {
-            val enabled = !container.settingsRepository.getDeepThinkingNow()
-            container.settingsRepository.setDeepThinking(enabled)
+            try {
+                val enabled = !container.settingsRepository.getDeepThinkingNow()
+                container.settingsRepository.setDeepThinking(enabled)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "切换深度思考失败（非致命）：${e.message}")
+            }
         }
     }
 
@@ -856,7 +961,16 @@ class ChatViewModel(
 
                 // 调用 Provider
                 val showThink = _uiState.value.deepThinkingEnabled
-                val onChunk: (String) -> Unit = { accumulated ->
+                val senderName = state.characterName.ifEmpty { "AI" }
+                val onChunk: (String) -> Unit = chunkGuard@{ accumulated ->
+                    // Task 5 迟到回调防线：本地同步 JNI 取消后 provider 可能仍回调旧请求的
+                    // onChunk（渲染泵 finish 终帧/在途节流帧）。第一行必须校验「本次请求仍是
+                    // 当前活跃请求且会话未切换」，否则直接丢弃，绝不覆盖新会话的 streaming/UI。
+                    if (_uiState.value.activeGenerationId != generationId ||
+                        _activeConversationId.value != convId
+                    ) {
+                        return@chunkGuard
+                    }
                     // Task 7：先记录权威累积文本（停止时落库内容不受渲染节流影响），再节流渲染。
                     latestAccumulated = accumulated
                     // 节流：仅首块或距上次重渲染 >= STREAM_THROTTLE_MS 时才重解析 Markdown + 重组列表。
@@ -871,10 +985,12 @@ class ChatViewModel(
                             content = accumulated,
                             segments = if (showThink) MarkdownParser.parseWithThink(accumulated, isStreaming = true)
                                 else MarkdownParser.parseWithThink(MarkdownParser.stripThink(accumulated), isStreaming = true),
-                            sender = state.characterName.ifEmpty { "AI" },
+                            sender = senderName,
                             isStreaming = true,
                         )
                         _uiState.update { s ->
+                            // 双检：update lambda 执行时状态可能已被新一轮请求改写，再次校验防串台。
+                            if (s.activeGenerationId != generationId) return@update s
                             val msgs = s.messages.toMutableList()
                             val existingIdx = msgs.indexOfFirst { it.id == "streaming" }
                             if (existingIdx >= 0) msgs[existingIdx] = streamingMsg
@@ -943,8 +1059,12 @@ class ChatViewModel(
                 // 取消（切角色/切会话）必须传播，不能当普通错误处理，否则破坏结构化并发
                 throw e
             } catch (e: Exception) {
-                val stoppedByUser = _uiState.value.stopRequested &&
-                    _uiState.value.activeGenerationId == generationId
+                // Task 5 迟到收尾防线：本请求已不是当前活跃请求（用户已发新消息/切会话）时，
+                // 旧请求的 catch 绝不能回滚新状态或覆盖 UI——直接静默放弃。
+                val isCurrent = _uiState.value.activeGenerationId == generationId &&
+                    _activeConversationId.value == convId
+                val stoppedByUser = isCurrent &&
+                    _uiState.value.stopRequested
                 if (stoppedByUser) {
                     // 云端显式停止：HTTP 调用被取消表现为 IOException。此时不是错误——保留部分输出，
                     // 不删除已落库的用户消息，不展示错误横幅。
@@ -964,6 +1084,9 @@ class ChatViewModel(
                         userText = userDisplayText,
                         characterImageSource = autoCharacterImageSource,
                     )
+                } else if (!isCurrent) {
+                    // 旧请求的普通错误：不回滚（新请求已接管状态），仅记录浮窗终态。
+                    termReason = "已切换: ${e.message ?: "请求被取代"}"
                 } else {
                     termReason = "出错: ${e.message ?: "请求失败"}"
                     // 回滚：删除已落库的用户消息（无对应回复，避免孤儿），恢复输入框内容，
@@ -1229,15 +1352,24 @@ class ChatViewModel(
         val id = databaseId ?: return
         if (id <= 0L) return
         viewModelScope.launch {
-            if (_activeConversationId.value == null) return@launch
-            // 正在展示的乐观完成消息：先清 pending 并从列表移除，防止 Room 旧快照把它带回来。
-            if (pendingFinal?.databaseId == id) {
-                pendingFinal = null
-                _uiState.update { s ->
-                    s.copy(messages = s.messages.filterNot { it.id == "msg-$id" })
+            try {
+                if (_activeConversationId.value == null) return@launch
+                // 正在展示的乐观完成消息：先清 pending 并从列表移除，防止 Room 旧快照把它带回来。
+                if (pendingFinal?.databaseId == id) {
+                    pendingFinal = null
+                    _uiState.update { s ->
+                        s.copy(messages = s.messages.filterNot { it.id == "msg-$id" })
+                    }
                 }
+                container.chatRepository.deleteMessage(id)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Task 5：删除消息 Room IO 异常只提示，不让默认 handler 杀进程。
+                Log.w(TAG, "删除消息失败（非致命）：${e.message}")
+                _uiState.update { it.copy(errorMessage = "删除消息失败：${e.message ?: "请稍后重试"}") }
+                return@launch
             }
-            container.chatRepository.deleteMessage(id)
             // 兜底：DB 删除提交后（Room 已不会再回填该行），确保列表中不残留。
             _uiState.update { s ->
                 if (s.messages.any { it.id == "msg-$id" }) {

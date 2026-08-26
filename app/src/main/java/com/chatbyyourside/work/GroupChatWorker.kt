@@ -89,6 +89,17 @@ class GroupChatWorker(
         val settings = container.settingsRepository
         val context = applicationContext
 
+        // Task 5 会话化：本 Worker 冷启动主进程时把会话标记为 background_worker（不覆盖已进入
+        // 前台的 active 会话），防止「停在 application 阶段」被下一次前台启动误判为崩溃。
+        // 标记失败静默——绝不影响群聊轮次主流程。
+        try {
+            com.chatbyyourside.util.CrashWatchdog.markSessionKind(
+                context,
+                com.chatbyyourside.util.CrashSessionClassifier.KIND_BACKGROUND_WORKER,
+            )
+        } catch (_: Throwable) {
+        }
+
         if (inputData.getBoolean(GroupChatScheduler.KEY_TEST, false)) {
             return runTestRound(container, settings, context)
         }

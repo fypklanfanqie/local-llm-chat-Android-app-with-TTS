@@ -17,6 +17,7 @@ import com.chatbyyourside.data.repository.GroupChatRepository
 import com.chatbyyourside.data.model.matchesScope
 import com.chatbyyourside.llm.LorebookEngine
 import com.chatbyyourside.ui.chat.PendingFinal
+import com.chatbyyourside.ui.chat.RequestGenerationGuard
 import com.chatbyyourside.util.MarkdownParser
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -52,8 +53,17 @@ class GroupChatViewModel(
 
     private var streamingJob: Job? = null
 
-    /** 乐观完成消息列表：一轮多人答复连续落库，Room Flow 回填滞后时逐条保留（见 GroupChatTimelineReconciler）。 */
+    /**
+     * 乐观完成消息列表：一轮多人答复连续落库，Room Flow 回填滞后时逐条保留（见 GroupChatTimelineReconciler）。
+     * Task 5：访问经 [pendingFinalsLock] 串行化——Room Flow reconciliation（renderMessages，主线程）
+     * 与流式 finalize（解码/IO 回调线程）可能交错，裸 MutableList 并发读写会 CME/丢条目；
+     * 快照读（toList）+ 锁内变更保证 reconcile 拿到不可变快照、removeAll 原子生效。
+     */
     private val pendingFinals = mutableListOf<PendingFinal>()
+    private val pendingFinalsLock = Any()
+
+    /** 生成请求代际守卫（Task 5）：旧 job 的 catch/finally/onChunk 凭它识别自己已被取代。 */
+    private val requestGuard = RequestGenerationGuard()
 
     private val _conversationId = MutableStateFlow<Long?>(null)
 
@@ -81,14 +91,26 @@ class GroupChatViewModel(
         }
         // Provider 类型
         viewModelScope.launch {
-            container.chatProviderManager.activeProviderType.collect { type ->
-                _uiState.update { it.copy(activeProvider = type, isCloud = type == ChatProviderType.CLOUD) }
+            try {
+                container.chatProviderManager.activeProviderType.collect { type ->
+                    _uiState.update { it.copy(activeProvider = type, isCloud = type == ChatProviderType.CLOUD) }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "provider 类型 flow 异常", e)
             }
         }
         // 我的形象（我的形象）-> 头像（用户气泡显示）
         viewModelScope.launch {
-            container.settingsRepository.userProfile.collect { profile ->
-                _uiState.update { it.copy(userImage = profile.avatarPath) }
+            try {
+                container.settingsRepository.userProfile.collect { profile ->
+                    _uiState.update { it.copy(userImage = profile.avatarPath) }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "用户形象 flow 异常", e)
             }
         }
         // 群聊历史 -> 逐条发言人 reconciliation
@@ -147,15 +169,19 @@ class GroupChatViewModel(
         val state = _uiState.value
         val streaming = if (state.isStreaming) state.messages.firstOrNull { it.id == "streaming" } else null
         val nameById = state.members.associate { it.id to it.name }
+        // Task 5：pendingFinals 取锁内不可变快照，防止 reconcile 期间被 finalize 线程并发修改。
+        val pendingSnapshot = synchronized(pendingFinalsLock) { pendingFinals.toList() }
         val result = GroupChatTimelineReconciler.reconcile(
             history = history,
             activeConversationId = _conversationId.value,
-            pendingFinals = pendingFinals.toList(),
+            pendingFinals = pendingSnapshot,
             streaming = streaming,
             speakerNameOf = { id -> id?.let { nameById[it] } ?: GroupChatPromptBuilder.FALLBACK_NAME },
         )
         if (result.resolvedPendingIds.isNotEmpty()) {
-            pendingFinals.removeAll { it.databaseId in result.resolvedPendingIds }
+            synchronized(pendingFinalsLock) {
+                pendingFinals.removeAll { it.databaseId in result.resolvedPendingIds }
+            }
         }
         _uiState.update { it.copy(messages = result.messages, showWelcome = result.messages.isEmpty()) }
     }
@@ -220,6 +246,9 @@ class GroupChatViewModel(
             )
         }
 
+        // Task 5：请求序号——旧 job 的 catch/finally 凭它判断自己已被新请求取代，
+        // 绝不清理新请求的 streaming 状态或 pendingFinals。
+        val requestId = requestGuard.next()
         streamingJob = viewModelScope.launch {
             var userMsgId = 0L
             var repliesOk = 0
@@ -284,7 +313,10 @@ class GroupChatViewModel(
                     )
 
                     var lastStreamRenderMs = 0L
-                    val onChunk: (String) -> Unit = { accumulated ->
+                    val onChunk: (String) -> Unit = chunkGuard@{ accumulated ->
+                        // Task 5 迟到回调防线：本请求已被新请求取代时丢弃旧回调，
+                        // 绝不覆盖新请求的 streaming 气泡。
+                        if (!requestGuard.isCurrent(requestId)) return@chunkGuard
                         val now = SystemClock.elapsedRealtime()
                         if (lastStreamRenderMs == 0L || now - lastStreamRenderMs >= STREAM_THROTTLE_MS) {
                             lastStreamRenderMs = now
@@ -298,6 +330,8 @@ class GroupChatViewModel(
                                 characterId = speaker.id,
                             )
                             _uiState.update { s ->
+                                // 双检：update lambda 执行时新请求可能已接管，再次校验防串台。
+                                if (!requestGuard.isCurrent(requestId)) return@update s
                                 val msgs = s.messages.toMutableList()
                                 val idx = msgs.indexOfFirst { it.id == "streaming" }
                                 if (idx >= 0) msgs[idx] = streamingMsg else msgs.add(streamingMsg)
@@ -337,10 +371,13 @@ class GroupChatViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                // Task 5：本请求已被新请求取代时，旧 job 的 catch 绝不回滚/清理——
+                // pendingFinals 与 streaming 状态都归新请求管，直接静默放弃。
+                if (!requestGuard.isCurrent(requestId)) return@launch
                 if (repliesOk == 0) {
                     // 一条回复都没成功：回滚用户消息、恢复输入、报错
                     if (userMsgId != 0L) runCatching { container.chatRepository.forceDeleteMessageForRollback(userMsgId) }
-                    pendingFinals.clear()
+                    synchronized(pendingFinalsLock) { pendingFinals.clear() }
                     _uiState.update { s ->
                         val msgs = s.messages.filterNot { it.id == "streaming" }.toMutableList()
                         s.copy(
@@ -379,7 +416,9 @@ class GroupChatViewModel(
             databaseId = rowId,
             characterId = speaker.id,
         )
-        pendingFinals.add(PendingFinal(conversationId = convId, databaseId = rowId, message = display))
+        synchronized(pendingFinalsLock) {
+            pendingFinals.add(PendingFinal(conversationId = convId, databaseId = rowId, message = display))
+        }
         _uiState.update { s ->
             val msgs = s.messages.toMutableList()
             val streamIdx = msgs.indexOfFirst { it.id == "streaming" }
@@ -397,7 +436,9 @@ class GroupChatViewModel(
         val id = databaseId ?: return
         if (id <= 0L) return
         viewModelScope.launch {
-            pendingFinals.removeAll { it.databaseId == id }
+            synchronized(pendingFinalsLock) {
+                pendingFinals.removeAll { it.databaseId == id }
+            }
             container.chatRepository.deleteMessage(id)
             _uiState.update { s ->
                 if (s.messages.any { it.id == "msg-$id" }) s.copy(messages = s.messages.filterNot { it.id == "msg-$id" })

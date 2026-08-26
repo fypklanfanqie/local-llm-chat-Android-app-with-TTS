@@ -485,6 +485,8 @@ class LocalChatProvider(
             val renderPump = LocalStreamRenderPump(scope = renderScope, minIntervalMs = RENDER_THROTTLE_MS)
             renderPump.decorate = { renderLocalThink(it, shouldFoldThink) }
             renderPump.onChunk = { onChunk(it) }
+            // Task 5：渲染回调异常已收口到 pump 内，这里只接日志通知。
+            renderPump.onError = { e -> Log.w(TAG, "renderPump 回调异常（已跳过本帧）: ${e.message}") }
             renderPump.start()
             // Task 2：单阶段生成使用一个 GenerationExecutionControl（见下方生成段），思考与正文
             // 共享同一总上限；watchdog 与 CAS 清理都只观察这一个 control。
@@ -697,17 +699,22 @@ class LocalChatProvider(
 
             // 首轮：完整思考 + 正文（思考超预算由 runRound 内检测截断）。
             // when-to-think 路由：AUTO+TRIVIAL/SIMPLE 直接 enable_thinking=false 作答（无思考段）。
-            val firstResult = runRound(
-                roundMessages = modelMessages,
-                roundEnableThinking = firstRoundEnableThinking,
-                roundThinkingRequested = deepThinking,
-                roundClassifier = thinkingClassifier,
-                roundPump = renderPump,
-                extraDowngrades = emptyList(),
-                enforceThinkingBudget = true,
-                enableScriptDetect = true,
-            )
-            renderScope.cancel()
+            // Task 5：首/收束轮异常路径也要回收渲染 scope——runRound 抛出（含 CancellationException）
+            // 时若不 cancel，SupervisorJob+Default 协程会泄漏并继续持有 pump 回调引用。
+            val firstResult = try {
+                runRound(
+                    roundMessages = modelMessages,
+                    roundEnableThinking = firstRoundEnableThinking,
+                    roundThinkingRequested = deepThinking,
+                    roundClassifier = thinkingClassifier,
+                    roundPump = renderPump,
+                    extraDowngrades = emptyList(),
+                    enforceThinkingBudget = true,
+                    enableScriptDetect = true,
+                )
+            } finally {
+                renderScope.cancel()
+            }
 
             // Task 17：思考预算截断 -> 收束轮。以「原消息 + 强制收束指令、enableThinking=false」
             // 直接产出正文（KV 前缀命中，仅 prefill 新增收束指令，成本小）。思考流保留并补
@@ -722,6 +729,7 @@ class LocalChatProvider(
                 val roundTwoPump = LocalStreamRenderPump(scope = roundTwoScope, minIntervalMs = RENDER_THROTTLE_MS)
                 roundTwoPump.decorate = { renderLocalThink(it, shouldFoldThink) }
                 roundTwoPump.onChunk = { onChunk(it) }
+                roundTwoPump.onError = { e -> Log.w(TAG, "roundTwoPump 回调异常（已跳过本帧）: ${e.message}") }
                 // 种子：思考（含闭合）先渲染可见，正文随后流式追加。
                 roundTwoPump.append(seededRaw)
                 roundTwoPump.start()
@@ -748,8 +756,10 @@ class LocalChatProvider(
                     Log.w(TAG, "思考收束轮异常（保留截断思考作为最终结果）: ${e.message}")
                     finalRaw = seededRaw
                     null
+                } finally {
+                    // Task 5：异常路径同样回收收束轮 scope，防协程泄漏。
+                    roundTwoScope.cancel()
                 }
-                roundTwoScope.cancel()
                 if (secondResult != null) {
                     finalResult = secondResult
                     finalRaw = roundTwoPump.snapshot()

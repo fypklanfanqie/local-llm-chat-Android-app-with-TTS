@@ -24,6 +24,16 @@ class SeedanceVideoWorker(
         val taskId = inputData.getLong(SeedanceVideoScheduler.KEY_LOCAL_TASK_ID, -1L)
         if (taskId <= 0) return Result.success()
 
+        // Task 5 会话化：本 Worker 冷启动主进程时把会话标记为 background_worker（不覆盖已进入
+        // 前台的 active 会话），防止「停在 application 阶段」被下一次前台启动误判为崩溃。
+        try {
+            com.chatbyyourside.util.CrashWatchdog.markSessionKind(
+                applicationContext,
+                com.chatbyyourside.util.CrashSessionClassifier.KIND_BACKGROUND_WORKER,
+            )
+        } catch (_: Throwable) {
+        }
+
         val container = (applicationContext as ChatApp).container
         val outcome = container.seedancePipelineCoordinator.advance(taskId)
         return when (outcome) {

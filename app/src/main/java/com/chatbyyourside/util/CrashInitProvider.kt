@@ -53,10 +53,19 @@ class CrashInitProvider : ContentProvider() {
         // 污染主进程阶段判定。
         try {
             if (!ProcessNameUtil.currentProcessName().endsWith(":mnn_probe")) {
-                // 归档「上次启动最后到达的阶段」——必须在写本次 phase 之前（最早代码时机），
-                // 供 hasCrashedLastLaunch 判定「死在 ContentProvider/Application 阶段」窗口。
+                // 归档「上次启动」的真相（phase + session kind）——必须在写任何本次标记之前
+                // （最早代码时机）。判定（updateCrashStreak，Application.onCreate）与崩溃日志
+                // 头部的启动诊断摘要都读归档侧，不被本轮标记污染。
                 CrashWatchdog.archiveLastPhase(appContext)
+                CrashWatchdog.archiveArchivedKindIfNeeded(appContext)
                 CrashWatchdog.markPhase(appContext, CrashWatchdog.PHASE_PROVIDER)
+                // Task 5 会话化：本轮初始化为 foreground_pending（尚未确认前台/后台）。
+                // MainActivity 最早升级为 foreground_active；后台 Worker 标记 background_worker
+                // （不覆盖 active）。
+                CrashWatchdog.markSessionKind(
+                    appContext,
+                    CrashSessionClassifier.KIND_FOREGROUND_PENDING,
+                )
             }
         } catch (e: Throwable) {
             Log.e(TAG, "markPhase 失败（不影响启动）: ${e.message}")
