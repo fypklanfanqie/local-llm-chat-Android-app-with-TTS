@@ -192,14 +192,17 @@ class DownloadManager(private val context: Context) {
             updateState(model.id, DownloadState.Downloading(aggregate, total))
         }
 
-        finishMnnDownload(model, dir)
+        finishMnnDownload(model, dir, files)
     }
 
     /**
      * 下载 MNN 仓库中的单个文件（支持断点续传）。
-     * - 416：文件已完整（Range 越界），跳过。
-     * - 206：服务端支持 Range，从 [startBytes] 续传。
-     * - 200：不支持 Range，从头重写（先写 .fresh 临时文件、成功后原子替换，失败时旧分片仍保留供续传）。
+     * - 416：Range 越界——**不盲信「文件已完整」**。服务端返回 416 的常见原因是本地文件已损坏/过长
+     *   （Range/分发错误、磁盘位翻转），直接继续会拼出「大小对、内容坏」的权重，MNN load 时
+     *   SIGSEGV。用 Content-Range 总长度校验本地文件；不匹配则删除从头重下。
+     * - 206：服务端支持 Range，从 [startBytes] 续传；**严格校验 Content-Range 起点**——服务器
+     *   忽略/错发 Range 起点会在 raf.seek 后拼错，必须拒绝。
+     * - 200：不支持 Range，从头重写（先写 .fresh 临时文件、成功后原子替换）。
      * 进度按 [aggregateBefore] + 本文件已写字节累加进总进度 [total]。
      */
     private suspend fun downloadMnnFile(
@@ -209,62 +212,101 @@ class DownloadManager(private val context: Context) {
         aggregateBefore: Long,
         total: Long,
     ): Boolean {
-        val startBytes = if (target.exists()) target.length() else 0L
-        val builder = Request.Builder().url(url).header("User-Agent", "ChatByYourSide/1.0")
-        if (startBytes > 0) builder.header("Range", "bytes=$startBytes-")
-        val call = client.newCall(builder.build())
-        calls[modelId] = call
-        val response = call.execute()
-        try {
-            if (response.code == 416) return true // 文件已完整
-            if (!response.isSuccessful) throw Exception("HTTP ${response.code}") // URL 只进日志，不进用户文案（由 mapper 转中文）
-            val body = response.body ?: throw Exception("响应体为空")
-            val supportRange = response.code == 206
-            val currentStart = if (supportRange) startBytes else 0L
-            // 200（不支持 Range）不能续传：先写临时文件、成功后原子替换正式文件；中途失败时旧分片保留，
-            // 下一个支持 Range 的镜像可继续续传，避免「网络波动后重头下载」。
-            val writeTarget = if (supportRange) target else File(target.parentFile, target.name + FRESH_SUFFIX)
-            writeTarget.parentFile?.mkdirs()
-            val raf = RandomAccessFile(writeTarget, "rw")
+        // 最多两轮：首轮发现本地文件与服务器不一致（416 越界/206 起点不匹配）时删除重下；
+        // 第二轮（start=0）再失败即放弃本文件（返回 false，由调用方换镜像）。
+        repeat(2) { attempt ->
+            val startBytes = if (target.exists()) target.length() else 0L
+            val builder = Request.Builder().url(url).header("User-Agent", "ChatByYourSide/1.0")
+            if (startBytes > 0) builder.header("Range", "bytes=$startBytes-")
+            val call = client.newCall(builder.build())
+            calls[modelId] = call
+            val response = call.execute()
             try {
-                raf.seek(currentStart)
-                val source = body.byteStream()
-                val buffer = ByteArray(CHUNK_SIZE.toInt())
-                var currentBytes = currentStart
-                var lastReport = System.currentTimeMillis()
-                while (true) {
-                    if (!currentCoroutineContext().isActive || pauseFlags[modelId] == true) return false
-                    val read = try {
-                        source.read(buffer)
-                    } catch (e: IOException) {
-                        if (!currentCoroutineContext().isActive) return false
-                        throw e
+                if (response.code == 416) {
+                    // Range 越界：不盲信「文件已完整」。服务端 416 的常见原因 = 本地文件损坏/过长
+                    // （Range/分发错误、磁盘位翻转），放行会拼出「大小对、内容坏」的权重，
+                    // MNN load 时 SIGSEGV。用 Content-Range 总长度校验；拿不到/不匹配则删除重下。
+                    val serverTotal = response.header("Content-Range")
+                        ?.substringAfterLast('/')?.trim()?.toLongOrNull()
+                    if (attempt == 0 && (serverTotal == null || startBytes < serverTotal)) {
+                        Log.w(TAG, "416 与本地长度不匹配（local=$startBytes server=$serverTotal），删除重下")
+                        target.delete()
+                        return@repeat
                     }
-                    if (read <= 0) break
-                    raf.write(buffer, 0, read)
-                    currentBytes += read
-                    val now = System.currentTimeMillis()
-                    if (now - lastReport > 200) {
-                        updateState(modelId, DownloadState.Downloading(aggregateBefore + currentBytes, total))
-                        lastReport = now
+                    return true // 第二轮的 416 或长度一致：确认完整
+                }
+                if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+                val body = response.body ?: throw Exception("响应体为空")
+                val supportRange = response.code == 206
+                if (supportRange) {
+                    // 严格校验 Content-Range 起点：服务器忽略/错发起点会在 raf.seek 后拼错。
+                    val range = response.header("Content-Range")?.trim()
+                    if (attempt == 0 && (range == null || !range.startsWith("bytes $startBytes-"))) {
+                        Log.w(TAG, "206 Content-Range 起点不匹配（期望 start=$startBytes 实际=$range），删除重下")
+                        target.delete()
+                        return@repeat
+                    }
+                    if (attempt > 0 && (range == null || !range.startsWith("bytes 0-"))) {
+                        throw Exception("HTTP 206 起点仍不匹配")
+                    }
+                }
+                val currentStart = if (supportRange) startBytes else 0L
+                // 200（不支持 Range）不能续传：先写临时文件、成功后原子替换正式文件；中途失败时旧分片保留，
+                // 下一个支持 Range 的镜像可继续续传，避免「网络波动后重头下载」。
+                val writeTarget = if (supportRange) target else File(target.parentFile, target.name + FRESH_SUFFIX)
+                writeTarget.parentFile?.mkdirs()
+                val raf = RandomAccessFile(writeTarget, "rw")
+                try {
+                    raf.seek(currentStart)
+                    val source = body.byteStream()
+                    val buffer = ByteArray(CHUNK_SIZE.toInt())
+                    var currentBytes = currentStart
+                    var lastReport = System.currentTimeMillis()
+                    while (true) {
+                        if (!currentCoroutineContext().isActive || pauseFlags[modelId] == true) return false
+                        val read = try {
+                            source.read(buffer)
+                        } catch (e: IOException) {
+                            if (!currentCoroutineContext().isActive) return false
+                            throw e
+                        }
+                        if (read <= 0) break
+                        raf.write(buffer, 0, read)
+                        currentBytes += read
+                        val now = System.currentTimeMillis()
+                        if (now - lastReport > 200) {
+                            updateState(modelId, DownloadState.Downloading(aggregateBefore + currentBytes, total))
+                            lastReport = now
+                        }
+                    }
+                    // 续传必须写满（start + Content-Length）字节；截断也放行 -> 损坏权重。
+                    // Content-Length 未知（-1，chunked 206）时跳过字节级校验，仅靠清单兜底。
+                    val expectedLength = body.contentLength()
+                    if (supportRange && expectedLength >= 0 &&
+                        currentBytes != startBytes + expectedLength
+                    ) {
+                        Log.w(TAG, "206 写入字节不符（expect=${startBytes + expectedLength} actual=$currentBytes），删除重下")
+                        target.delete()
+                        return@repeat
+                    }
+                } finally {
+                    raf.close()
+                }
+                if (writeTarget != target) {
+                    // 临时文件 → 正式文件：同目录 rename 基本必成；失败（跨文件系统/占用）时拷贝兜底。
+                    val replaced = target.delete() && writeTarget.renameTo(target)
+                    if (!replaced) {
+                        writeTarget.copyTo(target, overwrite = true)
+                        writeTarget.delete()
                     }
                 }
             } finally {
-                raf.close()
+                response.close()
+                calls.remove(modelId)
             }
-            if (writeTarget != target) {
-                // 临时文件 → 正式文件：同目录 rename 基本必成；失败（跨文件系统/占用）时拷贝兜底。
-                val replaced = target.delete() && writeTarget.renameTo(target)
-                if (!replaced) {
-                    writeTarget.copyTo(target, overwrite = true)
-                    writeTarget.delete()
-                }
-            }
-        } finally {
-            response.close()
-            calls.remove(modelId)
+            return true
         }
-        return true
+        return false
     }
 
     /** 构造 MNN 单文件的多镜像下载地址。source-major 排序：先 ModelScope（国内，命中 MNN/<id>），
@@ -370,8 +412,8 @@ class DownloadManager(private val context: Context) {
         emptyList()
     }
 
-    /** MNN 下载完成：合并分片 + 校验入口文件 + 标记完成 */
-    private fun finishMnnDownload(model: ModelInfo, dir: File) {
+    /** MNN 下载完成：合并分片 + 校验入口文件 + 写完整性清单 + 标记完成 */
+    private fun finishMnnDownload(model: ModelInfo, dir: File, remoteFiles: List<String>) {
         updateState(model.id, DownloadState.Verifying(0f))
         if (FileSplitter.needsMerging(dir)) {
             updateState(model.id, DownloadState.Verifying(0.3f))
@@ -393,6 +435,15 @@ class DownloadManager(private val context: Context) {
         if (!File(dir, "llm.mnn.weight").exists()) {
             Log.w(TAG, "MNN 模型 ${model.id} 缺 llm.mnn.weight（可能内嵌；若加载崩溃请重新下载）")
         }
+        // 完整性清单：逐文件记录 size + sha256 前缀，加载前对照校验（下载损坏的「大小对、
+        // 内容坏」权重会在 MNN load 时 SIGSEGV，必须在此截图留证并在加载入口拦截）。
+        // 以下载清单的相对路径为 key（与下载循环 File(dir, file) 完全一致），404 跳过的不记录。
+        runCatching {
+            val entry = remoteFiles
+                .filter { rel -> File(dir, rel).exists() }
+                .associate { rel -> rel to ModelDownloadManifest.entryFor(File(dir, rel)) }
+            ModelDownloadManifest.write(dir, ModelDownloadManifest(modelId = model.id, files = entry))
+        }.onFailure { e -> Log.w(TAG, "写入完整性清单失败（不阻断下载）: ${e.message}") }
         updateState(model.id, DownloadState.Completed(config.absolutePath))
     }
 

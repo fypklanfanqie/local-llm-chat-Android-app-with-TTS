@@ -257,9 +257,18 @@ class LocalChatProvider(
 
         // 2a. 模型包完整性校验（Task 12）：config 派生必需文件（graph/weight/tokenizer/...）存在、
         //     非空、非分片、路径不逃逸。校验失败拒绝进入 native（绝不硬编码 verified=true）。
-        val validation = ModelBundleValidator.validate(File(modelPath).parentFile ?: File(modelPath))
+        val modelDir = File(modelPath).parentFile ?: File(modelPath)
+        val validation = ModelBundleValidator.validate(modelDir)
         if (!validation.valid) {
             throw Exception("模型包校验失败：${validation.errors.joinToString("；")}")
+        }
+        // 2b. 下载完整性清单校验（SIGSEGV 防线）：清单存在时逐文件 size+sha256 对照。
+        //     「大小对、内容坏」的权重文件（Range 续传/磁盘错误产物）会在 MNN Llm::load
+        //     反序列化时原生 SIGSEGV，Java 层拦不住——必须在进入 native 前拦截。
+        when (val integrity = com.chatbyyourside.download.ModelDownloadIntegrity.validate(modelDir)) {
+            is com.chatbyyourside.download.ModelDownloadIntegrity.Result.Fail ->
+                throw Exception("模型文件可能已损坏（下载不完整）：${integrity.reason}。请删除模型后重新下载")
+            else -> Unit
         }
 
         // 2. 检查 MNN 引擎 native 就绪（libMNN.so）
