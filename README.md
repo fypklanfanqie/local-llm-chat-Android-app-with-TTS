@@ -258,6 +258,10 @@ com.chatbyyourside/
   Character art (AI-generated) for the 50 original archetypes. Generation prompts are in [`docs/character-art-prompts.md`](docs/character-art-prompts.md).
 - UI 设计预览见 [`docs/preview/`](docs/preview/)。
   UI design mockups are in [`docs/preview/`](docs/preview/).
+  ## 致谢
+> 本软件的不断完善离不开一开始我发抖音 ，b站粉丝群里面各位粉丝朋友的优化建议和新功能提议 ，感谢各位！
+> 他们分别是 咕咕火 id V.I.P_520 白夜执 1185531741 不知道 buzhidao350543 辋川星梦 1023422036 
+
 
 ## 许可 · License
 
