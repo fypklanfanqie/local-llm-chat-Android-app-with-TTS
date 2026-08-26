@@ -185,8 +185,10 @@ fun AffinityEventsScreen(
                         try {
                             event?.let { container.specialEventConversationCoordinator.markRead(it.id) }
                             when (val result = container.specialEventConversationCoordinator.launch(character.id, threshold)) {
-                                is SpecialEventLaunchResult.Ready,
-                                is SpecialEventLaunchResult.Existing,
+                                // 三个成功分支都携带 event；不能合并写——多分支 is 组合不做智能转换，
+                                // result.event 会 Unresolved（编译错）。
+                                is SpecialEventLaunchResult.Ready -> onOpenEventConversation(result.event.conversationId)
+                                is SpecialEventLaunchResult.Existing -> onOpenEventConversation(result.event.conversationId)
                                 is SpecialEventLaunchResult.Rebuilt -> onOpenEventConversation(result.event.conversationId)
                                 SpecialEventLaunchResult.Missing -> launchError = "特殊邂逅不存在或已被移除，请稍后刷新回忆档案。"
                             }
