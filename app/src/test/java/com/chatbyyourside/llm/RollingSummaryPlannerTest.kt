@@ -66,4 +66,43 @@ class RollingSummaryPlannerTest {
         assertEquals(AppConfig.ContextCompression.SUMMARY_MAX_CHARS, clamped.length)
         assertTrue(clamped.endsWith(marker))
     }
+
+    @Test
+    fun betweenFoldsWindowIsAppendOnly() {
+        // 缓存契约仿真（与 performContextFoldLocked 同款循环）：
+        // 稳态期仅尾部追加、水位固定 → 可见窗头部永不滑动（云端前缀缓存复用前提）；
+        // 越过高水位才整批折叠一次，水位推进后与剩余原文严格相接（无空洞、无滑动残留）。
+        var seq = 0L
+        var dbRows = emptyList<RollingSummaryPlanner.SummaryRow>() // 数据库存量行（含已被摘要覆盖的）
+        var watermark = 0L
+        var folds = 0
+        var lastVisibleHeadWhenStable = -1L
+
+        repeat(400) {
+            seq += 1L
+            dbRows = dbRows + RollingSummaryPlanner.SummaryRow(seq, "user", "t$seq")
+            val visible = dbRows.filter { it.id > watermark }
+            if (!RollingSummaryPlanner.shouldFold(visible.size)) {
+                // 稳态：本条只是尾部追加；头部若曾记录过则绝不改变
+                if (lastVisibleHeadWhenStable != -1L) {
+                    assertEquals(lastVisibleHeadWhenStable, visible.first().id)
+                }
+                lastVisibleHeadWhenStable = visible.first().id
+            } else {
+                val batch = RollingSummaryPlanner.selectBatch(visible)!!
+                assertEquals(BATCH_SIZE, batch.size)                       // 整批折叠
+                watermark = batch.last().id
+                // 新窗口与水位严格相接：batch 之后第一条就是新头部
+                assertEquals(watermark + 1, dbRows.first { it.id > watermark }.id)
+                folds++
+                lastVisibleHeadWhenStable = -1L
+            }
+        }
+        // 400 行按可见计数越线（>160 行）：第 161/241/321 行各触发一批，恰好三次
+        assertEquals(3, folds)
+    }
+
+    private companion object {
+        const val BATCH_SIZE = 80
+    }
 }
