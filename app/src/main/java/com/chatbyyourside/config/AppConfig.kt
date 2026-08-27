@@ -44,10 +44,16 @@ object AppConfig {
 
     // ===== 聊天历史 =====
     // 每个会话（conversation）最多保留的消息条数；超出按时间修剪最旧消息。
-    const val MAX_HISTORY_PER_CONVERSATION = 100
+    // 400（原 100）：存储窗口必须 ≥ 请求窗口（MAX_CONTEXT_MESSAGES），否则 DB 先裁剪会让
+    // 请求侧历史提前开始「头部滑动」，云端前缀缓存逐轮全量失效。
+    const val MAX_HISTORY_PER_CONVERSATION = 400
     // 单次请求交给 provider 规划的历史候选上限。云端发送最近 N 条；本地由 PromptWindowPlanner
     // 在候选中保留 system + 最近完整 user/assistant 轮次，预留输出/模板空间，不再依赖模型静默左截断。
-    const val MAX_CONTEXT_MESSAGES = 100
+    // 300（原 100）：滑动窗口一旦触顶，每轮最旧一条被挤掉 → 相邻两次请求第一条 message 不同，
+    // 前缀缓存从第 0 条起全部重算。加大窗口让绝大多数会话保持 append-only（150 轮后才触顶），
+    // 云端 prompt cache 全程复用；DeepSeek/SiliconFlow 缓存命中部分计价约为未命中的 1/10，
+    // 更大且稳定的窗口反而更省。
+    const val MAX_CONTEXT_MESSAGES = 300
 
     // ===== 角色问候（角色主动消息）=====
     // 开启后，所选角色会在白天随机时间主动给用户发消息（早安/晚安/关心/开话题）。

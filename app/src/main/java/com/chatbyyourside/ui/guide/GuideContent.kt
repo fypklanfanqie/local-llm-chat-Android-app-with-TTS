@@ -380,7 +380,7 @@ val GUIDE_TOPICS: List<GuideTopic> = listOf(
             tip("整理", "会话可以重命名、删除；单条消息也能删除。导出见「对话导出」篇。"),
         ),
         experienced = listOf(
-            para("会话按角色隔离（active_conversations 映射当前会话）；单会话历史上限 MAX_HISTORY_PER_CONVERSATION=100 条，超出按时间修剪最旧；PromptWindowPlanner 在候选内保 system + 最近完整轮次。"),
+            para("会话按角色隔离（active_conversations 映射当前会话）；单会话历史上限 MAX_HISTORY_PER_CONVERSATION=400 条，超出按时间修剪最旧；请求侧候选窗口 MAX_CONTEXT_MESSAGES=300 条，PromptWindowPlanner 在候选内保 system + 最近完整轮次。窗口做大是为了云端前缀缓存：触顶后每轮都会从头部丢弃消息，缓存整窗失效。"),
         ),
     ),
     GuideTopic(

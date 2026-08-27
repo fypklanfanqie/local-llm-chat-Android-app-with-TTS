@@ -35,8 +35,13 @@ data class LorebookActivation(
  *
  * 激活流程（设计 D4）：constant 直过 → 主关键词命中 → 次级关键词按逻辑判定 → 概率掷点 →
  * 可选递归轮（已激活 content 并入扫描文本再扫，最多 [MAX_RECURSION_ROUNDS] 轮，尊重
- * preventRecursion / excludeRecursion）→ 预算装配（constant > 高 order > 直接 > 递归；
- * 超限从「递归低 order」起丢，constant 最高 order 永远最后丢）→ 分静态头/动态尾两段拼装。
+ * preventRecursion / excludeRecursion）→ 预算装配 → 分静态头/动态尾两段拼装。
+ *
+ * 预算装配规则唯一（缓存契约）：静态头由 constant 按 order 降序累加（低 order 先丢、保底
+ * 最高 order 一条）**先于**动态命中独立确定——同一份世界书任何输入下 system 头逐字节一致，
+ * 云端前缀缓存 / 本地 KV anchor 不因某轮命中集合的变化而失效；动态命中按 rank 升序 +
+ * 高 order 先保消费「扣除静态头后的剩余预算」。旧实现把两者放进同一条累加序列且以单个
+ * break 截断，一条放不下的低阶常驻会把其后所有动态命中全部饿死。
  *
  * 关键词默认子串忽略大小写；matchWholeWords 用 \b 词界正则，含 CJK 字符的关键词退化为子串
  * （中文无词界，Java 正则 \b 基于 ASCII \w 判定会误判）。
@@ -123,36 +128,44 @@ object LorebookEngine {
             }
         }
 
-        if (hits.isEmpty()) {
-            // 无动态命中但可能有 constant 条目 → 只出静态头
-            val staticOnly = candidates.filter { it.constant }
-                .sortedBy { it.order }
-                .joinToString("") { formatBlock(it) }
-            if (staticOnly.isEmpty()) return empty()
-            val head = STATIC_HEAD + staticOnly
-            return LorebookActivation(head, "", 0, PromptWindowPlanner.estimateTextTokens(head))
-        }
-
-        // 预算装配：rank 升序（constant 最先保）+ order 降序（高 order 先保）。cap<=0 不限。
-        // 注意 constant 也计入预算——极端情况下超预算时 constant 低 order 先丢，最高 order 最后丢。
+        // ===== 预算装配（缓存契约的关键：静态头规则唯一，先于动态命中独立确定）=====
+        // 旧实现把 constant 与动态命中放进同一条累加序列、以单个 break 截断：一条放不下的
+        // 低阶常驻会把其后所有 rank 的命中一起饿死；单条自身超预算的常驻也被静默吞掉。
+        // 现拆成两段：
+        //   1) constant 按 order 降序累加（低 order 先丢）、cap 截断、保底最高一条 —— 输出升序展示；
+        //   2) 动态命中按 rank 升序 + order 降序消费「扣除静态头后的剩余预算」。
+        // 无论本轮命中集合如何，同一份世界书产出的 system 头逐字节一致（前缀缓存锚）。
         val cap = config.budgetCapTokens
-        val ranked = hits.values.sortedWith(compareBy({ it.rank }, { -it.entry.order }))
         var used = 0
-        val kept = ArrayList<Pair<Int, LorebookEntry>>(ranked.size) // rank to entry
-        for (hit in ranked) {
-            val cost = PromptWindowPlanner.estimateTextTokens(formatBlock(hit.entry))
+        val keptStatic = ArrayList<LorebookEntry>()
+        for (e in candidates.filter { it.constant }.sortedByDescending { it.order }) {
+            val cost = PromptWindowPlanner.estimateTextTokens(formatBlock(e))
             if (cap > 0 && used + cost > cap) break
-            kept.add(hit.rank to hit.entry)
+            keptStatic.add(e)
             used += cost
         }
-        if (kept.isEmpty()) return empty()
+        // 保底：单条 constant 自身即超预算时仍保留最高 order 的一条（规则确定，不破坏缓存稳定性；
+        // 否则超大常驻条目会被两条路径同时静默吞掉，用户感知「世界书失效」）。
+        if (keptStatic.isEmpty()) {
+            candidates.filter { it.constant }.maxByOrNull { it.order }?.let {
+                keptStatic.add(it)
+                used += PromptWindowPlanner.estimateTextTokens(formatBlock(it))
+            }
+        }
+        if (keptStatic.isEmpty() && hits.isEmpty()) return empty()
 
-        val staticHead = kept.filter { it.first == RANK_CONSTANT }
-            .map { it.second }
-            .let { assembleStatic(it) }
         // 动态尾：position 语义转为排序权重（BEFORE_CHAR 视为更靠前/弱，其余靠后/强），
         // 组内 order 升序；块间以 position 权重稳定排序保证同轮内确定性。
-        val tailBlocks = kept.filter { it.first != RANK_CONSTANT }
+        val keptDynamic = ArrayList<Pair<Int, LorebookEntry>>()
+        for (hit in hits.values.sortedWith(compareBy({ it.rank }, { -it.entry.order }))) {
+            if (hit.rank == RANK_CONSTANT) continue
+            val cost = PromptWindowPlanner.estimateTextTokens(formatBlock(hit.entry))
+            if (cap > 0 && used + cost > cap) break
+            keptDynamic.add(hit.rank to hit.entry)
+            used += cost
+        }
+        val staticHead = assembleStatic(keptStatic)
+        val tailBlocks = keptDynamic
             .sortedWith(
                 compareBy(
                     { it.second.position.sortWeight() },
@@ -166,7 +179,7 @@ object LorebookEngine {
         return LorebookActivation(
             staticHead = staticHead,
             tailInjection = tailInjection,
-            activatedCount = kept.size,
+            activatedCount = keptStatic.size + keptDynamic.size,
             estimatedTokens = PromptWindowPlanner.estimateTextTokens(totalText),
         )
     }
@@ -177,14 +190,7 @@ object LorebookEngine {
         return STATIC_HEAD + entries.sortedBy { it.order }.joinToString("") { formatBlock(it) }
     }
 
-    /**
-     * 动态尾的落位消息（云端路径用）：调用方插入到消息列表尾部附近。
-     * 本地路径不走此函数——直接取 [LorebookActivation.tailInjection] 并入最新 user 消息。
-     */
-    fun buildTailMessage(activation: LorebookActivation): ChatMessage? =
-        if (activation.tailInjection.isEmpty()) null
-        else ChatMessage(role = "system", content = activation.tailInjection)
-
+    // ===== 匹配 =====
     // ===== 匹配 =====
 
     /** 主关键词任一命中 + 次级关键词按 logic 判定；次级为空时四种逻辑均直过。 */

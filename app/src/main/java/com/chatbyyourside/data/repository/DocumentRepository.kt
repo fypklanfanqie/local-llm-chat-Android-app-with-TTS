@@ -108,20 +108,36 @@ class DocumentRepository(
     /**
      * 直连提取文档文字。按扩展名分支：
      * PDF -> 渲染页送多模态模型；纯文本 -> 直接读；图片 -> 多模态 OCR；Office -> 报错。
+     *
+     * 进程内记忆化：PDF/图片文字由多模态 LLM 生成，同一条附件每轮请求都重提的话输出天然
+     * 非确定（措辞/换行漂移），历史中该条 user 消息逐轮变化，直接击穿云端前缀缓存，且每轮
+     * 白烧一次多模态调用。同一 (uri, 文件名) 命中备忘则原样复用上一次成功结果，保证逐字节
+     * 稳定。仅缓存成功且非空的结果——失败不缓存，瞬时错误可重试。
      */
+    private val extractionMemo = object : LinkedHashMap<String, String>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>): Boolean =
+            size > MAX_MEMO_ENTRIES
+    }
+
     suspend fun extractDocumentText(
         context: Context,
         uri: String,
         fileName: String,
         cfg: ApiConfig,
     ): String = withContext(Dispatchers.IO) {
+        val key = "$uri|$fileName"
+        synchronized(extractionMemo) { extractionMemo[key] }?.let { return@withContext it }
         val ext = fileName.substringAfterLast('.', "").lowercase()
-        when {
+        val result = when {
             ext == "pdf" -> extractPdfText(context, uri, cfg)
             isImageExt(ext) -> extractImageText(context, uri, cfg)
             isTextExt(ext) -> readTextFile(context, uri)
             else -> throw Exception("暂不支持 .$ext 文档直连解析，请转为 PDF 后上传")
         }
+        if (result.isNotBlank()) {
+            synchronized(extractionMemo) { extractionMemo[key] = result }
+        }
+        result
     }
 
     private fun isTextExt(ext: String): Boolean = ext in TEXT_EXTENSIONS
@@ -251,6 +267,9 @@ class DocumentRepository(
     companion object {
         /** PDF 提取页数上限（控制请求体积与成本） */
         private const val MAX_PDF_PAGES = 6
+
+        /** 提取结果备忘条数上限（LRU）：会话内同时带附件的消息有限，32 条足够覆盖窗口。 */
+        private const val MAX_MEMO_ENTRIES = 32
 
         /** 纯文本附件读取上限（字节）：超过截断。 */
         private const val MAX_TEXT_BYTES = 2L * 1024 * 1024

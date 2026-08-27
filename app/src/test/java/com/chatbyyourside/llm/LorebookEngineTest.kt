@@ -10,7 +10,6 @@ import com.chatbyyourside.data.model.LorebookSecondaryLogic
 import com.chatbyyourside.data.model.matchesScope
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -390,13 +389,31 @@ class LorebookEngineTest {
         assertTrue(a.staticHead.isNotEmpty())
     }
 
+    /**
+     * 回归测试（云端缓存命中率）：旧实现把 constant 与动态命中放进同一条累加序列、单个 break
+     * 截断——一条放不下的低阶常驻会把其后所有动态命中全部饿死。契约：
+     * 1) 静态头先于动态命中独立确定，与命中集合无关 → 两种扫描输入下 staticHead 逐字节一致；
+     * 2) 动态命中使用「扣除静态头后的剩余预算」，不再被截断点之后的常驻饿死；
+     * 3) 统一施加预算截断（低 order 常驻先丢）。
+     */
     @Test
-    fun buildTailMessageCarriesTailText() {
-        val act = LorebookActivation(staticHead = "", tailInjection = "动态内容", activatedCount = 1, estimatedTokens = 4)
-        val m = LorebookEngine.buildTailMessage(act)
-        assertEquals("system", m?.role)
-        assertEquals("动态内容", m?.content)
-        assertNull(LorebookEngine.buildTailMessage(LorebookActivation("", "", 0, 0)))
+    fun staticHeadStableAcrossHitAndNoHitWhenBudgetExceeded() {
+        val b = book(
+            entry(constant = true, content = "常驻甲 " + "字".repeat(60), order = 30),
+            entry(constant = true, content = "常驻乙 " + "字".repeat(60), order = 20),
+            entry(constant = true, content = "常驻丙 " + "字".repeat(60), order = 10),
+            entry(keys = listOf("蟹堡王"), content = "动态条目"),
+        )
+        // 每块约 70 token：cap=160 装得下两条 constant（140）+ 动态块（~11），第三条 constant 溢出
+        val cfg = config.copy(budgetCapTokens = 160)
+        val noHit = LorebookEngine.activate(listOf(b), cfg, listOf(msg("今天聊聊别的")))
+        val hit = LorebookEngine.activate(listOf(b), cfg, listOf(msg("去蟹堡王上班")))
+        assertEquals(noHit.staticHead, hit.staticHead) // 核心：有/无命中头部逐字节一致
+        assertTrue(noHit.staticHead.contains("常驻甲")) // 高 order 先保
+        assertTrue(noHit.staticHead.contains("常驻乙"))
+        assertFalse(noHit.staticHead.contains("常驻丙")) // 低 order 被统一预算截断
+        assertTrue(hit.tailInjection.contains("动态条目"))
+        assertTrue(noHit.tailInjection.isEmpty())
     }
 
     // ===== 作用域 =====
