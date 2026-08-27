@@ -112,10 +112,16 @@ object AppConfig {
 
     // ===== 云端滚动摘要（上下文压缩）=====
     object ContextCompression {
-        // 高水位：未摘要原文行数超过该值即触发折叠。200 行 ≈ 100 个对话回合。
-        const val HIGH_WATER_ROWS = 200
-        // 单批折叠的最旧行数：折完保证仍留 ~100 行原文衔接上文。约每 50 回合发生一次前缀变化。
-        const val FOLD_BATCH_ROWS = 100
+        // 折叠间隔（对话回合数）：每隔 N 回合执行一次折叠。用户可调，默认 50。
+        const val DEFAULT_FOLD_INTERVAL_ROUNDS = 50
+        const val MIN_FOLD_INTERVAL_ROUNDS = 10
+        const val MAX_FOLD_INTERVAL_ROUNDS = 90 // 受 DB 存储上限约束：触发水位=批量×2 必须 < 400 行
+
+        // ——以下由折叠间隔派生，保留历史常量名供旧调用点/测试复用（默认间隔下的取值）——
+        /** 单批折叠的最旧行数：1 回合 ≈ 2 行。 */
+        const val FOLD_BATCH_ROWS = DEFAULT_FOLD_INTERVAL_ROUNDS * 2
+        /** 触发水位：未摘要原文行数超过该值即折叠。 */
+        const val HIGH_WATER_ROWS = FOLD_BATCH_ROWS * 2
         // 摘要正文字符上限。
         const val SUMMARY_MAX_CHARS = 300
         // 摘要生成调用超时；失败静默放弃，下个阈值自然重试。

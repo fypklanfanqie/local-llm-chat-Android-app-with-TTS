@@ -16,14 +16,28 @@ object RollingSummaryPlanner {
     /** 待折叠源行：id 为 chat_history 主键，role 仅 user/assistant。 */
     data class SummaryRow(val id: Long, val role: String, val text: String)
 
-    fun shouldFold(rowsBeyondWatermark: Int): Boolean =
-        rowsBeyondWatermark > AppConfig.ContextCompression.HIGH_WATER_ROWS
+    fun shouldFold(
+        rowsBeyondWatermark: Int,
+        highWaterRows: Int = AppConfig.ContextCompression.HIGH_WATER_ROWS,
+    ): Boolean = rowsBeyondWatermark > highWaterRows
 
     /** 取最旧一批（升序传入时天然保序）；未超高水位返回 null 表示无需折叠。 */
-    fun selectBatch(rows: List<SummaryRow>): List<SummaryRow>? {
-        if (!shouldFold(rows.size)) return null
-        return rows.take(AppConfig.ContextCompression.FOLD_BATCH_ROWS)
+    fun selectBatch(
+        rows: List<SummaryRow>,
+        batchSize: Int = AppConfig.ContextCompression.FOLD_BATCH_ROWS,
+    ): List<SummaryRow>? {
+        if (rows.size <= batchSize * 2) return null
+        return rows.take(batchSize)
     }
+
+    // ===== 折叠间隔 → 水位/批量 派生（用户可调间隔时使用）=====
+
+    /** 把用户设定的折叠间隔（回合数）钳位到合法区间，返回单批折叠行数。 */
+    fun batchRowsFor(intervalRounds: Int): Int =
+        intervalRounds.coerceIn(AppConfig.ContextCompression.MIN_FOLD_INTERVAL_ROUNDS, AppConfig.ContextCompression.MAX_FOLD_INTERVAL_ROUNDS) * 2
+
+    /** 由批量行数派生触发水位（批量的两倍：折完留足一整批原文衔接）。 */
+    fun highWaterRowsFor(batchRows: Int): Int = batchRows * 2
 
     /** 批次转写成带角色标注的时间线文本，交给摘要模型阅读。 */
     fun renderFoldedTranscript(batch: List<SummaryRow>): String = buildString {

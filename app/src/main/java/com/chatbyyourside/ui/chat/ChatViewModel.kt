@@ -1317,11 +1317,15 @@ class ChatViewModel(
                     text = MarkdownParser.stripThink(it.content),
                 )
             }
-        if (!RollingSummaryPlanner.shouldFold(rows.size)) return
-        val batch = RollingSummaryPlanner.selectBatch(rows) ?: return
+        // 用户可调折叠间隔（回合）→ 批量/水位行数按需派生
+        val intervalRounds = container.settingsRepository.getCloudFoldIntervalRoundsNow()
+        val batchRows = RollingSummaryPlanner.batchRowsFor(intervalRounds)
+        val highRows = RollingSummaryPlanner.highWaterRowsFor(batchRows)
+        if (!RollingSummaryPlanner.shouldFold(rows.size, highRows)) return
+        val batch = RollingSummaryPlanner.selectBatch(rows, batchRows) ?: return
         val apiConfig = container.settingsRepository.getApiConfigNow()
 
-        Log.i(TAG, "滚动摘要折叠触发：watermark=$watermark batch=${batch.size} rows")
+        Log.i(TAG, "滚动摘要折叠触发：interval=${intervalRounds}轮 watermark=$watermark batch=$batchRows rows")
         val summary = withTimeoutOrNull(AppConfig.ContextCompression.SUMMARY_TIMEOUT_MS) {
             container.directLlmClient.chatOnce(
                 baseUrl = apiConfig.baseUrl,

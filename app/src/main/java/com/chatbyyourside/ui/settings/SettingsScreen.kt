@@ -128,6 +128,8 @@ fun SettingsScreen(
     // 云端生成参数（仅云端 AI 生效；留空/关闭=跟模型商默认值）。本地推理有自己的 LLM 参数页。
     val cloudMaxTokens by container.settingsRepository.cloudMaxTokens.collectAsState(initial = null)
     val cloudTemperature by container.settingsRepository.cloudTemperature.collectAsState(initial = null)
+    val foldIntervalRounds by container.settingsRepository.cloudFoldIntervalRounds
+        .collectAsState(initial = AppConfig.ContextCompression.DEFAULT_FOLD_INTERVAL_ROUNDS)
     var cloudMaxTokensText by remember(cloudMaxTokens) {
         mutableStateOf(cloudMaxTokens?.toString().orEmpty())
     }
@@ -135,6 +137,7 @@ fun SettingsScreen(
     var tempValue by remember(cloudTemperature) {
         mutableStateOf((cloudTemperature ?: 0.8f).coerceIn(0f, 1.5f))
     }
+    var foldIntervalText by remember(foldIntervalRounds) { mutableStateOf(foldIntervalRounds.toString()) }
     var genParamsSaved by remember { mutableStateOf(false) }
     LaunchedEffect(genParamsSaved) {
         if (genParamsSaved) { delay(2000); genParamsSaved = false }
@@ -388,6 +391,19 @@ fun SettingsScreen(
                     "越高越有创造性、也越容易跑偏；角色扮演建议 0.7~0.9。区间 0~1.5。",
                     color = scheme.onSurfaceVariant, fontSize = 10.sp,
                 )
+                FieldLabel("上下文压缩：每 N 轮折叠一次")
+                GlassInputField(
+                    value = foldIntervalText,
+                    onValueChange = { foldIntervalText = it.filter { c -> c.isDigit() }.take(3) },
+                    placeholder = AppConfig.ContextCompression.DEFAULT_FOLD_INTERVAL_ROUNDS.toString(),
+                )
+                Text(
+                    "每隔这么多回合，把最旧的对话压成一段「前情提要」。" +
+                        "默认 ${AppConfig.ContextCompression.DEFAULT_FOLD_INTERVAL_ROUNDS}；" +
+                        "范围 ${AppConfig.ContextCompression.MIN_FOLD_INTERVAL_ROUNDS}~${AppConfig.ContextCompression.MAX_FOLD_INTERVAL_ROUNDS}" +
+                        "（上限受历史存储约束）。留空恢复默认。",
+                    color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                )
                 SaveButton(
                     text = "保存生成参数",
                     saved = genParamsSaved,
@@ -399,6 +415,9 @@ fun SettingsScreen(
                             container.settingsRepository.setCloudTemperature(
                                 if (tempCustomEnabled) Math.round(tempValue * 100) / 100f else null,
                             )
+                            val parsedInterval = foldIntervalText.toIntOrNull()
+                                ?: AppConfig.ContextCompression.DEFAULT_FOLD_INTERVAL_ROUNDS
+                            container.settingsRepository.setCloudFoldIntervalRounds(parsedInterval)
                             genParamsSaved = true
                         }
                     },

@@ -121,6 +121,8 @@ class SettingsStore(
         // 云端生成参数（仅云端聊天生效）：单次回复上限与温度；键不存在=未设置→不发送该参数
         val CLOUD_MAX_TOKENS = intPreferencesKey("cloud_max_tokens")
         val CLOUD_TEMPERATURE = floatPreferencesKey("cloud_temperature")
+        // 滚动摘要折叠间隔（对话回合数）；键不存在=使用 AppConfig 默认 50
+        val CLOUD_FOLD_INTERVAL_ROUNDS = intPreferencesKey("cloud_fold_interval_rounds")
         // 本地思考档位（默认 AUTO，仅本地生效）：开启深度思考后决定思考强度；云端不读取本键
         val THINKING_LEVEL = stringPreferencesKey(LocalInferenceSettings.THINKING_LEVEL_KEY)
         // 性能监控浮窗液态玻璃效果开关（默认开）：backdrop blur + 镜面高光 + 旋转虹彩光晕；关闭则用普通深色面板
@@ -709,6 +711,17 @@ class SettingsStore(
     suspend fun setCloudTemperature(value: Float?) {
         dataStore.edit { p ->
             if (value != null) p[Keys.CLOUD_TEMPERATURE] = value else p.remove(Keys.CLOUD_TEMPERATURE)
+        }
+    }
+
+    /** 滚动摘要折叠间隔（回合数）；null=未设置（读侧回落默认 50）。 */
+    val cloudFoldIntervalRounds: Flow<Int?> = dataStore.data.map { p ->
+        p[Keys.CLOUD_FOLD_INTERVAL_ROUNDS]
+    }
+
+    suspend fun setCloudFoldIntervalRounds(value: Int) {
+        dataStore.edit { p ->
+            p[Keys.CLOUD_FOLD_INTERVAL_ROUNDS] = value
         }
     }
 

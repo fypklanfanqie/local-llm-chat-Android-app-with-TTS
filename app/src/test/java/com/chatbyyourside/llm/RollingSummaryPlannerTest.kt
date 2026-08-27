@@ -23,6 +23,20 @@ class RollingSummaryPlannerTest {
     }
 
     @Test
+    fun foldIntervalDerivationClampsAndDoubles() {
+        val range = AppConfig.ContextCompression
+        // 回合→行：×2；越界钳位到 [MIN, MAX]
+        assertEquals(60, RollingSummaryPlanner.batchRowsFor(30))
+        assertEquals(range.MIN_FOLD_INTERVAL_ROUNDS * 2, RollingSummaryPlanner.batchRowsFor(1))
+        assertEquals(range.MAX_FOLD_INTERVAL_ROUNDS * 2, RollingSummaryPlanner.batchRowsFor(10_000))
+        // 水位=批量的两倍（折完留足一整批原文）
+        assertEquals(
+            RollingSummaryPlanner.batchRowsFor(50) * 2,
+            RollingSummaryPlanner.highWaterRowsFor(RollingSummaryPlanner.batchRowsFor(50)),
+        )
+    }
+
+    @Test
     fun selectBatchRequiresOverHighWaterAndKeepsOrder() {
         val high = AppConfig.ContextCompression.HIGH_WATER_ROWS
         val batchRows = AppConfig.ContextCompression.FOLD_BATCH_ROWS

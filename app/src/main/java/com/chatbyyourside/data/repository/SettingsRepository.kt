@@ -24,6 +24,7 @@ import com.chatbyyourside.llm.profile.InferencePerformanceMode
 import com.chatbyyourside.llm.thinking.LocalThinkingLevel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -94,6 +95,10 @@ class SettingsRepository(private val store: SettingsStore) {
     val cloudMaxTokens: Flow<Int?> = store.cloudMaxTokens
     /** 云端聊天温度；null=未设置 → 请求不携带。仅云端聊天读取。 */
     val cloudTemperature: Flow<Float?> = store.cloudTemperature
+    /** 滚动摘要折叠间隔（回合数）；null=未设置 → 读侧回落默认 50 并钳位到合法区间。 */
+    val cloudFoldIntervalRounds: Flow<Int> = store.cloudFoldIntervalRounds.map { stored ->
+        stored ?: AppConfig.ContextCompression.DEFAULT_FOLD_INTERVAL_ROUNDS
+    }.map { it.coerceIn(AppConfig.ContextCompression.MIN_FOLD_INTERVAL_ROUNDS, AppConfig.ContextCompression.MAX_FOLD_INTERVAL_ROUNDS) }
     /** 本地思考档位（默认 AUTO，仅本地生效）；云端不读取。 */
     val localThinkingLevel: Flow<LocalThinkingLevel> = store.localThinkingLevel
     /** 性能浮窗液态玻璃开关（默认开）。 */
@@ -302,6 +307,15 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun setCloudMaxTokens(value: Int?) = store.setCloudMaxTokens(value)
 
     suspend fun setCloudTemperature(value: Float?) = store.setCloudTemperature(value)
+
+    suspend fun getCloudFoldIntervalRoundsNow(): Int = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        cloudFoldIntervalRounds.first()
+    } ?: AppConfig.ContextCompression.DEFAULT_FOLD_INTERVAL_ROUNDS
+
+    suspend fun setCloudFoldIntervalRounds(rounds: Int) =
+        store.setCloudFoldIntervalRounds(
+            rounds.coerceIn(AppConfig.ContextCompression.MIN_FOLD_INTERVAL_ROUNDS, AppConfig.ContextCompression.MAX_FOLD_INTERVAL_ROUNDS),
+        )
 
     /** 同步获取活跃角色（5s 超时回退默认角色），供 CharacterRepository 使用 */
     suspend fun getActiveCharacterNow(): String = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
