@@ -9,6 +9,9 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 
+/** 会话滚动摘要快照：[text] 为前情提要正文（空串=尚无），[upToMessageId] 为已覆盖的最大消息行 id。 */
+data class ConversationSummaryState(val text: String, val upToMessageId: Long)
+
 /**
  * 会话仓库
  * 管理角色的会话列表（新建 / 删除 / 重命名 / 切换），消息历史见 [ChatRepository]。
@@ -71,6 +74,21 @@ class ConversationRepository(private val dao: ConversationDao) {
     /** 更新群封面（null=清除）并刷新 updatedAt。 */
     suspend fun setGroupCover(id: Long, coverPath: String?) {
         dao.updateGroupCover(id, coverPath, System.currentTimeMillis())
+    }
+
+    // ===== 滚动摘要（云端上下文压缩）=====
+
+    suspend fun updateSummary(conversationId: Long, summaryText: String, upToMessageId: Long) {
+        dao.updateSummary(conversationId, summaryText, upToMessageId)
+    }
+
+    /**
+     * 读取摘要状态（正文 + 水位）。注意 [getById] 返回的领域模型不带这两列，
+     * 发送侧请走本方法；会话不存在时返回零值（等同尚无摘要）。
+     */
+    suspend fun getSummaryState(conversationId: Long): ConversationSummaryState {
+        val e = dao.getById(conversationId) ?: return ConversationSummaryState("", 0L)
+        return ConversationSummaryState(e.summaryText, e.summarizedUpToMessageId)
     }
 
     /** 开启/关闭该会话的 Seedance 自动视频（新会话默认关闭；旧库行迁移后同为关闭）。 */

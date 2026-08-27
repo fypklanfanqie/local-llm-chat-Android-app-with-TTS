@@ -44,6 +44,17 @@ data class ConversationEntity(
      * 多群聊（v7）引入：一个群 = 一行带 isGroup=1 的 conversation，可设名称（title）与封面。
      */
     val coverImagePath: String? = null,
+    /**
+     * 滚动摘要正文（云端上下文压缩）：已被总结覆盖的最旧对话的脉络概要，
+     * 发送时注入在人设 system 之后作为第二级缓存锚。
+     * v8->v9 迁移新增列，旧行默认空串。
+     */
+    val summaryText: String = "",
+    /**
+     * 已被 [summaryText] 覆盖的最大 chat_history.id；发送侧仅取 id 大于该值的原文进 payload。
+     * v8->v9 迁移新增列，旧行默认 0（= 尚无摘要）。
+     */
+    val summarizedUpToMessageId: Long = 0L,
 )
 
 /**
@@ -100,6 +111,16 @@ interface ChatDao {
     /** 导出使用：按时间正序读取该会话全部仍保存在数据库中的消息，不受 UI 历史窗口限制。 */
     @Query("SELECT * FROM chat_history WHERE conversationId = :conversationId ORDER BY timestamp ASC")
     suspend fun getAllHistoryList(conversationId: Long): List<ChatHistoryEntity>
+
+    /**
+     * 水位之后的现存原文（滚动摘要用）：仅取 id 大于 [afterId] 的行，按 id 升序。
+     * 天然排除 DB 裁剪/删除掉的行；量级受 MAX_HISTORY_PER_CONVERSATION 兜底约束。
+     */
+    @Query(
+        "SELECT * FROM chat_history WHERE conversationId = :conversationId AND id > :afterId " +
+            "ORDER BY id ASC"
+    )
+    suspend fun listAfterWatermark(conversationId: Long, afterId: Long): List<ChatHistoryEntity>
 
     /** DAO 层事件判定；会话/消息的删除与裁剪都必须依赖此查询。 */
     @Query("SELECT EXISTS(SELECT 1 FROM special_event WHERE conversationId = :conversationId)")
@@ -213,6 +234,13 @@ interface ConversationDao {
     @Query("UPDATE conversation SET coverImagePath = :coverPath, updatedAt = :updatedAt WHERE id = :id")
     suspend fun updateGroupCover(id: Long, coverPath: String?, updatedAt: Long)
 
+    /** 写回滚动摘要及其水位（云端上下文压缩）。 */
+    @Query(
+        "UPDATE conversation SET summaryText = :summaryText, " +
+            "summarizedUpToMessageId = :summarizedUpToMessageId WHERE id = :id"
+    )
+    suspend fun updateSummary(id: Long, summaryText: String, summarizedUpToMessageId: Long)
+
     @Query("SELECT COUNT(*) FROM conversation WHERE characterId = :characterId")
     suspend fun count(characterId: String): Int
 
@@ -266,7 +294,7 @@ interface ConversationDao {
         AffinityRewardEntity::class,
         SpecialEventScriptEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -489,6 +517,17 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v8->v9：会话表新增滚动摘要两列。纯加列非破坏迁移，旧行取默认值
+         * （summaryText=''、summarizedUpToMessageId=0 → 功能从零开始累积）。
+         */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE `conversation` ADD COLUMN `summaryText` TEXT NOT NULL DEFAULT ''")
+                database.execSQL("ALTER TABLE `conversation` ADD COLUMN `summarizedUpToMessageId` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 // 双重检查锁定：避免两个并发首次调用各建一个 RoomDatabase 实例，
@@ -497,7 +536,7 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "rhodes_chat.db"
-                ).addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9).build().also { INSTANCE = it }
             }
         }
     }
