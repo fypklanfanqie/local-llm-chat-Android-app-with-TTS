@@ -13,6 +13,7 @@ import com.chatbyyourside.conversationexport.ConversationExportDocument
 import com.chatbyyourside.data.model.matchesScope
 import com.chatbyyourside.data.model.*
 import com.chatbyyourside.data.remote.ChatMessageDto
+import com.chatbyyourside.data.remote.CloudUsageStats
 import com.chatbyyourside.data.repository.AutoVideoOutboxDraft
 import com.chatbyyourside.data.repository.ChatCompletionRepository
 import com.chatbyyourside.data.repository.ConversationRepository
@@ -1120,7 +1121,17 @@ class ChatViewModel(
                 // Task 7：只有 finally 的 generationId 等于当前 activeGenerationId 才清理，
                 // 防止旧请求迟到的 finally 抹掉新一轮请求的状态（切会话/发新消息后）。
                 // 性能浮窗：写入终态日志（完成/出错/已停止），停生成后速率归零。
-                container.performanceCollector.updateLog(termReason)
+                // 云端回合把 DeepSeek/OpenAI 端点回报的缓存命中并进同一行（DirectLlmClient 每次云端
+                // 响应捕获 lastCloudUsage；流式中途停止则可能拿到上一轮的值，展示近似值可接受）。
+                // 本地回合不读取，避免把上一次云端的陈旧统计贴到本地推理的终态后面。
+                val cloudUsage = container.directLlmClient.lastCloudUsage
+                    ?.takeIf { it.hasCacheInfo }
+                    ?.takeIf { container.chatProviderManager.getActiveProvider() !is LocalChatProvider }
+                val logLine = if (cloudUsage != null) {
+                    val ratio = cloudUsage.hitRatio()?.let { "（${(it * 100).toInt()}%）" }.orEmpty()
+                    "$termReason｜缓存 ${cloudUsage.cacheHitTokens}/${cloudUsage.promptTokens ?: "?"} tok$ratio"
+                } else termReason
+                container.performanceCollector.updateLog(logLine)
                 container.performanceCollector.updateTokenRate(0f)
                 if (_uiState.value.activeGenerationId == generationId) {
                     _uiState.update { s ->

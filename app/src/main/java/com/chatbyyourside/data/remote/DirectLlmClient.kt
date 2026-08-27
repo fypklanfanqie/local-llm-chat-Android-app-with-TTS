@@ -1,5 +1,6 @@
 package com.chatbyyourside.data.remote
 
+import android.util.Log
 import com.chatbyyourside.config.normalizeBaseUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,12 +19,14 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.util.Locale
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -35,6 +38,32 @@ data class ChatMessageDto(
     val role: String,
     val content: kotlinx.serialization.json.JsonElement,
 )
+
+/**
+ * 云端响应的用量与缓存命中统计。各家字段名不同，取到哪个算哪个：
+ * - DeepSeek：usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens（自动缓存，无需开关）
+ * - OpenAI 兼容系（Qwen/SiliconFlow/GPT 等）：usage.prompt_tokens_details.cached_tokens
+ *   （流式需 stream_options.include_usage，见 [DirectLlmClient.supportsStreamUsage] 白名单）
+ * - Anthropic 官方：usage.cache_read_input_tokens（需请求侧显式 cache_control 标记才产生命中）
+ *
+ * [cacheHitTokens] 为 null 表示该端点未回报缓存信息——无法区分「没打缓存」与「不支持回报」。
+ */
+data class CloudUsageStats(
+    val promptTokens: Int?,
+    val completionTokens: Int?,
+    val cacheHitTokens: Int?,
+    val cacheMissTokens: Int?,
+) {
+    val hasCacheInfo: Boolean get() = cacheHitTokens != null
+
+    /** 缓存命中率（0..1）；无分母或无信息时 null。 */
+    fun hitRatio(): Float? {
+        val hit = cacheHitTokens ?: return null
+        val total = promptTokens ?: return null
+        if (total <= 0) return null
+        return hit.toFloat() / total
+    }
+}
 
 /**
  * 直连对话商 OpenAI 兼容 API 客户端（不经任何服务器代理）。
@@ -54,6 +83,71 @@ class DirectLlmClient(
     },
 ) {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+
+    private companion object {
+        const val TAG = "DirectLlm"
+    }
+
+    /** 最近一次云端响应的用量/缓存命中统计（流式与非流式路径均捕获）；本地推理不更新。 */
+    @Volatile
+    var lastCloudUsage: CloudUsageStats? = null
+        private set
+
+    /**
+     * 白名单：流式注入 stream_options.include_usage（OpenAI 兼容系）。
+     * 仅对已知支持该参数的供应商注入，避免未知端点 400（与 supportsJsonObjectResponse 同哲学）。
+     */
+    private fun supportsStreamUsage(baseUrl: String, model: String): Boolean {
+        val b = baseUrl.lowercase()
+        val m = model.lowercase()
+        return b.contains("deepseek") || b.contains("api.openai.com") ||
+            b.contains("dashscope") || b.contains("siliconflow") ||
+            m.startsWith("gpt-") || m.startsWith("deepseek-") ||
+            m.startsWith("qwen") || m.startsWith("qwq")
+    }
+
+    /** 是否官方 Anthropic 端点：仅官方域注入 cache_control（第三方中转网关未必兼容块状 system）。 */
+    internal fun isOfficialAnthropic(baseUrl: String): Boolean =
+        normalizeBaseUrl(baseUrl).lowercase().contains("api.anthropic.com")
+
+    /**
+     * 从一条响应/SSE 负载 JSON 中提取用量与缓存命中字段并记录。兼容三种形态：
+     * DeepSeek（prompt_cache_hit/miss_tokens）、OpenAI 系（prompt_tokens_details.cached_tokens）、
+     * Anthropic（message.usage.cache_read_input_tokens，出自 message_start 事件）。
+     * 负载不含 usage 字段时直接返回、不覆盖旧值。
+     */
+    private fun captureCloudUsage(data: String) {
+        if (!data.contains("\"usage\"")) return
+        val stats = runCatching { parseCloudUsageJson(data) }.getOrNull() ?: return
+        lastCloudUsage = stats
+        val ratioText = stats.hitRatio()?.let { String.format(Locale.US, " 命中率=%.0f%%", it * 100) }.orEmpty()
+        Log.i(
+            TAG,
+            "云端用量 prompt=${stats.promptTokens} completion=${stats.completionTokens}" +
+                " 缓存命中=${stats.cacheHitTokens ?: "-"} miss=${stats.cacheMissTokens ?: "-"}$ratioText",
+        )
+    }
+
+    /** 解析 JSON 文本中的 usage 对象；无 usage 时返回 null。internal 便于单测覆盖各家字段形态。 */
+    internal fun parseCloudUsageJson(data: String): CloudUsageStats? {
+        val obj = json.parseToJsonElement(data).jsonObject
+        val usage = obj["usage"]?.jsonObject
+            // Anthropic message_start：{"type":"message_start","message":{...,"usage":{...}}}
+            ?: (obj["message"] as? JsonObject)?.get("usage")?.jsonObject
+            ?: return null
+        fun intOf(key: String): Int? =
+            (usage[key] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
+        val cachedFromDetails = (usage["prompt_tokens_details"] as? JsonObject)
+            ?.get("cached_tokens")?.let { (it as? JsonPrimitive)?.contentOrNull?.toIntOrNull() }
+        return CloudUsageStats(
+            promptTokens = intOf("prompt_tokens") ?: intOf("input_tokens"),
+            completionTokens = intOf("completion_tokens") ?: intOf("output_tokens"),
+            cacheHitTokens = intOf("prompt_cache_hit_tokens")
+                ?: cachedFromDetails
+                ?: intOf("cache_read_input_tokens"),
+            cacheMissTokens = intOf("prompt_cache_miss_tokens"),
+        )
+    }
 
     /** SSE 流式对话。onChunk 收到累积文本，返回完整文本。
      *  deepThinking=true 时解析 reasoning_content 并以 <think>...</think> 注入累积文本（复用本地思考展示），
@@ -132,6 +226,7 @@ class DirectLlmClient(
                 call.execute().use { response ->
                     val raw = response.body?.string().orEmpty()
                     if (!response.isSuccessful) throw Exception(parseError(response.code, raw))
+                    captureCloudUsage(raw)
                     parseFullContent(raw)
                 }
             } catch (e: IOException) {
@@ -176,6 +271,7 @@ class DirectLlmClient(
                         val data = line.substringAfter("data:").trim()
                         if (data == "[DONE]") break
                         val (content, reasoning) = parseDelta(data)
+                        captureCloudUsage(data)
                         if (!reasoning.isNullOrEmpty() && deepThinking) reasoningBuf.append(reasoning)
                         if (!content.isNullOrEmpty()) {
                             contentStarted = true
@@ -186,6 +282,7 @@ class DirectLlmClient(
                 } else {
                     // 个别供应商忽略 stream:true，返回整段 JSON
                     val raw = body.string()
+                    captureCloudUsage(raw)
                     val content = parseFullContent(raw)
                     if (content.isNotEmpty()) {
                         contentStarted = true
@@ -246,6 +343,10 @@ class DirectLlmClient(
                 }
             })
             put("stream", stream)
+            // 用量回报：白名单供应商流式显式索要最终 usage 块（含缓存命中字段），供命中率观测
+            if (stream && supportsStreamUsage(baseUrl, model)) {
+                put("stream_options", buildJsonObject { put("include_usage", true) })
+            }
             // 深度思考：对支持开关的供应商注入 enable_thinking（开=请求思考，关=显式停止）
             if (supportsThinkingToggle(baseUrl, model)) {
                 put("enable_thinking", deepThinking)
@@ -398,6 +499,7 @@ class DirectLlmClient(
         messages: List<ChatMessageDto>,
         stream: Boolean,
         maxTokens: Int,
+        baseUrl: String = "",
     ): String {
         val system = messages.filter { it.role == "system" }
             .joinToString("\n") { anthropicTextOf(it.content) }
@@ -410,7 +512,22 @@ class DirectLlmClient(
         return buildJsonObject {
             put("model", model.trim())
             put("max_tokens", maxTokens)
-            if (system.isNotBlank()) put("system", system)
+            if (system.isNotBlank()) {
+                // Anthropic 不像 DeepSeek 那样自动缓存，必须显式打 cache_control 才建立前缀缓存。
+                // 仅对官方域注入（块状 system），第三方中转网关可能只接受字符串 system 保持原样。
+                // 标记在 system 上即把「人设+世界书静态头」整段稳定前缀纳入缓存，正是最长命中区。
+                if (isOfficialAnthropic(baseUrl)) {
+                    put("system", buildJsonArray {
+                        add(buildJsonObject {
+                            put("type", "text")
+                            put("text", system)
+                            putJsonObject("cache_control") { put("type", "ephemeral") }
+                        })
+                    })
+                } else {
+                    put("system", system)
+                }
+            }
             put("messages", buildJsonArray { apiMessages.forEach { add(it) } })
             put("stream", stream)
         }.toString()
@@ -470,7 +587,7 @@ class DirectLlmClient(
         val request = buildAnthropicRequest(
             endpoint = buildAnthropicEndpoint(baseUrl),
             apiKey = apiKey,
-            body = buildAnthropicBody(model, messages, stream = true, maxTokens = ANTHROPIC_MAX_TOKENS),
+            body = buildAnthropicBody(model, messages, stream = true, maxTokens = ANTHROPIC_MAX_TOKENS, baseUrl = baseUrl),
             accept = "text/event-stream",
         )
         return executeAnthropicStreaming(request, onChunk, onCall)
@@ -504,6 +621,7 @@ class DirectLlmClient(
                         val data = line.substringAfter("data:").trim()
                         if (data == "[DONE]") break
                         val text = parseAnthropicDelta(data)
+                        captureCloudUsage(data)
                         if (!text.isNullOrEmpty()) contentBuf.append(text)
                         onChunk(contentBuf.toString())
                         if (isAnthropicStop(data)) break
@@ -511,6 +629,7 @@ class DirectLlmClient(
                 } else {
                     // 个别供应商忽略 stream:true，返回整段 JSON
                     val raw = body.string()
+                    captureCloudUsage(raw)
                     val content = parseAnthropicContent(raw)
                     if (content.isNotEmpty()) {
                         contentBuf.append(content)
@@ -537,7 +656,7 @@ class DirectLlmClient(
         val request = buildAnthropicRequest(
             endpoint = buildAnthropicEndpoint(baseUrl),
             apiKey = apiKey,
-            body = buildAnthropicBody(model, messages, stream = false, maxTokens = ANTHROPIC_MAX_TOKENS),
+            body = buildAnthropicBody(model, messages, stream = false, maxTokens = ANTHROPIC_MAX_TOKENS, baseUrl = baseUrl),
             accept = null,
         )
         val call = client.newCall(request)
@@ -546,6 +665,7 @@ class DirectLlmClient(
             call.execute().use { response ->
                 val raw = response.body?.string().orEmpty()
                 if (!response.isSuccessful) throw Exception(parseError(response.code, raw))
+                captureCloudUsage(raw)
                 parseAnthropicContent(raw)
             }
         } catch (e: IOException) {
