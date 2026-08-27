@@ -867,7 +867,14 @@ class ChatViewModel(
                 }
 
                 // 构建 API 消息（含图片多模态 / 文档文本提取）
-                val history = container.chatRepository.getHistory(convId).takeLast(AppConfig.MAX_CONTEXT_MESSAGES)
+                // 滚动摘要：读取水位与旧摘要（零值=尚无），只把未被摘要覆盖的原文送进请求。
+                // 两次折叠之间此列表纯追加 → 云端前缀缓存全程命中。
+                val summaryState = container.conversationRepository.getSummaryState(convId)
+                val summaryText = summaryState.text
+                val summaryWatermark = summaryState.upToMessageId
+                val history = container.chatRepository.getHistory(convId)
+                    .filter { it.databaseId != null && it.databaseId > summaryWatermark }
+                    .takeLast(AppConfig.MAX_CONTEXT_MESSAGES)
                 val resolvedHistory = history.map { msg ->
                     if (msg.role == "user" && (msg.images.isNotEmpty() || msg.files.isNotEmpty())) {
                         // 仅本次发送的消息严格解析（可操作错误照常上抛让用户看到）；
@@ -924,6 +931,20 @@ class ChatViewModel(
                     // 静态世界书头（constant 条目）拼进 system 最前：内容只随条目编辑变化，
                     // 与对话轮次无关 → system 链逐字节稳定 → 本地 anchor / 云端前缀缓存全程复用
                     add(ChatMessage(role = "system", content = lorebookStaticHead + char.systemPrompt + eventDirective + worldviewDirective + userDirective))
+                    // 滚动摘要锚：【前情提要】紧随静态 system，只在高水位折叠时变一次——
+                    // 变化前历史纯追加、缓存全程命中；Anthropic 端点合并 system 时自然纳入其
+                    // cache_control 保护的前缀区。特殊邂逅可能在上方已把 Provider 切到云端，
+                    // 故读最终生效值而非发送起点的 isCloudProvider 快照。
+                    if (summaryText.isNotBlank() &&
+                        container.chatProviderManager.getActiveProvider() !is LocalChatProvider
+                    ) {
+                        add(
+                            ChatMessage(
+                                role = "system",
+                                content = "【前情提要】以下是此前对话的脉络概要，请在回应中保持连贯：\n$summaryText",
+                            )
+                        )
+                    }
                     addAll(resolvedHistory.map {
                         if (isCloudProvider) {
                             // 云端历史含 <think>（注入的推理），回传前剥离（reasoning 不应回传给对话商）。
