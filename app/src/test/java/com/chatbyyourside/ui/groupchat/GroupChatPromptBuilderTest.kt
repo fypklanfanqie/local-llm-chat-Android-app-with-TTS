@@ -2,6 +2,7 @@ package com.chatbyyourside.ui.groupchat
 
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.ChatMessage
+import com.chatbyyourside.ui.groupchat.GroupChatPromptBuilder.SpeakerResponseParse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -29,8 +30,8 @@ class GroupChatPromptBuilderTest {
 
         assertTrue("A 完整人设在场", s.contains("char-a-persona"))
         assertTrue("声明以 A 身份发言", s.contains("小明"))
-        // 其他成员降级为只读参考，且显式禁止代替其说话
-        assertTrue("禁止代替他人", s.contains("不得代替") || s.contains("不要代替") || s.contains("禁止代替"))
+        // 其他成员降级为只读参考，且显式禁止代替其说话（现行文案：「你绝不能代替他们说话」等）
+        assertTrue("禁止代替他人", s.contains("不得代替") || s.contains("不要代替") || s.contains("禁止代替") || s.contains("绝不能代替"))
         assertFalse(
             "旧版「回应/吐槽其他成员」歧义文案应移除",
             s.contains("吐槽其他成员"),
