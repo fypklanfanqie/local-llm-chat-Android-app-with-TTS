@@ -24,13 +24,15 @@ class RollingSummaryPlannerTest {
 
     @Test
     fun selectBatchRequiresOverHighWaterAndKeepsOrder() {
-        assertNull(RollingSummaryPlanner.selectBatch(List(160) { row(it.toLong()) })) // 未超高水位不折
-        val rows = List(181) { row(it.toLong()) }
+        val high = AppConfig.ContextCompression.HIGH_WATER_ROWS
+        val batchRows = AppConfig.ContextCompression.FOLD_BATCH_ROWS
+        assertNull(RollingSummaryPlanner.selectBatch(List(high) { row(it.toLong()) })) // 未超高水位不折
+        val rows = List(high + 21) { row(it.toLong()) }
         val batch = RollingSummaryPlanner.selectBatch(rows)!!
-        assertEquals(80, batch.size)
-        assertEquals(0L, batch.first().id)   // 最旧 80 行
-        assertEquals(79L, batch.last().id)
-        assertEquals((0..79).map { it.toLong() }, batch.map { it.id }) // 升序不乱
+        assertEquals(batchRows, batch.size)
+        assertEquals(0L, batch.first().id)   // 最旧一批行
+        assertEquals((batchRows - 1).toLong(), batch.last().id)
+        assertEquals((0 until batchRows).map { it.toLong() }, batch.map { it.id }) // 升序不乱
     }
 
     @Test
@@ -90,7 +92,7 @@ class RollingSummaryPlannerTest {
                 lastVisibleHeadWhenStable = visible.first().id
             } else {
                 val batch = RollingSummaryPlanner.selectBatch(visible)!!
-                assertEquals(BATCH_SIZE, batch.size)                       // 整批折叠
+                assertEquals(AppConfig.ContextCompression.FOLD_BATCH_ROWS, batch.size) // 整批折叠
                 watermark = batch.last().id
                 // 新窗口与水位严格相接：batch 之后第一条就是新头部
                 assertEquals(watermark + 1, dbRows.first { it.id > watermark }.id)
@@ -98,11 +100,19 @@ class RollingSummaryPlannerTest {
                 lastVisibleHeadWhenStable = -1L
             }
         }
-        // 400 行按可见计数越线（>160 行）：第 161/241/321 行各触发一批，恰好三次
-        assertEquals(3, folds)
+        // 折叠次数按水位/批次解析推导：首折在第 H+1 行，之后每隔 B 行再折
+        val high = AppConfig.ContextCompression.HIGH_WATER_ROWS
+        val batchRows = AppConfig.ContextCompression.FOLD_BATCH_ROWS
+        var expectedFolds = 0
+        var next = high + 1L
+        while (next <= 400L) {
+            expectedFolds++
+            next += batchRows
+        }
+        assertEquals(expectedFolds, folds)
     }
 
     private companion object {
-        const val BATCH_SIZE = 80
+        const val TOTAL_ITERS = 400
     }
 }
