@@ -118,6 +118,9 @@ class SettingsStore(
         val LLM_LOOKAHEAD = booleanPreferencesKey(LocalInferenceSettings.LOOKAHEAD_KEY)
         // 深度思考模式开关（本地 + 云端通用）：控制推理过程是否生成与展示
         val DEEP_THINKING = booleanPreferencesKey(LocalInferenceSettings.DEEP_THINKING_KEY)
+        // 云端生成参数（仅云端聊天生效）：单次回复上限与温度；键不存在=未设置→不发送该参数
+        val CLOUD_MAX_TOKENS = intPreferencesKey("cloud_max_tokens")
+        val CLOUD_TEMPERATURE = floatPreferencesKey("cloud_temperature")
         // 本地思考档位（默认 AUTO，仅本地生效）：开启深度思考后决定思考强度；云端不读取本键
         val THINKING_LEVEL = stringPreferencesKey(LocalInferenceSettings.THINKING_LEVEL_KEY)
         // 性能监控浮窗液态玻璃效果开关（默认开）：backdrop blur + 镜面高光 + 旋转虹彩光晕；关闭则用普通深色面板
@@ -684,6 +687,29 @@ class SettingsStore(
 
     suspend fun setDeepThinking(enabled: Boolean) {
         dataStore.edit { it[Keys.DEEP_THINKING] = enabled }
+    }
+
+    // ===== 云端生成参数（仅云端聊天生效）=====
+    /** 云端单次回复上限 max_tokens；null=未设置 → 请求不携带该参数，由模型商默认值决定。 */
+    val cloudMaxTokens: Flow<Int?> = dataStore.data.map { p ->
+        p[Keys.CLOUD_MAX_TOKENS]
+    }
+
+    suspend fun setCloudMaxTokens(value: Int?) {
+        dataStore.edit { p ->
+            if (value != null) p[Keys.CLOUD_MAX_TOKENS] = value else p.remove(Keys.CLOUD_MAX_TOKENS)
+        }
+    }
+
+    /** 云端聊天温度 temperature；null=未设置 → 请求不携带该参数。 */
+    val cloudTemperature: Flow<Float?> = dataStore.data.map { p ->
+        p[Keys.CLOUD_TEMPERATURE]
+    }
+
+    suspend fun setCloudTemperature(value: Float?) {
+        dataStore.edit { p ->
+            if (value != null) p[Keys.CLOUD_TEMPERATURE] = value else p.remove(Keys.CLOUD_TEMPERATURE)
+        }
     }
 
     // ===== 本地思考档位（仅本地生效，默认 AUTO）=====

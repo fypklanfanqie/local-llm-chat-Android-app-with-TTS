@@ -56,6 +56,10 @@ class CloudChatProvider(
             )
         }
 
+        // 云端生成参数（仅用户显式设置时下发；null=跟模型商默认值）。
+        val maxTokens = settings.getCloudMaxTokensNow()
+        val temperature = settings.getCloudTemperatureNow()
+
         val content = client.chatStream(
             baseUrl = apiConfig.baseUrl,
             apiKey = apiConfig.apiKey,
@@ -64,6 +68,8 @@ class CloudChatProvider(
             onChunk = onChunk,
             onCall = { activeCall = it },
             deepThinking = settings.getDeepThinkingNow(),
+            temperature = temperature?.let { Math.round(it * 100) / 100.0 },
+            maxTokens = maxTokens?.takeIf { it > 0 },
         )
         if (content.isBlank()) throw Exception("API 返回空内容")
         return content

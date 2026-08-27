@@ -125,6 +125,21 @@ fun SettingsScreen(
     // 「免费对话」供应商选择时的免费提示弹窗。
     var showFreeNotice by remember { mutableStateOf(false) }
 
+    // 云端生成参数（仅云端 AI 生效；留空/关闭=跟模型商默认值）。本地推理有自己的 LLM 参数页。
+    val cloudMaxTokens by container.settingsRepository.cloudMaxTokens.collectAsState(initial = null)
+    val cloudTemperature by container.settingsRepository.cloudTemperature.collectAsState(initial = null)
+    var cloudMaxTokensText by remember(cloudMaxTokens) {
+        mutableStateOf(cloudMaxTokens?.toString().orEmpty())
+    }
+    var tempCustomEnabled by remember(cloudTemperature) { mutableStateOf(cloudTemperature != null) }
+    var tempValue by remember(cloudTemperature) {
+        mutableStateOf((cloudTemperature ?: 0.8f).coerceIn(0f, 1.5f))
+    }
+    var genParamsSaved by remember { mutableStateOf(false) }
+    LaunchedEffect(genParamsSaved) {
+        if (genParamsSaved) { delay(2000); genParamsSaved = false }
+    }
+
     var customBaseUrl by remember(apiConfig) { mutableStateOf(apiConfig.baseUrl) }
     var customModel by remember(apiConfig) { mutableStateOf(apiConfig.model) }
 
@@ -339,6 +354,56 @@ fun SettingsScreen(
                     TextButton(onClick = { showFreeNotice = false }) { Text("知道了") }
                 },
             )
+        }
+
+        // ===== 云端生成参数（仅云端 AI 生效）=====
+        CollapsibleSection(title = "生成参数（仅云端 AI）", key = "gen_params", initiallyExpanded = false) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                FieldLabel("单次回复上限 max_tokens")
+                GlassInputField(
+                    value = cloudMaxTokensText,
+                    onValueChange = { cloudMaxTokensText = it.filter { c -> c.isDigit() }.take(6) },
+                    placeholder = "留空使用模型商默认",
+                )
+                Text(
+                    "限制模型单次回复的最大 token 数，防止单条回复过长；留空则由模型商决定。",
+                    color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (tempCustomEnabled) String.format(java.util.Locale.US, "温度 %.2f", tempValue)
+                        else "温度：跟随模型商默认",
+                        color = scheme.onSurface, fontSize = 12.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(checked = tempCustomEnabled, onCheckedChange = { tempCustomEnabled = it })
+                }
+                Slider(
+                    enabled = tempCustomEnabled,
+                    value = tempValue,
+                    onValueChange = { tempValue = it },
+                    valueRange = 0f..1.5f,
+                )
+                Text(
+                    "越高越有创造性、也越容易跑偏；角色扮演建议 0.7~0.9。区间 0~1.5。",
+                    color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                )
+                SaveButton(
+                    text = "保存生成参数",
+                    saved = genParamsSaved,
+                    onClick = {
+                        scope.launch {
+                            container.settingsRepository.setCloudMaxTokens(
+                                cloudMaxTokensText.toIntOrNull()?.takeIf { it > 0 },
+                            )
+                            container.settingsRepository.setCloudTemperature(
+                                if (tempCustomEnabled) Math.round(tempValue * 100) / 100f else null,
+                            )
+                            genParamsSaved = true
+                        }
+                    },
+                )
+            }
         }
 
         // ===== 对话 =====

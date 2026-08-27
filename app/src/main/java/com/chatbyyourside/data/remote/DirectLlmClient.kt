@@ -160,17 +160,27 @@ class DirectLlmClient(
         onChunk: (String) -> Unit,
         onCall: ((Call) -> Unit)? = null,
         deepThinking: Boolean = false,
+        temperature: Double? = null,
+        maxTokens: Int? = null,
     ): String = withContext(Dispatchers.IO) {
         // Anthropic 格式：/v1/messages + x-api-key 头 + content_block_delta 流式；
         // 其余端点一律 OpenAI 兼容格式。base 先归一化，剥离粘贴/输入法污染的尾 scheme 残渣。
         val base = normalizeBaseUrl(baseUrl)
         if (isAnthropicEndpoint(base)) {
-            anthropicChatStream(base, apiKey, model, messages, onChunk, onCall)
+            anthropicChatStream(base, apiKey, model, messages, onChunk, onCall, temperature, maxTokens)
         } else {
             val request = buildRequest(
                 endpoint = buildEndpoint(base),
                 apiKey = apiKey,
-                body = buildBody(model, messages, stream = true, baseUrl = base, deepThinking = deepThinking),
+                body = buildBody(
+                    model = model,
+                    messages = messages,
+                    stream = true,
+                    baseUrl = base,
+                    deepThinking = deepThinking,
+                    temperature = temperature,
+                    maxTokens = maxTokens,
+                ),
                 accept = "text/event-stream",
             )
             executeStreaming(request, onChunk, onCall, deepThinking)
@@ -330,6 +340,8 @@ class DirectLlmClient(
         baseUrl: String,
         deepThinking: Boolean,
         responseFormatJson: Boolean = false,
+        temperature: Double? = null,
+        maxTokens: Int? = null,
     ): String {
         val obj = buildJsonObject {
             // trim：粘贴带入的首尾空白会让模型名不匹配被上游拒 400。
@@ -343,6 +355,9 @@ class DirectLlmClient(
                 }
             })
             put("stream", stream)
+            // 生成参数：仅用户显式设置时注入（null=跟模型商默认），避免未知端点 400
+            temperature?.let { put("temperature", it) }
+            maxTokens?.let { put("max_tokens", it) }
             // 用量回报：白名单供应商流式显式索要最终 usage 块（含缓存命中字段），供命中率观测
             if (stream && supportsStreamUsage(baseUrl, model)) {
                 put("stream_options", buildJsonObject { put("include_usage", true) })
@@ -500,6 +515,7 @@ class DirectLlmClient(
         stream: Boolean,
         maxTokens: Int,
         baseUrl: String = "",
+        temperature: Double? = null,
     ): String {
         val system = messages.filter { it.role == "system" }
             .joinToString("\n") { anthropicTextOf(it.content) }
@@ -512,6 +528,7 @@ class DirectLlmClient(
         return buildJsonObject {
             put("model", model.trim())
             put("max_tokens", maxTokens)
+            temperature?.let { put("temperature", it) }
             if (system.isNotBlank()) {
                 // Anthropic 不像 DeepSeek 那样自动缓存，必须显式打 cache_control 才建立前缀缓存。
                 // 仅对官方域注入（块状 system），第三方中转网关可能只接受字符串 system 保持原样。
@@ -583,11 +600,20 @@ class DirectLlmClient(
         messages: List<ChatMessageDto>,
         onChunk: (String) -> Unit,
         onCall: ((Call) -> Unit)?,
+        temperature: Double? = null,
+        maxTokensOverride: Int? = null,
     ): String {
         val request = buildAnthropicRequest(
             endpoint = buildAnthropicEndpoint(baseUrl),
             apiKey = apiKey,
-            body = buildAnthropicBody(model, messages, stream = true, maxTokens = ANTHROPIC_MAX_TOKENS, baseUrl = baseUrl),
+            body = buildAnthropicBody(
+                model = model,
+                messages = messages,
+                stream = true,
+                maxTokens = maxTokensOverride ?: ANTHROPIC_MAX_TOKENS,
+                baseUrl = baseUrl,
+                temperature = temperature?.coerceIn(0.0, 1.0),
+            ),
             accept = "text/event-stream",
         )
         return executeAnthropicStreaming(request, onChunk, onCall)

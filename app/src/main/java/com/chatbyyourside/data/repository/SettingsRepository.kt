@@ -90,6 +90,10 @@ class SettingsRepository(private val store: SettingsStore) {
     val llmLookahead: Flow<Boolean> = store.llmLookahead
     /** 深度思考模式开关（本地 + 云端通用）。 */
     val deepThinking: Flow<Boolean> = store.deepThinking
+    /** 云端单次回复上限（max_tokens）；null=未设置 → 请求不携带。仅云端聊天读取。 */
+    val cloudMaxTokens: Flow<Int?> = store.cloudMaxTokens
+    /** 云端聊天温度；null=未设置 → 请求不携带。仅云端聊天读取。 */
+    val cloudTemperature: Flow<Float?> = store.cloudTemperature
     /** 本地思考档位（默认 AUTO，仅本地生效）；云端不读取。 */
     val localThinkingLevel: Flow<LocalThinkingLevel> = store.localThinkingLevel
     /** 性能浮窗液态玻璃开关（默认开）。 */
@@ -286,6 +290,18 @@ class SettingsRepository(private val store: SettingsStore) {
     suspend fun getDeepThinkingNow(): Boolean = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         deepThinking.first()
     } ?: false
+
+    suspend fun getCloudMaxTokensNow(): Int? = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        cloudMaxTokens.first()
+    }
+
+    suspend fun getCloudTemperatureNow(): Float? = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
+        cloudTemperature.first()
+    }
+
+    suspend fun setCloudMaxTokens(value: Int?) = store.setCloudMaxTokens(value)
+
+    suspend fun setCloudTemperature(value: Float?) = store.setCloudTemperature(value)
 
     /** 同步获取活跃角色（5s 超时回退默认角色），供 CharacterRepository 使用 */
     suspend fun getActiveCharacterNow(): String = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
