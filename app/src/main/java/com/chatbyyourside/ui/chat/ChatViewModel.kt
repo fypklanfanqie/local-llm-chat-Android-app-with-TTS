@@ -21,6 +21,10 @@ import com.chatbyyourside.llm.LorebookEngine
 import com.chatbyyourside.provider.local.LocalChatProvider
 import com.chatbyyourside.util.MarkdownParser
 import com.chatbyyourside.util.UserFacingErrorMapper.userFacingError
+import com.chatbyyourside.llm.RollingSummaryPlanner
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -79,6 +83,9 @@ class ChatViewModel(
 
     /** 生成请求自增序号（Task 7）：与 uiState.activeGenerationId 配对，防止迟到 finally 串台。 */
     private var generationCounter = 0L
+
+    /** 滚动摘要折叠互斥：全局串行——折叠本身低频（约每 40 回合一次），简单串行足够。 */
+    private val contextFoldMutex = Mutex()
 
     /** 当前生成已累积的原始流式文本（Task 7）：用户显式停止/云端 IOException 时用于保留部分输出。 */
     @Volatile
@@ -1273,6 +1280,65 @@ class ChatViewModel(
         if (runCatching { container.settingsRepository.getTtsAutoReadNow() }.getOrDefault(false)) {
             autoReadAssistant(assistantDisplay)
         }
+
+        // 滚动摘要：成功落库与用户停止保留两种终态都会经过这里；统一在此检查水位。
+        // 仅在回复落库完成后触发，绝不在发送关键路径上；失败静默放弃、下个阈值重试。
+        scheduleContextFold(convId)
+    }
+
+    /**
+     * 回复落库后调用：水位达标则后台折叠最旧一批进摘要。
+     * 任何失败静默放弃（Log.w），下一阈值自然重试，不影响当轮已完成的对话。
+     */
+    private fun scheduleContextFold(convId: Long) {
+        viewModelScope.launch {
+            try {
+                contextFoldMutex.withLock { performContextFoldLocked(convId) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "滚动摘要折叠放弃（下轮阈值重试）: ${e.message}")
+            }
+        }
+    }
+
+    /** 调用方须已持有 [contextFoldMutex]。 */
+    private suspend fun performContextFoldLocked(convId: Long) {
+        // 本地推理回合不折：摘要是云端缓存产物，本地路径不消费它。
+        if (container.chatProviderManager.getActiveProvider() is LocalChatProvider) return
+        val summaryState = container.conversationRepository.getSummaryState(convId)
+        val watermark = summaryState.upToMessageId
+        val rows = container.database.chatDao()
+            .listAfterWatermark(convId, watermark)
+            .map {
+                RollingSummaryPlanner.SummaryRow(
+                    id = it.id,
+                    role = it.role,
+                    text = MarkdownParser.stripThink(it.content),
+                )
+            }
+        if (!RollingSummaryPlanner.shouldFold(rows.size)) return
+        val batch = RollingSummaryPlanner.selectBatch(rows) ?: return
+        val apiConfig = container.settingsRepository.getApiConfigNow()
+
+        Log.i(TAG, "滚动摘要折叠触发：watermark=$watermark batch=${batch.size} rows")
+        val summary = withTimeoutOrNull(AppConfig.ContextCompression.SUMMARY_TIMEOUT_MS) {
+            container.directLlmClient.chatOnce(
+                baseUrl = apiConfig.baseUrl,
+                apiKey = apiConfig.apiKey,
+                model = apiConfig.model,
+                messages = RollingSummaryPlanner.buildSummaryMessages(
+                    oldSummary = summaryState.text,
+                    transcript = RollingSummaryPlanner.renderFoldedTranscript(batch),
+                ),
+            )
+        }?.let { RollingSummaryPlanner.clampSummary(MarkdownParser.stripThink(it)) }
+        if (summary.isNullOrBlank()) {
+            Log.w(TAG, "滚动摘要生成失败/超时，跳过本次折叠")
+            return
+        }
+        container.conversationRepository.updateSummary(convId, summary, batch.last().id)
+        Log.i(TAG, "滚动摘要已写回：upTo=${batch.last().id} chars=${summary.length}")
     }
 
     /**
