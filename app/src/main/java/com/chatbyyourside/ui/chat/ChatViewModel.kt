@@ -89,20 +89,26 @@ class ChatViewModel(
     init {
         // 监听活跃角色变化：加载角色信息。
         // 只绑定 activeCharacter（不绑会话映射），避免 setActiveConversation 触发重复 loadCharacter / 重播语音。
+        // distinctUntilChanged 必须保留：Preferences DataStore 在「任意键」变化时都会重发整个快照，
+        // 裸收集会把同值发射误判成角色切换——历史上本地推理完成时刻的 ack 写盘曾因此取消正在
+        // 运行的生成 Job，导致回复落库前被整体清除（输出完毕瞬间消失）。
         viewModelScope.launch {
             try {
-                container.settingsRepository.activeCharacter.collect { charId ->
-                    streamingJob?.cancel()
-                    container.chatProviderManager.cancelAll()
-                    pendingFinal = null
-                    loadCharacter(charId)
-                }
+                container.settingsRepository.activeCharacter
+                    .distinctUntilChanged()
+                    .collect { charId ->
+                        streamingJob?.cancel()
+                        container.chatProviderManager.cancelAll()
+                        pendingFinal = null
+                        loadCharacter(charId)
+                    }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
                 Log.e(TAG, "activeCharacter flow 异常", e)
                 _uiState.update { it.copy(errorMessage = "角色数据加载失败：" + userFacingError(e, "请稍后重试"), showWelcome = false) }
             }
         }
+
         // 我的形象（设置「我的形象」）：用户头像 -> 用户气泡显示。
         viewModelScope.launch {
             try {
@@ -933,22 +939,21 @@ class ChatViewModel(
                         }
                     })
                 }.toMutableList()
-                // 世界书动态命中注入：按最终实际生效的 Provider 分流（特殊邂逅场景可能在上方把本地切到云端）。
-                // - 云端：尾部插一条 system（位于倒数第 2 条附近，贴近对话、强度高，且不触碰长头部缓存）
-                // - 本地：并入最新 user 消息头部——PromptWindowPlanner 只保留首条 system + 完整 user/assistant
-                //   轮次，中途 system 会被静默丢弃；user 是本地路径唯一可靠的动态载体
+                // 世界书动态命中注入：统一并入最新 user 消息头部（本地/云端同构）。
+                // - 本地：PromptWindowPlanner 只保留首条 system + 完整 user/assistant 轮次，中途
+                //   system 会被静默丢弃；user 是本地路径唯一可靠的动态载体。
+                // - 云端：动态内容若作为独立 system 消息插在消息序列中，OpenAI 兼容端点会把它
+                //   落在历史中段、Anthropic 端点更会把所有 system 合并进最前端 system 字段——
+                //   命中集合的任何轮次变化都会从中段甚至头部打破前缀缓存。并入 user 后变化只
+                //   影响最后一条消息，system 长头部与全部历史照常命中。
                 if (hasLorebookTail) {
-                    if (container.chatProviderManager.getActiveProvider() !is LocalChatProvider) {
-                        apiMessages.add(apiMessages.size - 1, ChatMessage(role = "system", content = lorebookTailText))
-                    } else {
-                        val lastIdx = apiMessages.indexOfLast { it.role == "user" }
-                        if (lastIdx > 0) {
-                            apiMessages[lastIdx] = apiMessages[lastIdx].copy(
-                                content = "$lorebookTailText\n\n" + apiMessages[lastIdx].content,
-                                // 动态前缀会破坏 KV 前缀解释：显式清空 modelContent 让 Planner 回退 content
-                                modelContent = null,
-                            )
-                        }
+                    val lastIdx = apiMessages.indexOfLast { it.role == "user" }
+                    if (lastIdx > 0) {
+                        apiMessages[lastIdx] = apiMessages[lastIdx].copy(
+                            content = "$lorebookTailText\n\n" + apiMessages[lastIdx].content,
+                            // 动态前缀会破坏 KV 前缀解释：显式清空 modelContent 让 Planner 回退 content
+                            modelContent = null,
+                        )
                     }
                 }
 

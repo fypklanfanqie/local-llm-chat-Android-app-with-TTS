@@ -994,8 +994,19 @@ class SettingsStore(
      * 在一次成功推理后把"本次生效的"用户配置写回 last_applied，使 [llmConfigChanged] 归 false。
      * 传用户设定值（[com.chatbyyourside.data.repository.SettingsRepository.llmThreads] 对应的值），
      * 非 effective threads。单次 edit 事务保证原子性。
+     *
+     * 幂等短路：值未变化时不触碰偏好文件。Preferences DataStore 的任何 edit 都会让 `data` 重发
+     * 整个快照（即使值相同），而历史上本地推理每轮完成时刻的无条件写盘曾触发上游裸收集方
+     * （ChatViewModel.activeCharacter）取消正在运行的生成 Job，导致回复在落库前被整体清除。
      */
     suspend fun acknowledgeLlmConfig(threads: Int, contextLen: Int, backend: BackendPreference, lookahead: Boolean, temperature: Float) {
+        val cur = dataStore.data.first()
+        if (cur[Keys.LLM_LAST_THREADS] == threads &&
+            cur[Keys.LLM_LAST_CONTEXT_LEN] == contextLen &&
+            cur[Keys.LLM_LAST_BACKEND] == backend.storageKey &&
+            cur[Keys.LLM_LAST_LOOKAHEAD] == lookahead &&
+            cur[Keys.LLM_LAST_TEMPERATURE] == temperature
+        ) return
         dataStore.edit { p ->
             p[Keys.LLM_LAST_THREADS] = threads
             p[Keys.LLM_LAST_CONTEXT_LEN] = contextLen
@@ -1010,7 +1021,9 @@ class SettingsStore(
         p[Keys.LLM_LAST_CONFIG_HASH]
     }
 
+    /** 仅在哈希真正变化时写盘（同 [acknowledgeLlmConfig] 的幂等短路理由）。 */
     suspend fun setLlmLastConfigHash(hash: String?) {
+        if (dataStore.data.first()[Keys.LLM_LAST_CONFIG_HASH] == hash) return
         dataStore.edit { p ->
             if (hash != null) p[Keys.LLM_LAST_CONFIG_HASH] = hash else p.remove(Keys.LLM_LAST_CONFIG_HASH)
         }
