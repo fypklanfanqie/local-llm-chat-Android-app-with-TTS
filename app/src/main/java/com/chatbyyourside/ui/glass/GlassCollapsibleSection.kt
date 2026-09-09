@@ -31,10 +31,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.text.font.FontWeight
 import com.chatbyyourside.ui.theme.GlassShapes
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 /**
  * 可折叠分组：标题行（点击切换）+ 旋转箭头 + 弹性展开的内容玻璃卡。
@@ -45,12 +47,15 @@ import androidx.compose.ui.unit.dp
  * @param keepContent true 时折叠仅隐藏不销毁内容组合（animateContentSize 方案），
  *   保住未保存的草稿态（TTS / API / 我的形象等表单分区用）；false 用 AnimatedVisibility，省内存。
  * @param headerExtra 标题行右侧额外槽（如条数徽标、行内开关），不参与点击切换。
+ * @param summary 标题下的一行状态摘要（如「未配置生图 API」「累计 1.2K tokens」），
+ *   折叠态也能一眼看到分区现状；null 不渲染。
  */
 @Composable
 fun CollapsibleSection(
     title: String,
     modifier: Modifier = Modifier,
     key: String? = null,
+    summary: String? = null,
     initiallyExpanded: Boolean = true,
     keepContent: Boolean = false,
     headerExtra: (@Composable RowScope.() -> Unit)? = null,
@@ -81,13 +86,25 @@ fun CollapsibleSection(
                 .padding(start = 20.dp, top = 14.dp, bottom = 8.dp, end = 20.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = title,
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.labelMedium,
-                color = scheme.onSurfaceVariant,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = scheme.onSurfaceVariant,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                if (summary != null) {
+                    Text(
+                        text = summary,
+                        color = scheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                        lineHeight = 14.sp,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp).alpha(0.75f),
+                    )
+                }
+            }
             if (headerExtra != null) {
                 headerExtra()
             }

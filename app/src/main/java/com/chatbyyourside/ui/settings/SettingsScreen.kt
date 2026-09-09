@@ -1,5 +1,9 @@
 package com.chatbyyourside.ui.settings
 
+import com.chatbyyourside.config.isFreeProxyBaseUrl
+import com.chatbyyourside.data.model.TokenUsageSnapshot
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,6 +15,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Alarm
+import androidx.compose.material.icons.filled.BatteryAlert
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Window
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -448,6 +459,9 @@ fun SettingsScreen(
 
         GreetingSection(container = container, scope = scope)
         GroupChatSection(container = container, scope = scope)
+        // 朋友圈（角色自动发圈 + 生图 API）与云端 Token 用量统计
+        MomentsSection(container = container, scope = scope)
+        TokenUsageSection(container = container)
         UserProfileSection(container = container, scope = scope)
         ChatBackgroundSection(container = container, scope = scope)
         StorageSection(container = container, scope = scope)
@@ -926,8 +940,11 @@ private fun PasswordField(
                 visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
                 cursorBrush = androidx.compose.ui.graphics.SolidColor(scheme.primary),
             )
-            TextButton(onClick = onToggle) {
-                Text(if (show) "🙈" else "👁", fontSize = 16.sp)
+            IconButton(onClick = onToggle) {
+                Icon(
+                    imageVector = if (show) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                    contentDescription = if (show) "隐藏密钥" else "显示密钥",
+                )
             }
         }
     }
@@ -1087,9 +1104,10 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
     val enabled by settings.greetingEnabled.collectAsState(initial = false)
     val charIds by settings.greetingCharacterIds.collectAsState(initial = emptySet())
     val dailyCount by settings.greetingDailyCount.collectAsState(initial = AppConfig.Greeting.DEFAULT_DAILY_COUNT)
-    val provider by settings.activeProvider.collectAsState(initial = ChatProviderType.CLOUD)
+    // 云端辅助功能与聊天 Provider 切换解耦：只看是否配置过云端 API
+    val apiCfg by settings.apiConfig.collectAsState(initial = ApiConfig())
+    val cloudReady = apiCfg.apiKey.isNotBlank() || isFreeProxyBaseUrl(apiCfg.baseUrl)
     val characters by container.characterRepository.characters.collectAsState(initial = emptyList())
-    val isCloud = provider == ChatProviderType.CLOUD
 
     var showCharPicker by remember { mutableStateOf(false) }
     var sliderValue by remember(dailyCount) { mutableStateOf(dailyCount.toFloat()) }
@@ -1137,16 +1155,16 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
     CollapsibleSection(title = "角色问候", key = "greeting", initiallyExpanded = false) {
         GlassListRow(
             title = "角色主动问候",
-            subtitle = if (isCloud) "所选角色白天随机时间主动给你发消息。仅云端 AI 可用。"
-            else "仅云端 AI 模式可用，请先切换为云端 AI。",
+            subtitle = if (cloudReady) "所选角色白天随机时间主动给你发消息。"
+            else "请先在上方配置云端 AI API。",
             trailing = {
                 Switch(
                     checked = enabled,
-                    // 始终可点：本地下尝试开启时以 Toast 说明原因，而不是整条置灰让人以为坏了
+                    // 始终可点：未配置云端 API 时以 Toast 说明原因，而不是整条置灰让人以为坏了
                     enabled = true,
                     onCheckedChange = { on ->
-                        if (on && !isCloud) {
-                            Toast.makeText(context, "角色主动问候仅云端 AI 可用，请先切换到云端 AI", Toast.LENGTH_SHORT).show()
+                        if (on && !cloudReady) {
+                            Toast.makeText(context, "请先在设置中配置云端 AI API", Toast.LENGTH_SHORT).show()
                         } else {
                             scope.launch {
                                 settings.setGreetingEnabled(on)
@@ -1159,14 +1177,14 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
                     },
                 )
             },
-            showDivider = isCloud && enabled,
+            showDivider = cloudReady && enabled,
         )
-        if (enabled && isCloud && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !notifGranted) {
+        if (enabled && cloudReady && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !notifGranted) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("⚠️", fontSize = 14.sp)
+                Icon(Icons.Filled.Warning, contentDescription = "提示", tint = scheme.error, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text(
                     "通知权限未开启，收不到主动消息提醒",
@@ -1182,7 +1200,7 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
                 }) { Text("去开启", color = scheme.primary, fontSize = 12.sp) }
             }
         }
-        if (isCloud) {
+        if (cloudReady) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
                     onClick = {
@@ -1246,7 +1264,7 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
                         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("🔋", fontSize = 14.sp)
+                        Icon(Icons.Filled.BatteryAlert, contentDescription = "电池优化", tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text(
                             if (ignoringBattery) "后台运行：已允许" else "后台运行：未允许（可能被省电冻结）",
@@ -1267,7 +1285,7 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
                             modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("📱", fontSize = 14.sp)
+                            Icon(Icons.Filled.PhoneAndroid, contentDescription = "自启动设置", tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text(
                                 "自启动管理（厂商设置）",
@@ -1286,7 +1304,7 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
                             modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("⏰", fontSize = 14.sp)
+                            Icon(Icons.Filled.Alarm, contentDescription = "精确闹钟设置", tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text(
                                 "精确闹钟未授权（后台触发可靠性降低）",
@@ -1447,6 +1465,470 @@ private const val PROBE_TIMEOUT_MS = 10_000L
  * （经 [SeedanceSceneStore] 校验并复制到内部存储）、可选场景描述、固定开启语音的只读说明。
  * 无 fps 选项。含「测试连接」按钮校验服务地址。
  */
+/**
+ * 朋友圈设置区：生图 API（OpenAI 聊天格式兼容中转站，与主 LLM 分离）+ 自动发圈（开关/间隔/角色）。
+ */
+@Composable
+private fun MomentsSection(container: AppContainer, scope: CoroutineScope) {
+    val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val settings = container.settingsRepository
+
+    // 生图 API 可编辑字段：进入组合后播种一次
+    var baseUrl by remember { mutableStateOf("") }
+    var apiKey by remember { mutableStateOf("") }
+    var showApiKey by remember { mutableStateOf(false) }
+    var model by remember { mutableStateOf("") }
+    var saved by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val c = settings.getMomentImageGenConfigNow()
+        baseUrl = c.baseUrl
+        apiKey = c.apiKey
+        model = c.model
+    }
+    LaunchedEffect(saved) { if (saved) { delay(2000); saved = false } }
+
+    // 测试连接：先保存当前填写的生图配置（未保存也测），再立刻让一位发圈角色真实发一条朋友圈，
+    // 全链路验证「云端 LLM 文案 + 生图 API 出图」。结果（含失败原因）当场显示在按钮下方。
+    var probeRunning by remember { mutableStateOf(false) }
+    var probeResult by remember { mutableStateOf<String?>(null) }
+
+    // 自动发圈
+    val autoEnabled by settings.momentAutoConfig.collectAsState(initial = com.chatbyyourside.data.model.MomentAutoConfig())
+    val characters by container.characterRepository.characters.collectAsState(initial = emptyList())
+    var showCharPicker by remember { mutableStateOf(false) }
+    var showReplyPicker by remember { mutableStateOf(false) }
+    val replyIds by container.settingsRepository.momentReplyCharacterIds.collectAsState(initial = emptySet())
+    // 云端辅助功能与聊天 Provider 切换解耦：只看是否配置过云端 API
+    val apiCfg by settings.apiConfig.collectAsState(initial = ApiConfig())
+    val cloudReady = apiCfg.apiKey.isNotBlank() || isFreeProxyBaseUrl(apiCfg.baseUrl)
+    // 朋友圈生图开关（关闭 = 角色发圈纯文字，生图 API 配置保留）
+    val imageGenEnabled by settings.momentImageGenEnabled.collectAsState(initial = true)
+
+    CollapsibleSection(
+        title = "朋友圈",
+        key = "moment",
+        summary = when {
+            !imageGenEnabled -> "生图已关闭 · 纯文字发圈"
+            baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank() -> "生图已配置"
+            else -> "未配置生图 API"
+        },
+    ) {
+        GlassListRow(
+            title = "自动发圈",
+            subtitle = "所选角色每隔一段时间自动发一条朋友圈（8-23 点）。",
+            trailing = {
+                Switch(
+                    checked = autoEnabled.enabled,
+                    onCheckedChange = { on ->
+                        scope.launch {
+                            settings.setMomentAutoConfig(autoEnabled.copy(enabled = on))
+                            com.chatbyyourside.work.MomentScheduler.reschedule(context, settings)
+                        }
+                    },
+                )
+            },
+            showDivider = true,
+        )
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (autoEnabled.enabled && cloudReady) {
+                Text(
+                    "发圈间隔：${autoEnabled.intervalHours} 小时（实际有 ±12% 随机抖动）",
+                    color = scheme.onSurfaceVariant, fontSize = 12.sp,
+                )
+                var sliderValue by remember(autoEnabled.intervalHours) {
+                    mutableStateOf(autoEnabled.intervalHours.toFloat())
+                }
+                androidx.compose.material3.Slider(
+                    value = sliderValue,
+                    onValueChange = { sliderValue = it },
+                    onValueChangeFinished = {
+                        scope.launch {
+                            settings.setMomentAutoConfig(
+                                autoEnabled.copy(
+                                    intervalHours = sliderValue.toInt()
+                                        .coerceIn(AppConfig.Moment.MIN_INTERVAL_HOURS, AppConfig.Moment.MAX_INTERVAL_HOURS),
+                                ),
+                            )
+                            com.chatbyyourside.work.MomentScheduler.reschedule(context, settings)
+                        }
+                    },
+                    valueRange = AppConfig.Moment.MIN_INTERVAL_HOURS.toFloat()..AppConfig.Moment.MAX_INTERVAL_HOURS.toFloat(),
+                    steps = (AppConfig.Moment.MAX_INTERVAL_HOURS - AppConfig.Moment.MIN_INTERVAL_HOURS - 1),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "发圈角色（已选 ${autoEnabled.characterIds.size} 个）",
+                        color = scheme.onSurface, fontSize = 13.sp,
+                    )
+                    TextButton(onClick = { showCharPicker = true }) { Text("选择", fontSize = 12.sp) }
+                }
+            }
+
+            Text(
+                "互动角色（回复/点赞你的朋友圈）",
+                color = scheme.onSurface, fontSize = 13.sp,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "已选 ${replyIds.size} 个（发圈后随机 1~3 个评论、1~3 个点赞）",
+                    color = scheme.onSurfaceVariant, fontSize = 12.sp,
+                )
+                TextButton(onClick = { showReplyPicker = true }) { Text("选择", fontSize = 12.sp) }
+            }
+
+            // 朋友圈生图开关：关闭后角色发圈一律纯文字（生图 API 配置保留，随时可再打开）
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "朋友圈生图",
+                        color = scheme.onSurface, fontSize = 13.sp,
+                    )
+                    Text(
+                        if (imageGenEnabled) "角色发圈会尝试配图（按下方生图 API）"
+                        else "已关闭：角色发圈一律纯文字，不调用生图 API",
+                        color = scheme.onSurfaceVariant, fontSize = 11.sp,
+                    )
+                }
+                Switch(
+                    checked = imageGenEnabled,
+                    onCheckedChange = { on -> scope.launch { settings.setMomentImageGenEnabled(on) } },
+                )
+            }
+
+            Text(
+                "生图 API（自动适配三类端点：OpenAI 聊天格式出图、gpt-image 类 Responses 端点、任务制媒体 API 如 lk888 的 /media/generate；Base URL 一般填到 /v1 或 /api/v1；生图与对话模型分开配置，留空则角色朋友圈为纯文字）。",
+                color = scheme.onSurfaceVariant, fontSize = 11.sp,
+            )
+            FieldLabel("生图服务地址")
+            GlassInputField(value = baseUrl, onValueChange = { baseUrl = it }, placeholder = "https://中转站.com/v1")
+            FieldLabel("生图模型")
+            GlassInputField(value = model, onValueChange = { model = it }, placeholder = "gemini-2.5-flash-image")
+            PasswordField("生图 API Key", apiKey, showApiKey, { apiKey = it }, { showApiKey = !showApiKey })
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            settings.setMomentImageGenConfig(
+                                com.chatbyyourside.data.model.MomentImageGenConfig(
+                                    baseUrl = baseUrl, apiKey = apiKey, model = model,
+                                ),
+                            )
+                            saved = true
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = scheme.primary.copy(alpha = 0.16f)),
+                ) { Text(if (saved) "✓ 已保存" else "保存生图配置", color = scheme.primary, fontSize = 13.sp) }
+                // 测试连接：按一下 = 保存当前配置 + 立刻真实发一条朋友圈（验证云端连接）；
+                // 发圈角色按「发圈角色」列表严格轮换（与自动发圈同一条轮换链），多次测试依次换人
+                TextButton(
+                    onClick = {
+                        if (!cloudReady) {
+                            probeResult = "连接失败：请先在上方配置云端 AI API"
+                            return@TextButton
+                        }
+                        val selectedIds = autoEnabled.characterIds
+                        val fallbackId = characters.firstOrNull()?.id
+                        if (selectedIds.isEmpty() && fallbackId == null) {
+                            probeResult = "连接失败：请先选择发圈角色"
+                            return@TextButton
+                        }
+                        probeRunning = true
+                        probeResult = null
+                        scope.launch {
+                            try {
+                                val charId = if (selectedIds.isEmpty()) fallbackId!!
+                                else com.chatbyyourside.work.MomentScheduler.pickNextCharacter(settings, selectedIds)
+                                val charName = characters.firstOrNull { it.id == charId }?.name ?: "角色"
+                                settings.setMomentImageGenConfig(
+                                    com.chatbyyourside.data.model.MomentImageGenConfig(
+                                        baseUrl = baseUrl, apiKey = apiKey, model = model,
+                                    ),
+                                )
+                                saved = true
+                                // 生图开关打开且 API 齐全则带 1 张图（全链路验证）；否则纯文字
+                                val imageCount = if (imageGenEnabled && com.chatbyyourside.data.model.MomentImageGenConfig(baseUrl, apiKey, model).isConfigured) 1 else 0
+                                val post = container.momentGenerationCoordinator.generateAndPost(charId, imageCount)
+                                // 成功投递后写回轮换记录（与自动发圈 Worker 同语义，测试也推进轮换）
+                                runCatching { settings.setMomentLastCharId(charId) }
+                                probeResult = when {
+                                    imageCount > 0 && post.degradedToTextOnly ->
+                                        "连接成功：「$charName」已发一条朋友圈（生图失败已降级纯文字，请检查生图 API 配置）"
+                                    imageCount > 0 ->
+                                        "连接成功：「$charName」已发一条带图朋友圈，去朋友圈页看看吧"
+                                    else ->
+                                        "连接成功：「$charName」已发一条纯文字朋友圈，去朋友圈页看看吧"
+                                }
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                android.util.Log.w("SettingsScreen", "朋友圈测试连接失败", e)
+                                probeResult = "连接失败：${com.chatbyyourside.util.UserFacingErrorMapper.userFacingError(e, "朋友圈生成失败")}"
+                            } finally {
+                                probeRunning = false
+                            }
+                        }
+                    },
+                    enabled = !probeRunning,
+                ) { Text(if (probeRunning) "测试中…" else "测试连接", fontSize = 12.sp) }
+            }
+            if (probeResult == null) {
+                Text(
+                    "点「测试连接」会保存当前生图配置，并立刻让一位发圈角色真实发一条朋友圈（生图 API 已填则带图），当场验证连接是否可用；多次点击会按「发圈角色」列表轮换发帖人。",
+                    color = scheme.onSurfaceVariant, fontSize = 11.sp,
+                )
+            }
+            probeResult?.let { result ->
+                Text(
+                    result,
+                    color = if (result.startsWith("连接成功")) scheme.tertiary else scheme.error,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                )
+            }
+        }
+    }
+
+    if (showCharPicker) {
+        AlertDialog(
+            onDismissRequest = { showCharPicker = false },
+            title = { Text("选择发圈角色（可多选）", color = scheme.onSurface) },
+            text = {
+                LazyColumn(modifier = Modifier.height(320.dp)) {
+                    items(characters.size) { index ->
+                        val char = characters[index]
+                        val checked = char.id in autoEnabled.characterIds
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val next = autoEnabled.characterIds.toMutableSet()
+                                    if (checked) next.remove(char.id) else next.add(char.id)
+                                    scope.launch { settings.setMomentAutoConfig(autoEnabled.copy(characterIds = next)) }
+                                }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            androidx.compose.material3.Checkbox(checked = checked, onCheckedChange = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(char.name, color = scheme.onSurface, fontSize = 14.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showCharPicker = false }) { Text("完成") } },
+        )
+    }
+
+    if (showReplyPicker) {
+        var search by remember { mutableStateOf("") }
+        val filtered = characters.filter { it.name.contains(search.trim(), ignoreCase = true) }
+        AlertDialog(
+            onDismissRequest = { showReplyPicker = false },
+            title = { Text("选择互动角色（可多选）", color = scheme.onSurface) },
+            text = {
+                Column {
+                    GlassInputField(value = search, onValueChange = { search = it }, placeholder = "搜索角色名")
+                    Spacer(Modifier.height(8.dp))
+                    if (filtered.isEmpty()) {
+                        Text(
+                            "没有匹配的角色",
+                            color = scheme.onSurfaceVariant, fontSize = 13.sp,
+                            modifier = Modifier.padding(vertical = 16.dp),
+                        )
+                    }
+                    LazyColumn(modifier = Modifier.height(300.dp)) {
+                        items(filtered.size) { index ->
+                            val char = filtered[index]
+                            val checked = char.id in replyIds
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        val next = if (checked) replyIds - char.id else replyIds + char.id
+                                        scope.launch { container.settingsRepository.setMomentReplyCharacterIds(next) }
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                androidx.compose.material3.Checkbox(checked = checked, onCheckedChange = null)
+                                Spacer(Modifier.width(8.dp))
+                                Text(char.name, color = scheme.onSurface, fontSize = 14.sp)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showReplyPicker = false }) { Text("完成") } },
+        )
+    }
+}
+
+/** Token 数缩写：1234 -> 1.2K，12345678 -> 12.35M。 */
+private fun formatTokens(v: Long): String = when {
+    v >= 1_000_000L -> String.format("%.2fM", v / 1_000_000.0)
+    v >= 1_000L -> String.format("%.1fK", v / 1_000.0)
+    else -> v.toString()
+}
+
+/** 缓存命中率百分比（无输入 token 时显示 —）。 */
+private fun formatCacheRate(entry: com.chatbyyourside.data.model.TokenUsageEntry): String =
+    if (entry.promptTokens > 0) "${Math.round(entry.cacheHitRate * 100)}%" else "—"
+
+/**
+ * Token 用量区：总量数字 + 按角色堆叠条形图（输入蓝/输出橙，按总量降序，最多 12 条）
+ * + 搜索框过滤角色明细。归属口径见 [TokenUsageSnapshot]。
+ */
+@Composable
+private fun TokenUsageSection(container: AppContainer) {
+    val scheme = MaterialTheme.colorScheme
+    val usage by container.settingsRepository.tokenUsage.collectAsState(initial = TokenUsageSnapshot())
+    val characters by container.characterRepository.characters.collectAsState(initial = emptyList())
+    var query by remember { mutableStateOf("") }
+
+    CollapsibleSection(
+        title = "Token 用量",
+        key = "token_usage",
+        summary = "累计 ${usage.total.calls} 次调用 · ${formatTokens(usage.total.totalTokens)} tokens · 缓存命中 ${formatCacheRate(usage.total)}",
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // 总量数字
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TokenStatTile("输入", formatTokens(usage.total.promptTokens), Modifier.weight(1f))
+                TokenStatTile("输出", formatTokens(usage.total.completionTokens), Modifier.weight(1f))
+                TokenStatTile("合计", formatTokens(usage.total.totalTokens), Modifier.weight(1f))
+                TokenStatTile("调用", "${usage.total.calls}", Modifier.weight(1f))
+            }
+
+            if (usage.chars.isEmpty()) {
+                Text(
+                    "还没有云端调用记录：和角色聊天、主动问候、群聊发言、朋友圈文案与评论都会按角色累计。",
+                    color = scheme.onSurfaceVariant, fontSize = 12.sp,
+                )
+                return@Column
+            }
+
+            val nameById = characters.associate { it.id to it.name }
+            val ranked = usage.chars.entries
+                .map { (id, entry) -> TokenRow(name = nameById[id] ?: "已注销角色", entry = entry) }
+                .sortedByDescending { it.entry.totalTokens }
+
+            // 条形图（Top 12；输入/输出双色堆叠）
+            val chartRows = ranked.take(12)
+            val maxTokens = chartRows.maxOf { it.entry.totalTokens }.coerceAtLeast(1L)
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                chartRows.forEach { row ->
+                    Column {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(
+                                row.name,
+                                color = scheme.onSurface, fontSize = 12.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            Text(
+                                "${formatTokens(row.entry.totalTokens)} tok · ${row.entry.calls}次",
+                                color = scheme.onSurfaceVariant, fontSize = 11.sp,
+                            )
+                        }
+                        Spacer(Modifier.height(2.dp))
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(8.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(scheme.surfaceVariant),
+                        ) {
+                            Box(
+                                Modifier
+                                    .weight(row.entry.promptTokens.toFloat() / maxTokens)
+                                    .fillMaxHeight()
+                                    .background(scheme.primary.copy(alpha = 0.75f)),
+                            )
+                            Box(
+                                Modifier
+                                    .weight(row.entry.completionTokens.toFloat() / maxTokens)
+                                    .fillMaxHeight()
+                                    .background(scheme.tertiary.copy(alpha = 0.75f)),
+                            )
+                        }
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                TokenLegend(scheme.primary.copy(alpha = 0.75f), "输入")
+                TokenLegend(scheme.tertiary.copy(alpha = 0.75f), "输出")
+            }
+
+            // 搜索 + 明细（全量，按总量降序）
+            GlassInputField(value = query, onValueChange = { query = it }, placeholder = "搜索角色名")
+            val filtered = ranked.filter { it.name.contains(query.trim(), ignoreCase = true) }
+            if (filtered.isEmpty()) {
+                Text("没有匹配的角色", color = scheme.onSurfaceVariant, fontSize = 12.sp)
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    filtered.forEach { row ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                row.name,
+                                color = scheme.onSurface, fontSize = 13.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            Text(
+                                "入 ${formatTokens(row.entry.promptTokens)} · 出 ${formatTokens(row.entry.completionTokens)} · 命中 ${formatCacheRate(row.entry)} · ${row.entry.calls}次",
+                                color = scheme.onSurfaceVariant, fontSize = 11.sp,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private data class TokenRow(val name: String, val entry: com.chatbyyourside.data.model.TokenUsageEntry)
+
+@Composable
+private fun TokenStatTile(label: String, value: String, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    Column(
+        modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(scheme.surfaceVariant.copy(alpha = 0.5f))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(value, color = scheme.onSurface, fontSize = 15.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, maxLines = 1)
+        Text(label, color = scheme.onSurfaceVariant, fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun TokenLegend(color: androidx.compose.ui.graphics.Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(10.dp).clip(RoundedCornerShape(2.dp)).background(color))
+        Spacer(Modifier.width(4.dp))
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+    }
+}
+
 @Composable
 private fun SeedanceSettingsSection(container: AppContainer, scope: CoroutineScope) {
     val scheme = MaterialTheme.colorScheme
@@ -1823,8 +2305,9 @@ private fun GroupChatSection(container: AppContainer, scope: CoroutineScope) {
 
     val config by settings.groupChatConfig.collectAsState(initial = GroupChatConfig())
     val dailyRounds by settings.groupDailyRounds.collectAsState(initial = AppConfig.GroupChat.DEFAULT_DAILY_ROUNDS)
-    val provider by settings.activeProvider.collectAsState(initial = ChatProviderType.CLOUD)
-    val isCloud = provider == ChatProviderType.CLOUD
+    // 云端辅助功能与聊天 Provider 切换解耦：只看是否配置过云端 API
+    val apiCfg by settings.apiConfig.collectAsState(initial = ApiConfig())
+    val cloudReady = apiCfg.apiKey.isNotBlank() || isFreeProxyBaseUrl(apiCfg.baseUrl)
 
     var roundsValue by remember(dailyRounds) { mutableStateOf(dailyRounds.toFloat()) }
     var testScheduled by remember { mutableStateOf(false) }
@@ -1837,16 +2320,16 @@ private fun GroupChatSection(container: AppContainer, scope: CoroutineScope) {
     CollapsibleSection(title = "群聊", key = "group_chat", initiallyExpanded = false) {
         GlassListRow(
             title = "多人角色群聊",
-            subtitle = if (isCloud) "勾选角色同群聊天；空闲时自动互相聊天并可主动向你提问。仅云端 AI 可用。"
-            else "仅云端 AI 模式可用，请先切换为云端 AI。",
+            subtitle = if (cloudReady) "勾选角色同群聊天；空闲时自动互相聊天并可主动向你提问。"
+            else "请先在上方配置云端 AI API。",
             trailing = {
                 Switch(
                     checked = config.enabled,
                     // 始终可点：本地下尝试开启时以 Toast 说明原因
                     enabled = true,
                     onCheckedChange = { on ->
-                        if (on && !isCloud) {
-                            Toast.makeText(context, "群聊仅云端 AI 可用，请先切换到云端 AI", Toast.LENGTH_SHORT).show()
+                        if (on && !cloudReady) {
+                            Toast.makeText(context, "请先在设置中配置云端 AI API", Toast.LENGTH_SHORT).show()
                         } else {
                             scope.launch {
                                 settings.setGroupChatConfig(config.copy(enabled = on))
@@ -1859,9 +2342,9 @@ private fun GroupChatSection(container: AppContainer, scope: CoroutineScope) {
                     },
                 )
             },
-            showDivider = isCloud && config.enabled,
+            showDivider = cloudReady && config.enabled,
         )
-        if (isCloud) {
+        if (cloudReady) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
                     onClick = {
@@ -1933,8 +2416,9 @@ private fun UserProfileSection(container: AppContainer, scope: CoroutineScope) {
     val context = LocalContext.current
     val settings = container.settingsRepository
 
-    // 表单语义：头像选择/清除先挂起（pending），人设/关系文本本地编辑，全部在「保存」时原子落盘（仿 Seedance 分区）。
+    // 表单语义：头像选择/清除先挂起（pending），昵称/人设/关系文本本地编辑，全部在「保存」时原子落盘（仿 Seedance 分区）。
     var avatarUri by remember { mutableStateOf("") }
+    var displayName by remember { mutableStateOf("") }
     var persona by remember { mutableStateOf("") }
     var relationship by remember { mutableStateOf("") }
     var pendingAvatarUri by remember { mutableStateOf<Uri?>(null) }
@@ -1944,6 +2428,7 @@ private fun UserProfileSection(container: AppContainer, scope: CoroutineScope) {
     LaunchedEffect(Unit) {
         val p = settings.getUserProfileNow()
         avatarUri = p.avatarPath
+        displayName = p.displayName
         persona = p.persona
         relationship = p.relationship
     }
@@ -2002,6 +2487,13 @@ private fun UserProfileSection(container: AppContainer, scope: CoroutineScope) {
                 }
             }
             avatarError?.let { Text(it, color = scheme.error, fontSize = 10.sp) }
+            FieldLabel("显示昵称（朋友圈等社交场景）")
+            GlassInputField(
+                value = displayName,
+                onValueChange = { displayName = it },
+                placeholder = "留空则显示「我」",
+                singleLine = true,
+            )
             FieldLabel("人设（我是谁）")
             GlassInputField(
                 value = persona,
@@ -2047,6 +2539,7 @@ private fun UserProfileSection(container: AppContainer, scope: CoroutineScope) {
                 settings.setUserProfileConfig(
                     UserProfileConfig(
                         avatarPath = finalAvatar,
+                        displayName = displayName.trim(),
                         persona = persona.trim(),
                         relationship = relationship.trim(),
                     )

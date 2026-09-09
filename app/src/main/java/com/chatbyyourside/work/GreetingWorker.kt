@@ -12,7 +12,6 @@ import com.chatbyyourside.ChatApp
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.config.isFreeProxyBaseUrl
 import com.chatbyyourside.data.model.ChatMessage
-import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.WorldviewTargetType
 import com.chatbyyourside.data.model.matchesScope
 import com.chatbyyourside.data.model.buildWorldviewDirective
@@ -123,7 +122,7 @@ class GreetingWorker(
         if (!state.enabled) return Result.success() // 明确关闭 -> 由 ensureScheduled/reschedule cancel
 
         // 本地模式 -> 静默等待（周期工作继续跑，切回云端即恢复）
-        if (settings.getActiveProviderNow() != ChatProviderType.CLOUD) return Result.success()
+        if (!settings.isCloudApiReady()) return Result.success()
         if (state.charIds.isEmpty()) return Result.success() // 未选角色 -> 等用户选择
 
         val now = System.currentTimeMillis()
@@ -221,7 +220,7 @@ class GreetingWorker(
         settings: SettingsRepository,
         context: Context,
     ): Result {
-        if (settings.getActiveProviderNow() != ChatProviderType.CLOUD) return Result.success()
+        if (!settings.isCloudApiReady()) return Result.success()
         val charIds = settings.getGreetingCharacterIdsNow()
         val charId = if (charIds.isNotEmpty()) {
             charIds.elementAt(Random.nextInt(charIds.size))
@@ -289,7 +288,7 @@ class GreetingWorker(
                         if (act.isEmpty) "" else act.staticHead + act.tailInjection
                     }
                 }
-                generateGreeting(container.directLlmClient, apiConfig, char, history, userDirective, worldviewDirective, lorebookDirective)
+                generateGreeting(container.directLlmClient, settings, apiConfig, char, history, userDirective, worldviewDirective, lorebookDirective)
             }
         } catch (ce: CancellationException) {
             // Task 5：Worker 被取消（系统停止/约束不再满足）必须传播——吞掉会让 WorkManager
@@ -336,6 +335,7 @@ class GreetingWorker(
     /** 调用云端 API 生成一条符合人设、贴合时段的主动消息。 */
     private suspend fun generateGreeting(
         client: com.chatbyyourside.data.remote.DirectLlmClient,
+        settings: SettingsRepository,
         apiConfig: com.chatbyyourside.data.model.ApiConfig,
         char: com.chatbyyourside.data.model.Character,
         history: List<ChatMessage>,
@@ -376,7 +376,12 @@ class GreetingWorker(
             }
         }
 
-        return client.chatOnce(apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, messages)
+        return client.chatOnce(
+            apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, messages,
+            onUsage = { usage ->
+                usage?.let { settings.recordTokenUsage(char.id, it.promptTokens, it.completionTokens, it.cachedTokens) }
+            },
+        )
             .trim()
             .removeSurrounding("\"")
     }

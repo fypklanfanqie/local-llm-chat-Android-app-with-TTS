@@ -8,7 +8,6 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.chatbyyourside.config.AppConfig
-import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.repository.SettingsRepository
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -131,8 +130,8 @@ object GreetingScheduler {
     private suspend fun isEnabledAndCloud(settings: SettingsRepository): Boolean? {
         val enabled = settings.getGreetingEnabledOrNull() ?: return null
         if (!enabled) return false
-        // provider 超时回退 CLOUD（安全默认：当作可用继续），不会误杀链条
-        return settings.getActiveProviderNow() == ChatProviderType.CLOUD
+        // 与聊天 Provider 切换解耦：只要配置过云端 API，本地聊天下也照常问候
+        return settings.isCloudApiReady()
     }
 
     /** 今日剩余配额 = 每日上限 - 今日已发（跨天则已发归零）。 */

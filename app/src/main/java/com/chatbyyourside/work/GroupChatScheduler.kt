@@ -8,7 +8,6 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.chatbyyourside.config.AppConfig
-import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.repository.SettingsRepository
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -97,7 +96,8 @@ object GroupChatScheduler {
         val config = settings.getGroupChatConfigOrNull() ?: return null
         if (!config.enabled) return false
         if (!config.autoChat) return false
-        return settings.getActiveProviderNow() == ChatProviderType.CLOUD
+        // 与聊天 Provider 切换解耦：只要配置过云端 API，本地聊天下群聊自动轮也照常
+        return settings.isCloudApiReady()
     }
 
     private suspend fun remainingToday(settings: SettingsRepository): Int {

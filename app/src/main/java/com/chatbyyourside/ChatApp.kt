@@ -15,6 +15,7 @@ import com.chatbyyourside.util.CrashWatchdog
 import com.chatbyyourside.util.ProcessNameUtil
 import com.chatbyyourside.work.GreetingScheduler
 import com.chatbyyourside.work.GroupChatScheduler
+import com.chatbyyourside.work.MomentScheduler
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -122,12 +123,20 @@ class ChatApp : Application() {
                     Log.w(TAG, "角色问候后台调度初始化失败（非致命）：${e.message}")
                 }
             }
-            // 群聊自动聊天：后台调度链（仅云端可用，按 next_fire_at + 精确闹钟触发）
+            // 群聊自动聊天：后台调度链（仅需已配置云端 API，按 next_fire_at + 精确闹钟触发）
             appScope.launch {
                 try {
                     GroupChatScheduler.ensureScheduled(this@ChatApp, container.settingsRepository)
                 } catch (e: Exception) {
                     Log.w(TAG, "群聊后台调度初始化失败（非致命）：${e.message}")
+                }
+            }
+            // 朋友圈自动发圈：确保后台调度链存活（关闭/未配置云端 API 时由 ensureScheduled cancel）
+            appScope.launch {
+                try {
+                    MomentScheduler.ensureScheduled(this@ChatApp, container.settingsRepository)
+                } catch (e: Exception) {
+                    Log.w(TAG, "朋友圈后台调度初始化失败（非致命）：${e.message}")
                 }
             }
         }

@@ -8,6 +8,10 @@ import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.GroupChatConfig
 import com.chatbyyourside.data.model.Lorebook
 import com.chatbyyourside.data.model.LorebookGlobalConfig
+import com.chatbyyourside.data.model.MomentAutoConfig
+import com.chatbyyourside.data.model.MomentImageGenConfig
+import com.chatbyyourside.data.model.TokenUsageEntry
+import com.chatbyyourside.data.model.TokenUsageSnapshot
 import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.UserProfileConfig
 import com.chatbyyourside.data.model.WorldviewConfig
@@ -143,8 +147,86 @@ class SettingsRepository(private val store: SettingsStore) {
     val groupNextFireAt: Flow<Long> = store.groupNextFireAt
 
     // ===== 我的形象（我的形象）=====
-    /** 我的形象聚合（头像路径/人设/关系）。 */
+    /** 我的形象聚合（昵称/头像路径/人设/关系）。 */
     val userProfile: Flow<UserProfileConfig> = store.userProfile
+
+    // ===== 朋友圈 =====
+    /** 朋友圈生图 API 配置（OpenAI 聊天格式兼容，与主 LLM 分离）。 */
+    val momentImageGenConfig: Flow<MomentImageGenConfig> = store.momentImageGenConfig
+    suspend fun getMomentImageGenConfigNow(): MomentImageGenConfig = store.getMomentImageGenConfigNow()
+    suspend fun setMomentImageGenConfig(config: MomentImageGenConfig) = store.setMomentImageGenConfig(config)
+
+    /** 朋友圈封面图路径（空=默认渐变）。 */
+    val momentCoverPath: Flow<String> = store.momentCoverPath
+    suspend fun setMomentCoverPath(path: String?) = store.setMomentCoverPath(path)
+
+    /** 生图总开关（默认开）；关闭后发圈一律纯文字。 */
+    val momentImageGenEnabled: Flow<Boolean> = store.momentImageGenEnabled
+    suspend fun getMomentImageGenEnabledNow(): Boolean = store.getMomentImageGenEnabledNow()
+    suspend fun setMomentImageGenEnabled(enabled: Boolean) = store.setMomentImageGenEnabled(enabled)
+
+    /** 自动发圈配置（开关/间隔/角色集）。 */
+    val momentAutoConfig: Flow<MomentAutoConfig> = store.momentAutoConfig
+    suspend fun getMomentAutoConfigNow(): MomentAutoConfig = store.getMomentAutoConfigNow()
+    suspend fun setMomentAutoConfig(config: MomentAutoConfig) = store.setMomentAutoConfig(config)
+
+    /** 下一次自动发圈目标时间（epoch ms；0 = 尚未初始化）。 */
+    val momentNextFireAt: Flow<Long> = store.momentNextFireAt
+    suspend fun getMomentNextFireAtNow(): Long = store.getMomentNextFireAtNow()
+    suspend fun setMomentNextFireAt(epochMs: Long) = store.setMomentNextFireAt(epochMs)
+
+    /** 上次自动发圈的角色 id（轮换用）。 */
+    suspend fun getMomentLastCharIdNow(): String? = store.getMomentLastCharIdNow()
+    suspend fun setMomentLastCharId(id: String?) = store.setMomentLastCharId(id)
+
+    /** 互动角色（用户发朋友圈后随机评论/点赞的候选集，可搜索多选）。 */
+    val momentReplyCharacterIds: Flow<Set<String>> = store.momentReplyCharacterIds
+    suspend fun getMomentReplyCharacterIdsNow(): Set<String> =
+        withTimeoutOrNull(DATASTORE_TIMEOUT_MS) { momentReplyCharacterIds.first() } ?: emptySet()
+    suspend fun setMomentReplyCharacterIds(ids: Set<String>) = store.setMomentReplyCharacterIds(ids)
+
+    /**
+     * 云端 API 是否就绪（配置过 key；内置免费代理端点无需 key）。
+     * 朋友圈/问候/群聊等云端辅助功能据此判断，与聊天 Provider 切换（本地/云端）解耦——
+     * 用户聊天用本地模型时，这些功能仍直接调用已配置的云端 LLM。
+     */
+    suspend fun isCloudApiReady(): Boolean {
+        val cfg = getApiConfigNow()
+        return cfg.apiKey.isNotBlank() || com.chatbyyourside.config.isFreeProxyBaseUrl(cfg.baseUrl)
+    }
+
+    // ===== Token 用量（按角色累计云端输入/输出 token）=====
+    /** 全角色 Token 用量快照（设置页「Token 用量」图表与数字）。 */
+    val tokenUsage: Flow<TokenUsageSnapshot> = store.tokenUsage
+    suspend fun getTokenUsageNow(): TokenUsageSnapshot =
+        withTimeoutOrNull(DATASTORE_TIMEOUT_MS) { tokenUsage.first() } ?: TokenUsageSnapshot()
+
+    /**
+     * 累计一次云端调用的 token 用量到 [characterId] 名下（原子读改写；空角色/零用量忽略）。
+     * 归属口径：1:1 聊天、主动问候、群聊发言、朋友圈文案与评论回复。
+     */
+    suspend fun recordTokenUsage(
+        characterId: String?,
+        promptTokens: Int,
+        completionTokens: Int,
+        cachedTokens: Int = 0,
+    ) {
+        val id = characterId?.trim().takeUnless { it.isNullOrBlank() } ?: return
+        if (promptTokens <= 0 && completionTokens <= 0) return
+        store.updateTokenUsage { snapshot ->
+            val entry = snapshot.chars[id] ?: TokenUsageEntry()
+            snapshot.copy(
+                chars = snapshot.chars + (
+                    id to entry.copy(
+                        promptTokens = entry.promptTokens + promptTokens,
+                        completionTokens = entry.completionTokens + completionTokens,
+                        calls = entry.calls + 1,
+                        cachedTokens = entry.cachedTokens + cachedTokens,
+                    )
+                ),
+            )
+        }
+    }
 
     suspend fun setThemeMode(mode: ThemeMode) = store.setThemeMode(mode)
 

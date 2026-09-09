@@ -12,6 +12,7 @@ import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.SeedanceVideo
 import com.chatbyyourside.data.remote.CreateSeedanceTask
 import com.chatbyyourside.data.remote.DirectLlmClient
+import com.chatbyyourside.data.remote.MomentImageGenClient
 import com.chatbyyourside.data.remote.RetrofitClient
 import com.chatbyyourside.data.remote.SeedanceClient
 import com.chatbyyourside.data.remote.SeedanceImageContent
@@ -22,7 +23,9 @@ import com.chatbyyourside.data.repository.ChatRepository
 import com.chatbyyourside.data.repository.ConversationRepository
 import com.chatbyyourside.data.repository.DocumentRepository
 import com.chatbyyourside.data.repository.GroupChatRepository
+import com.chatbyyourside.data.repository.MomentRepository
 import com.chatbyyourside.data.repository.MusicLibraryRepository
+import com.chatbyyourside.data.repository.NovelRepository
 import com.chatbyyourside.data.repository.SeedanceVideoRepository
 import com.chatbyyourside.data.repository.SettingsRepository
 import com.chatbyyourside.conversationexport.ConversationExportService
@@ -44,6 +47,7 @@ import com.chatbyyourside.video.SeedanceSubmitter
 import com.chatbyyourside.video.SeedanceVideoDownload
 import com.chatbyyourside.video.SeedanceVideoDownloader
 import com.chatbyyourside.video.SeedanceVideoFileStore
+import com.chatbyyourside.work.MomentGenerationCoordinator
 import com.chatbyyourside.work.SeedanceVideoScheduler
 import com.chatbyyourside.llm.CpuBoostController
 import com.chatbyyourside.llm.ModelResidencyController
@@ -110,7 +114,34 @@ class AppContainer(private val context: Context) {
         )
     }
 
-    // 通讯界面背景：内置 PRTS 轮播 + 用户自定义图片（最多 20 张，复制到内部存储）。
+    // 朋友圈：帖子/评论/点赞落库 + 生图客户端（OpenAI 聊天格式出图，中转站兼容）。
+    val momentRepository: MomentRepository by lazy {
+        MomentRepository(database.momentDao())
+    }
+    val momentImageGenClient: MomentImageGenClient by lazy {
+        MomentImageGenClient(context, MomentImageGenClient.defaultHttpClient())
+    }
+
+    // 小说模式：故事/章节/脚本行落库（仅云端生成）。
+    val novelRepository: NovelRepository by lazy {
+        NovelRepository(database.novelDao())
+    }
+
+    /** 朋友圈生成协调器（角色发帖 + 评论回复；UI 与后台 Worker 共用）。 */
+    val momentGenerationCoordinator: MomentGenerationCoordinator by lazy {
+        MomentGenerationCoordinator(
+            context = context,
+            settings = settingsRepository,
+            chatRepository = chatRepository,
+            conversationRepository = conversationRepository,
+            characterRepository = characterRepository,
+            momentRepository = momentRepository,
+            directLlmClient = directLlmClient,
+            imageGenClient = momentImageGenClient,
+        )
+    }
+
+    // 通讯界面背景：内置轮播 + 用户自定义图片（最多 20 张，复制到内部存储）。
     val chatBackgroundRepository: ChatBackgroundRepository by lazy {
         ChatBackgroundRepository(context, assetRepository, settingsStore)
     }
@@ -247,23 +278,40 @@ class AppContainer(private val context: Context) {
     /**
      * 参考图内部文件 -> base64 图片内容（读取在 Worker 的 IO 线程，不整读入 UI 线程）。
      *
-     * [maxBytes] 为单张图片（base64 解码后）字节上限。原图不超限时直接原样编码；
-     * 超限时降采样 + JPEG 质量梯度重编码至达标（中转站媒体协议单张 ≤10MB，立绘 PNG 常超限）。
-     * 压缩后仍超限则抛异常，由协调器按「参考图缺失或不可读」处理，绝不发送可能被服务端拒绝的超限图片。
+     * 内存安全：**先探测尺寸再降采样解码**，绝不对原图做无界整读+Base64
+     * （双参考图 × 30MB 原图 + Base64 多份拷贝可在低内存设备直接 OOM——Error 不被 catch 捕获）。
+     * 压缩后仍超限则抛固定中文异常，由协调器按「参考图缺失或不可读」处理。
      */
     private suspend fun encodeSeedanceImage(path: String, mime: String, maxBytes: Long): SeedanceImageContent =
         withContext(Dispatchers.IO) {
             val file = File(path)
             if (!file.isFile) throw IllegalStateException("参考图文件不存在")
-            // 先按文件大小判断是否已达标，避免超限高清图整读进内存导致 OOM
-            if (file.length() <= maxBytes) {
+            // 快速路径：文件本身已小于上限（且不是超大位图）才允许原样编码；
+            // 大 PNG 即使字节小也可能解码出巨型 Bitmap，统一走压缩路径更稳。
+            if (file.length() <= maxBytes && file.length() <= DIRECT_ENCODE_MAX_FILE_BYTES &&
+                isSafeToEncodeDirectly(file)
+            ) {
                 val bytes = file.readBytes()
                 return@withContext SeedanceImageContent(mime, Base64.encodeToString(bytes, Base64.NO_WRAP))
             }
             val compressed = compressImageToFit(file, maxBytes)
-                ?: throw IllegalStateException("参考图压缩后仍超过 ${maxBytes / (1024 * 1024)}MB 限制，无法提交")
+                ?: throw IllegalStateException("图片无法读取，请更换角色或背景图片")
             SeedanceImageContent("image/jpeg", Base64.encodeToString(compressed, Base64.NO_WRAP))
         }
+
+    /** 直接编码的安全检查：解码尺寸有界（长边 ≤ 4096），避免小字节高分辨率 PNG 炸内存。 */
+    private fun isSafeToEncodeDirectly(file: File): Boolean = runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        bounds.outWidth > 0 && bounds.outHeight > 0 &&
+            maxOf(bounds.outWidth, bounds.outHeight) <= DIRECT_ENCODE_MAX_LONG_SIDE
+    }.getOrDefault(false)
+
+    /** 直接编码的文件字节上限（8MB）：超过即走压缩路径。 */
+    private val DIRECT_ENCODE_MAX_FILE_BYTES = 8L * 1024 * 1024
+
+    /** 直接编码的解码长边上限（px）：防小字节高分辨率图解码成巨型 Bitmap。 */
+    private val DIRECT_ENCODE_MAX_LONG_SIDE = 4096
 
     /** 降采样 + JPEG 质量梯度压缩，返回不超过 [maxBytes] 的字节；无法达标返回 null。 */
     private fun compressImageToFit(file: File, maxBytes: Long): ByteArray? {

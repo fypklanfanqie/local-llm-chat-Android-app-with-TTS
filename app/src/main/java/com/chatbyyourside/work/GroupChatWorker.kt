@@ -14,7 +14,6 @@ import com.chatbyyourside.config.isFreeProxyBaseUrl
 import com.chatbyyourside.data.model.ApiConfig
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.ChatMessage
-import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.GroupChatConfig
 import com.chatbyyourside.data.model.WorldviewTargetType
 import com.chatbyyourside.data.model.buildWorldviewDirective
@@ -109,7 +108,7 @@ class GroupChatWorker(
         val config = readGatingState(settings)
         if (config == null) return Result.success()
         if (!config.enabled || !config.autoChat) return Result.success()
-        if (settings.getActiveProviderNow() != ChatProviderType.CLOUD) return Result.success()
+        if (!settings.isCloudApiReady()) return Result.success()
         // 多群聊：目标 = 最近活跃的群；无群静默等待（PeriodicWork 保活）
         if (container.groupChatRepository.listGroups().isEmpty()) return Result.success()
 
@@ -180,7 +179,7 @@ class GroupChatWorker(
         settings: SettingsRepository,
         context: Context,
     ): Result {
-        if (settings.getActiveProviderNow() != ChatProviderType.CLOUD) return Result.success()
+        if (!settings.isCloudApiReady()) return Result.success()
         runRound(container, settings, context, isAskUser = true, alwaysNotify = true)
         return Result.success()
     }
@@ -256,6 +255,7 @@ class GroupChatWorker(
                         worldviewDirective = worldviewDirective,
                         lorebookStaticHead = lorebookStaticHead,
                         lorebookTailMessages = lorebookTailMessages,
+                        settings = settings,
                     )
                     if (!content.isNullOrBlank()) {
                         container.groupChatRepository.sendMemberMessage(convId, char.id, content)
@@ -283,6 +283,7 @@ class GroupChatWorker(
                         worldviewDirective = worldviewDirective,
                         lorebookStaticHead = lorebookStaticHead,
                         lorebookTailMessages = lorebookTailMessages,
+                        settings = settings,
                     )
                     if (content.isNullOrBlank()) return@repeat
                     container.groupChatRepository.sendMemberMessage(convId, char.id, content)
@@ -321,6 +322,7 @@ class GroupChatWorker(
         worldviewDirective: String? = null,
         lorebookStaticHead: String = "",
         lorebookTailMessages: List<ChatMessage> = emptyList(),
+        settings: SettingsRepository? = null,
     ): String? {
         val messages = GroupChatPromptBuilder.buildApiMessages(
             members, speaker, history, askUser,
@@ -332,7 +334,12 @@ class GroupChatWorker(
         ).map { ChatMessageDto(it.role, JsonPrimitive(it.content)) }
         return try {
             withTimeout(AppConfig.GroupChat.GENERATE_TIMEOUT_MS) {
-                client.chatOnce(apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, messages)
+                client.chatOnce(
+                    apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, messages,
+                    onUsage = { usage ->
+                        usage?.let { settings?.recordTokenUsage(speaker.id, it.promptTokens, it.completionTokens, it.cachedTokens) }
+                    },
+                )
                     // 后台轮身份解析与前台一致：只认当前 speaker 前缀；其他成员前缀视为
                     // 串人设，返回 null 跳过该条（不落库、不通知）。
                     .let { GroupChatPromptBuilder.parseSpeakerResponse(it, speaker.name, members.map { c -> c.name }) }

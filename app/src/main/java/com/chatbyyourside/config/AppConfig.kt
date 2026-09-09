@@ -110,6 +110,51 @@ object AppConfig {
         const val RETRY_DELAY_MS = 45 * 60 * 1000L
     }
 
+    // ===== 朋友圈（角色经云端 LLM + 用户自有生图 API 发帖，用户/角色互相评论点赞）=====
+    object Moment {
+        /** PeriodicWork 周期（分钟），与问候/群聊一致（WorkManager 下限 15 分钟）。 */
+        const val HEARTBEAT_INTERVAL_MIN = 15L
+        /** 自动发圈默认间隔（小时）。 */
+        const val DEFAULT_INTERVAL_HOURS = 6
+        /** 自动发圈最小/最大间隔（小时）。 */
+        const val MIN_INTERVAL_HOURS = 1
+        const val MAX_INTERVAL_HOURS = 72
+        /** 自动发圈时段（避免深夜）：08:00–23:00。 */
+        const val HOUR_START = 8
+        const val HOUR_END = 23
+        /** 生成发圈文案/提示词的超时（ms）。 */
+        const val GENERATE_TIMEOUT_MS = 60_000L
+        /** 生图请求超时（ms）——生图模型常见 30s~2min 出图。 */
+        const val IMAGE_GEN_TIMEOUT_MS = 180_000L
+        /** 生成文案时带入该角色会话的最近历史条数（衔接正在聊的话题）。 */
+        const val MAX_CONTEXT_MESSAGES = 12
+        /** 朋友圈列表窗口（最多展示的帖子数，超出修剪）。 */
+        const val FEED_WINDOW = 100
+        /** 每帖最多图片数（用户可发/AI 可生成）。 */
+        const val MAX_IMAGES = 3
+        /** 文案长度上限（提示词同步约束；存储再兜底截断）。 */
+        const val CAPTION_MAX_CHARS = 500
+        /** 发圈随机 @ 概率（%）：约此比例的帖子会随机 @ 一个人（其他角色或用户），其余不 @。 */
+        const val MENTION_PROBABILITY_PERCENT = 30
+        /** 生图输出最大字节数（Base64 落盘前的解码上限）。 */
+        const val MAX_IMAGE_BYTES = 12L * 1024 * 1024
+    }
+
+    // ===== 小说模式（故事→章节→对白编辑器 + AI 续写，仅云端生成）=====
+    object Novel {
+        /** 续写时带入的已有正文行数窗口（最近 N 行）。 */
+        const val MAX_CONTEXT_LINES = 80
+        /** 单次续写行数下限/上限（写入提示词）。 */
+        const val CONTINUE_MIN_LINES = 6
+        const val CONTINUE_MAX_LINES = 10
+        /** 角色卡/主控人设写入 system 的截断长度。 */
+        const val PERSONA_MAX_CHARS = 300
+        /** 单行对白长度上限（存储兜底截断）。 */
+        const val LINE_MAX_CHARS = 2_000
+        /** 每话最多行数（防失控膨胀）。 */
+        const val MAX_LINES_PER_CHAPTER = 500
+    }
+
     // ===== 云端滚动摘要（上下文压缩）=====
     object ContextCompression {
         // 折叠间隔（对话回合数）：每隔 N 回合执行一次折叠。用户可调，默认 50。

@@ -48,7 +48,6 @@ import com.chatbyyourside.AppContainer
 import com.chatbyyourside.config.Characters
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.ui.characters.CustomCharacterDialog
-import com.chatbyyourside.ui.characters.PersonaSheet
 import com.chatbyyourside.ui.applySystemBarIcons
 import com.chatbyyourside.util.CharacterImageStore
 import com.chatbyyourside.util.loadThemeColor
@@ -66,6 +65,15 @@ object FeedRoute {
     const val GROUP_LIST = "group_list"
     /** 群聊会话页路由模板（后接群 id）。 */
     const val GROUP_CHAT = "group_chat/{groupId}"
+    /** 朋友圈。 */
+    const val MOMENTS = "moments"
+    /** 小说模式：故事列表 / 章节管理 / 对白编辑器。 */
+    const val NOVEL_HOME = "novel_home"
+    const val NOVEL_STORY = "novel_story/{storyId}"
+    const val NOVEL_EDITOR = "novel_editor/{chapterId}"
+
+    fun novelStoryRoute(storyId: Long): String = "novel_story/$storyId"
+    fun novelEditorRoute(chapterId: Long): String = "novel_editor/$chapterId"
 
     fun groupChatRoute(groupId: Long): String = "group_chat/$groupId"
 }
@@ -85,8 +93,14 @@ fun CharacterFeedScreen(
     onNavigateToCharacters: () -> Unit,
     /** 进入「邂逅」沉浸式视频历史流（顶栏玻璃按钮）。 */
     onOpenEncounter: () -> Unit = {},
-    /** 进入「群聊」多人同群聊天（顶栏玻璃按钮，仅云端可用）。 */
+    /** 进入「群聊」多人同群聊天（顶栏玻璃按钮，仅需已配置云端 API）。 */
     onOpenGroupChat: () -> Unit = {},
+    /** 进入「朋友圈」（顶栏玻璃按钮，替代原「全部角色」入口；角色页仍可从底部 Tab 进）。 */
+    onOpenMoments: () -> Unit = {},
+    /** 进入「小说」模式（卡片底部操作按钮，好感右侧）。 */
+    onOpenNovel: () -> Unit = {},
+    /** 进入好感度独立页面。 */
+    onOpenAffinity: (String) -> Unit = {},
     /** 当前落定立绘的主题色上报（供 dock 栏等全局着色）；页面销毁时应回传 null 复位。 */
     onAccent: (Color?) -> Unit = {},
 ) {
@@ -116,7 +130,6 @@ fun CharacterFeedScreen(
 
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { characters.size })
 
-    var showPersona by remember { mutableStateOf<Character?>(null) }
     var showCreate by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<Character?>(null) }
     // 上次启动异常退出提示：仅当 crashNotice 为 true 时首次进入弹一次（用户点掉后不再弹）。
@@ -190,7 +203,8 @@ fun CharacterFeedScreen(
                         onOpenChat(char.id)
                     }
                 },
-                onPersona = { showPersona = char },
+                onAffinity = { onOpenAffinity(char.id) },
+                onNovel = onOpenNovel,
                 onVoice = container.assetRepository.getVoice(char.id).takeIf { it.isNotBlank() }?.let { url ->
                     { scope.launch { container.audioManager.playVoice(url, volume) } }
                 },
@@ -223,13 +237,13 @@ fun CharacterFeedScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 GlassButton(
-                    onClick = onNavigateToCharacters,
+                    onClick = onOpenMoments,
                     style = GlassButtonStyle.Glass,
                     horizontalPadding = 12.dp,
                     verticalPadding = 8.dp,
                 ) {
                     Text(
-                        "全部角色",
+                        "朋友圈",
                         color = chipContent,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -283,17 +297,6 @@ fun CharacterFeedScreen(
                 }
             }
         }
-    }
-
-    showPersona?.let { char ->
-        PersonaSheet(
-            character = char,
-            imageUrl = if (char.isCustom && char.image.isNotBlank())
-                char.image
-            else
-                container.assetRepository.getSelectionPicture(char.id),
-            onDismiss = { showPersona = null },
-        )
     }
 
     if (showCreate) {

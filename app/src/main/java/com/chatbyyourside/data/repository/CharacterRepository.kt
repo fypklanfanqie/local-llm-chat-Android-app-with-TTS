@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 /**
- * 角色仓库：合并预设干员（Characters.ALL）与用户自定义角色。
+ * 角色仓库：合并预设角色（Characters.ALL）与用户自定义角色。
  * 自定义角色持久化于 SettingsStore，可增删改 / 导入导出。
  */
 class CharacterRepository(private val settings: SettingsRepository) {
@@ -24,6 +24,17 @@ class CharacterRepository(private val settings: SettingsRepository) {
         Characters.ALL[id]?.let { return it }
         // 使用超时保护：国产 ROM DataStore 文件 I/O 可能被拦截导致 .first() 永久挂起
         return settings.getCustomCharactersNow().firstOrNull { it.id == id }
+    }
+
+    /**
+     * 全部角色名（自定义 + 预设，去重去空）；[excludeName] 用于「除自己以外的好友」候选集
+     * （朋友圈随机 @ 等社交场景）。
+     */
+    suspend fun getAllNamesNow(excludeName: String? = null): List<String> {
+        val names = settings.getCustomCharactersNow().map { it.name.trim() } +
+            Characters.getOrderedList().map { it.name.trim() }
+        val excluded = excludeName?.trim()
+        return names.filter { it.isNotEmpty() && it != excluded }.distinct()
     }
 
     suspend fun addCustom(character: Character) {

@@ -193,7 +193,8 @@ class DirectLlmClient(
         apiKey: String,
         model: String,
         messages: List<ChatMessageDto>,
-    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson = false)
+        onUsage: ((LlmTokenUsage?) -> Unit)? = null,
+    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson = false, onUsage = onUsage)
 
     /** 非流式一次性对话，可请求结构化 JSON 输出。
      *  仅当 [responseFormatJson]=true 且供应商在白名单内时才注入 response_format=json_object，
@@ -204,9 +205,32 @@ class DirectLlmClient(
         model: String,
         messages: List<ChatMessageDto>,
         responseFormatJson: Boolean,
-    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson)
+        onUsage: ((LlmTokenUsage?) -> Unit)? = null,
+    ): String = chatOnceInternal(baseUrl, apiKey, model, messages, responseFormatJson, onUsage)
 
+    /**
+     * 一次性对话 + 用量回调。
+     *
+     * 用量口径：各路径在响应解析处统一 [captureCloudUsage] 写 [lastCloudUsage]，此处比较调用前后的
+     * 快照——变化即本次调用拿到了真实 usage，映射成 [LlmTokenUsage] 回调给调用方做按角色记账；
+     * 端点未回报 usage（快照未变）时回调 null，记账方自行跳过。
+     */
     private suspend fun chatOnceInternal(
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+        messages: List<ChatMessageDto>,
+        responseFormatJson: Boolean,
+        onUsage: ((LlmTokenUsage?) -> Unit)? = null,
+    ): String {
+        val before = lastCloudUsage
+        val text = chatOnceRaw(baseUrl, apiKey, model, messages, responseFormatJson)
+        val after = lastCloudUsage
+        if (onUsage != null && after != null && after !== before) onUsage(after.toLlmTokenUsage())
+        return text
+    }
+
+    private suspend fun chatOnceRaw(
         baseUrl: String,
         apiKey: String,
         model: String,

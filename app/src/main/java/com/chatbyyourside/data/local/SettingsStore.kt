@@ -13,6 +13,9 @@ import com.chatbyyourside.data.model.ChatProviderType
 import com.chatbyyourside.data.model.GroupChatConfig
 import com.chatbyyourside.data.model.Lorebook
 import com.chatbyyourside.data.model.LorebookGlobalConfig
+import com.chatbyyourside.data.model.MomentAutoConfig
+import com.chatbyyourside.data.model.MomentImageGenConfig
+import com.chatbyyourside.data.model.TokenUsageSnapshot
 import com.chatbyyourside.data.model.SeedanceConfig
 import com.chatbyyourside.data.model.UserProfileConfig
 import com.chatbyyourside.data.model.WorldviewConfig
@@ -33,6 +36,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -177,9 +181,32 @@ class SettingsStore(
         val GROUP_NEXT_FIRE_AT = longPreferencesKey("group_next_fire_at")
 
         // ===== 我的形象（我的形象）=====
+        // 用户在社交场景（朋友圈 @、小说主控、评论区）里显示的昵称；空=未设置，调用方自行兜底。
+        val USER_DISPLAY_NAME = stringPreferencesKey("user_display_name")
         val USER_AVATAR_PATH = stringPreferencesKey("user_avatar_path")
         val USER_PERSONA = stringPreferencesKey("user_persona")
         val USER_RELATIONSHIP = stringPreferencesKey("user_relationship")
+
+        // ===== 朋友圈 =====
+        // 生图 API（OpenAI 聊天格式兼容的中转站/官方端点；与主 LLM 配置分离）。API Key 仅落 DataStore。
+        val MOMENT_IMAGEGEN_BASE_URL = stringPreferencesKey("moment_imagegen_base_url")
+        val MOMENT_IMAGEGEN_API_KEY = stringPreferencesKey("moment_imagegen_api_key")
+        val MOMENT_IMAGEGEN_MODEL = stringPreferencesKey("moment_imagegen_model")
+        // 生图总开关（默认开）：关闭后朋友圈一律纯文字，不再请求生图 API。
+        val MOMENT_IMAGEGEN_ENABLED = booleanPreferencesKey("moment_imagegen_enabled")
+        // 朋友圈封面图内部存储路径（空=默认渐变）
+        val MOMENT_COVER_PATH = stringPreferencesKey("moment_cover_path")
+        // 自动发圈：开关 + 间隔（小时）+ 参与角色集 + 下次触发时间 + 上次发帖角色（轮换）
+        val MOMENT_AUTO_ENABLED = booleanPreferencesKey("moment_auto_enabled")
+        val MOMENT_AUTO_INTERVAL_HOURS = intPreferencesKey("moment_auto_interval_hours")
+        val MOMENT_AUTO_CHARACTER_IDS = stringSetPreferencesKey("moment_auto_character_ids")
+        val MOMENT_NEXT_FIRE_AT = longPreferencesKey("moment_next_fire_at")
+        val MOMENT_LAST_CHAR_ID = stringPreferencesKey("moment_last_char_id")
+        // 互动角色：用户发朋友圈后随机 1-3 个角色评论/点赞的候选集（可搜索多选）
+        val MOMENT_REPLY_CHARACTER_IDS = stringSetPreferencesKey("moment_reply_character_ids")
+
+        // Token 用量（JSON: TokenUsageSnapshot，按角色累计云端输入/输出 token）
+        val TOKEN_USAGE = stringPreferencesKey("token_usage")
 
         // ===== 配置变更检测（移植自 iFeng 的 hasConfigChanged/acknowledgeConfigChange）=====
         // 记录"上次成功加载模型时所用的"线程/上下文/后端/lookahead。当前值 != last_applied 即视为已变更，
@@ -969,10 +996,11 @@ class SettingsStore(
     }
 
     // ===== 我的形象（我的形象）=====
-    /** 我的形象聚合（头像路径/人设/关系）：单 map 读取，单次原子写回。 */
+    /** 我的形象聚合（昵称/头像路径/人设/关系）：单 map 读取，单次原子写回。 */
     val userProfile: Flow<UserProfileConfig> = dataStore.data.map { p ->
         UserProfileConfig(
             avatarPath = p[Keys.USER_AVATAR_PATH] ?: "",
+            displayName = p[Keys.USER_DISPLAY_NAME] ?: "",
             persona = p[Keys.USER_PERSONA] ?: "",
             relationship = p[Keys.USER_RELATIONSHIP] ?: "",
         )
@@ -982,8 +1010,118 @@ class SettingsStore(
         dataStore.edit { p ->
             if (config.avatarPath.isBlank()) p.remove(Keys.USER_AVATAR_PATH)
             else p[Keys.USER_AVATAR_PATH] = config.avatarPath
+            p[Keys.USER_DISPLAY_NAME] = config.displayName.trim()
             p[Keys.USER_PERSONA] = config.persona
             p[Keys.USER_RELATIONSHIP] = config.relationship
+        }
+    }
+
+    // ===== 朋友圈 =====
+    val momentImageGenConfig: Flow<MomentImageGenConfig> = dataStore.data.map { p ->
+        MomentImageGenConfig(
+            baseUrl = p[Keys.MOMENT_IMAGEGEN_BASE_URL] ?: "",
+            apiKey = p[Keys.MOMENT_IMAGEGEN_API_KEY] ?: "",
+            model = p[Keys.MOMENT_IMAGEGEN_MODEL] ?: "",
+        )
+    }
+
+    /** 一次原子写回全部生图配置键（单个 edit 事务，防逐字段写回被并发覆盖）。 */
+    suspend fun setMomentImageGenConfig(config: MomentImageGenConfig) {
+        dataStore.edit { p ->
+            p[Keys.MOMENT_IMAGEGEN_BASE_URL] = config.baseUrl.trim()
+            p[Keys.MOMENT_IMAGEGEN_API_KEY] = config.apiKey
+            p[Keys.MOMENT_IMAGEGEN_MODEL] = config.model.trim()
+        }
+    }
+
+    val momentCoverPath: Flow<String> = dataStore.data.map { p -> p[Keys.MOMENT_COVER_PATH] ?: "" }
+
+    /** 生图总开关（默认开）：关闭后自动/手动发圈一律纯文字。 */
+    val momentImageGenEnabled: Flow<Boolean> =
+        dataStore.data.map { p -> p[Keys.MOMENT_IMAGEGEN_ENABLED] ?: true }
+
+    suspend fun setMomentImageGenEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.MOMENT_IMAGEGEN_ENABLED] = enabled }
+    }
+
+    suspend fun setMomentCoverPath(path: String?) {
+        dataStore.edit { p ->
+            if (path.isNullOrBlank()) p.remove(Keys.MOMENT_COVER_PATH) else p[Keys.MOMENT_COVER_PATH] = path
+        }
+    }
+
+    val momentAutoConfig: Flow<MomentAutoConfig> = dataStore.data.map { p ->
+        val storedInterval = p[Keys.MOMENT_AUTO_INTERVAL_HOURS] ?: AppConfig.Moment.DEFAULT_INTERVAL_HOURS
+        MomentAutoConfig(
+            enabled = p[Keys.MOMENT_AUTO_ENABLED] ?: false,
+            intervalHours = storedInterval.takeIf { it in AppConfig.Moment.MIN_INTERVAL_HOURS..AppConfig.Moment.MAX_INTERVAL_HOURS }
+                ?: AppConfig.Moment.DEFAULT_INTERVAL_HOURS,
+            characterIds = p[Keys.MOMENT_AUTO_CHARACTER_IDS] ?: emptySet(),
+        )
+    }
+
+    /** 一次原子写回自动发圈配置键。 */
+    suspend fun setMomentAutoConfig(config: MomentAutoConfig) {
+        dataStore.edit { p ->
+            p[Keys.MOMENT_AUTO_ENABLED] = config.enabled
+            p[Keys.MOMENT_AUTO_INTERVAL_HOURS] = config.intervalHours
+            p[Keys.MOMENT_AUTO_CHARACTER_IDS] = config.characterIds
+        }
+    }
+
+    // 互动角色：用户发朋友圈后随机评论/点赞的候选集
+    val momentReplyCharacterIds: Flow<Set<String>> =
+        dataStore.data.map { p -> p[Keys.MOMENT_REPLY_CHARACTER_IDS] ?: emptySet() }
+
+    suspend fun setMomentReplyCharacterIds(ids: Set<String>) {
+        dataStore.edit { it[Keys.MOMENT_REPLY_CHARACTER_IDS] = ids }
+    }
+
+    val momentNextFireAt: Flow<Long> = dataStore.data.map { p -> p[Keys.MOMENT_NEXT_FIRE_AT] ?: 0L }
+
+    suspend fun setMomentNextFireAt(epochMs: Long) {
+        dataStore.edit { p ->
+            if (epochMs <= 0L) p.remove(Keys.MOMENT_NEXT_FIRE_AT) else p[Keys.MOMENT_NEXT_FIRE_AT] = epochMs
+        }
+    }
+
+    suspend fun getMomentNextFireAtNow(): Long =
+        withTimeoutOrNull(5_000L) { dataStore.data.map { p -> p[Keys.MOMENT_NEXT_FIRE_AT] ?: 0L }.first() } ?: 0L
+
+    val momentLastCharId: Flow<String?> = dataStore.data.map { p -> p[Keys.MOMENT_LAST_CHAR_ID] }
+
+    suspend fun setMomentLastCharId(id: String?) {
+        dataStore.edit { p ->
+            if (id == null) p.remove(Keys.MOMENT_LAST_CHAR_ID) else p[Keys.MOMENT_LAST_CHAR_ID] = id
+        }
+    }
+
+    suspend fun getMomentLastCharIdNow(): String? =
+        withTimeoutOrNull(5_000L) { dataStore.data.map { p -> p[Keys.MOMENT_LAST_CHAR_ID] }.first() }
+
+    suspend fun getMomentImageGenConfigNow(): MomentImageGenConfig =
+        withTimeoutOrNull(5_000L) { momentImageGenConfig.first() } ?: MomentImageGenConfig.EMPTY
+
+    suspend fun getMomentImageGenEnabledNow(): Boolean =
+        withTimeoutOrNull(5_000L) { momentImageGenEnabled.first() } ?: true
+
+    suspend fun getMomentAutoConfigNow(): MomentAutoConfig =
+        withTimeoutOrNull(5_000L) { momentAutoConfig.first() } ?: MomentAutoConfig()
+
+    // ===== Token 用量（按角色累计；容错空快照）=====
+    val tokenUsage: Flow<TokenUsageSnapshot> = dataStore.data.map { p ->
+        val raw = p[Keys.TOKEN_USAGE] ?: ""
+        if (raw.isBlank()) TokenUsageSnapshot()
+        else runCatching { voiceJson.decodeFromString<TokenUsageSnapshot>(raw) }.getOrDefault(TokenUsageSnapshot())
+    }
+
+    /** 原子更新 Token 用量（读-改-写单个 edit 事务，防并发丢失）。 */
+    suspend fun updateTokenUsage(transform: (TokenUsageSnapshot) -> TokenUsageSnapshot) {
+        dataStore.edit { p ->
+            val raw = p[Keys.TOKEN_USAGE] ?: ""
+            val current: TokenUsageSnapshot = if (raw.isBlank()) TokenUsageSnapshot()
+            else runCatching { voiceJson.decodeFromString<TokenUsageSnapshot>(raw) }.getOrDefault(TokenUsageSnapshot())
+            p[Keys.TOKEN_USAGE] = voiceJson.encodeToString(transform(current))
         }
     }
 

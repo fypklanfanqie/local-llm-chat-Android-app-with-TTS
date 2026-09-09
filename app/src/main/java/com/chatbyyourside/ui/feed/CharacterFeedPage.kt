@@ -25,7 +25,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -73,7 +74,8 @@ internal fun CharacterFeedPage(
     settled: Boolean,
     bottomBarHeight: Dp,
     onChat: () -> Unit,
-    onPersona: () -> Unit,
+    onAffinity: () -> Unit,
+    onNovel: () -> Unit,
     onVoice: (() -> Unit)?,
     onDelete: (() -> Unit)?,
 ) {
@@ -217,7 +219,9 @@ internal fun CharacterFeedPage(
                     )
                 }
                 Spacer(Modifier.height(14.dp))
-                // 底部操作按钮：主按钮突出，人设辅助；移除与主按钮重复的「对话」
+                // 底部操作按钮：主按钮突出 + 好感 + 小说。
+                // 「人设」按钮已移除（4 按钮在窄屏挤成单字；人设页仍可从角色 Tab 进入），
+                // 空出的权重让给「好感/小说」恢复正常两字宽度。
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -235,15 +239,26 @@ internal fun CharacterFeedPage(
                         Text("开始对话", fontWeight = FontWeight.Bold, fontSize = 15.sp, maxLines = 1)
                     }
                     GlassButton(
-                        onClick = onPersona,
+                        onClick = onAffinity,
                         style = GlassButtonStyle.Glass,
                         modifier = Modifier.weight(1f),
                         horizontalPadding = 8.dp,
                         verticalPadding = 14.dp,
                     ) {
-                        Icon(Icons.Outlined.Info, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Filled.Favorite, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("人设", fontWeight = FontWeight.SemiBold, maxLines = 1)
+                        Text("好感", fontWeight = FontWeight.SemiBold, maxLines = 1)
+                    }
+                    GlassButton(
+                        onClick = onNovel,
+                        style = GlassButtonStyle.Glass,
+                        modifier = Modifier.weight(1f),
+                        horizontalPadding = 8.dp,
+                        verticalPadding = 14.dp,
+                    ) {
+                        Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("小说", fontWeight = FontWeight.SemiBold, maxLines = 1)
                     }
                 }
             }

@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.layout.LayoutModifier
@@ -61,6 +62,10 @@ import com.chatbyyourside.ui.glass.GlassNavItem
 import com.chatbyyourside.ui.groupchat.GroupChatScreen
 import com.chatbyyourside.ui.groupchat.GroupListScreen
 import com.chatbyyourside.ui.groupchat.GroupNavigationBus
+import com.chatbyyourside.ui.moment.MomentsScreen
+import com.chatbyyourside.ui.novel.NovelEditorScreen
+import com.chatbyyourside.ui.novel.NovelHomeScreen
+import com.chatbyyourside.ui.novel.NovelStoryScreen
 import com.chatbyyourside.ui.lorebook.LorebookDetailScreen
 import com.chatbyyourside.ui.lorebook.LorebookEntryEditScreen
 import com.chatbyyourside.ui.models.ModelManagerScreen
@@ -255,6 +260,59 @@ fun AppNavGraph(container: AppContainer, initialChatOpen: Boolean = false, crash
                             onOpenGroupChat = {
                                 feedNavController.navigate(FeedRoute.GROUP_LIST) { launchSingleTop = true }
                             },
+                            onOpenMoments = {
+                                feedNavController.navigate(FeedRoute.MOMENTS) { launchSingleTop = true }
+                            },
+                            onOpenNovel = {
+                                feedNavController.navigate(FeedRoute.NOVEL_HOME) { launchSingleTop = true }
+                            },
+                            onOpenAffinity = { characterId ->
+                                navController.navigate(affinityRoute(characterId)) { launchSingleTop = true }
+                            },
+                        )
+                    }
+                    composable(FeedRoute.MOMENTS) {
+                        MomentsScreen(
+                            container = container,
+                            bottomBarHeight = bottomBarHeight,
+                            onBack = { feedNavController.popBackStack() },
+                        )
+                    }
+                    composable(FeedRoute.NOVEL_HOME) {
+                        NovelHomeScreen(
+                            container = container,
+                            bottomBarHeight = bottomBarHeight,
+                            onBack = { feedNavController.popBackStack() },
+                            onOpenStory = { storyId ->
+                                feedNavController.navigate(FeedRoute.novelStoryRoute(storyId)) { launchSingleTop = true }
+                            },
+                        )
+                    }
+                    composable(
+                        route = FeedRoute.NOVEL_STORY,
+                        arguments = listOf(navArgument("storyId") { type = NavType.LongType }),
+                    ) { entry ->
+                        val storyId = entry.arguments?.getLong("storyId") ?: 0L
+                        NovelStoryScreen(
+                            container = container,
+                            storyId = storyId,
+                            bottomBarHeight = bottomBarHeight,
+                            onBack = { feedNavController.popBackStack() },
+                            onOpenChapter = { chapterId ->
+                                feedNavController.navigate(FeedRoute.novelEditorRoute(chapterId)) { launchSingleTop = true }
+                            },
+                        )
+                    }
+                    composable(
+                        route = FeedRoute.NOVEL_EDITOR,
+                        arguments = listOf(navArgument("chapterId") { type = NavType.LongType }),
+                    ) { entry ->
+                        val chapterId = entry.arguments?.getLong("chapterId") ?: 0L
+                        NovelEditorScreen(
+                            container = container,
+                            chapterId = chapterId,
+                            bottomBarHeight = bottomBarHeight,
+                            onBack = { feedNavController.popBackStack() },
                         )
                     }
                     composable(

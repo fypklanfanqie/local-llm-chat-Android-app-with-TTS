@@ -233,10 +233,6 @@ class GroupChatViewModel(
             _uiState.update { it.copy(errorMessage = "请先到「设置 → 群聊」选择群成员") }
             return
         }
-        if (state.activeProvider != ChatProviderType.CLOUD) {
-            _uiState.update { it.copy(errorMessage = "群聊仅云端 AI 可用") }
-            return
-        }
 
         _uiState.update {
             it.copy(
@@ -251,6 +247,11 @@ class GroupChatViewModel(
         // 绝不清理新请求的 streaming 状态或 pendingFinals。
         val requestId = requestGuard.next()
         streamingJob = viewModelScope.launch {
+            // 群聊发言直接调用已配置的云端 LLM，与聊天页的本地/云端切换解耦（未配置时提示）
+            if (!container.settingsRepository.isCloudApiReady()) {
+                _uiState.update { it.copy(errorMessage = "请先在设置中配置云端 AI API", isStreaming = false, showTyping = false) }
+                return@launch
+            }
             var userMsgId = 0L
             var repliesOk = 0
             try {
@@ -263,8 +264,10 @@ class GroupChatViewModel(
                     .filterKeys { it !in duplicateNames }
                 val mentionIds = GroupChatPromptBuilder.extractMentions(text, memberNames)
                     .mapNotNull { nameToId[it] }
-                val count = GroupSpeakerPicker.randomReplyCount(members.size, mentionIds.size)
-                val speakerIds = GroupSpeakerPicker.pickRandom(members.map { it.id }.toSet(), mentionIds, count)
+                // 有 @ → 仅被 @ 成员按提及顺序答复（定向回答，不随机补人）；无 @ → 随机 1..cap 人
+                val speakerIds = GroupSpeakerPicker.resolveReplySpeakers(
+                    members.map { it.id }.toSet(), mentionIds,
+                )
                 val speakers = speakerIds.mapNotNull { id -> members.firstOrNull { it.id == id } }
                 if (speakers.isEmpty()) throw Exception("请先到「设置 → 群聊」选择群成员")
                 _uiState.update { it.copy(typingCharacterId = speakers.first().id) }
@@ -274,7 +277,8 @@ class GroupChatViewModel(
                 container.settingsRepository.setGroupLastUserMessageAt(System.currentTimeMillis())
 
                 var history = container.chatRepository.getHistory(convId)
-                val provider = container.chatProviderManager.getActiveProvider()
+                // 群聊发言固定走云端 Provider（不跟随聊天页的本地/云端切换）。
+                val provider = container.cloudChatProvider
                 val mentionIdSet = mentionIds.toSet()
                 // 世界观注入：绑定本群（GROUP 目标）的世界观，多说话人循环外只构建一次
                 val worldviewDirective = buildWorldviewDirective(
@@ -341,7 +345,20 @@ class GroupChatViewModel(
                         }
                     }
 
+                    val usageBefore = container.directLlmClient.lastCloudUsage
                     val displayResponse = provider.chat(apiMessages, onChunk)
+                    // Token 按发言人记账：用量在 DirectLlmClient 响应解析处捕获，本轮快照变化即新用量
+                    // （与上游 chat 接口透传 onUsage 等价，避免为记账改动 Provider 契约）。
+                    container.directLlmClient.lastCloudUsage
+                        ?.takeIf { it !== usageBefore }
+                        ?.let { u ->
+                            container.settingsRepository.recordTokenUsage(
+                                speaker.id,
+                                u.promptTokens ?: 0,
+                                u.completionTokens ?: 0,
+                                u.cacheHitTokens ?: 0,
+                            )
+                        }
                     // 结构化身份解析：只认当前 speaker 的前缀；检测到其他成员前缀（模型串人设）
                     // 不静默归属——跳过该条并提示，绝不按当前 speaker 落库。
                     val parsed = GroupChatPromptBuilder.parseSpeakerResponse(displayResponse, speaker.name, memberNames)

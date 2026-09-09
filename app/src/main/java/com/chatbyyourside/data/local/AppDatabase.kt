@@ -293,8 +293,14 @@ interface ConversationDao {
         SpecialEventEntity::class,
         AffinityRewardEntity::class,
         SpecialEventScriptEntity::class,
+        MomentPostEntity::class,
+        MomentCommentEntity::class,
+        MomentLikeEntity::class,
+        NovelStoryEntity::class,
+        NovelChapterEntity::class,
+        NovelLineEntity::class,
     ],
-    version = 9,
+    version = 11,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -302,6 +308,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun conversationDao(): ConversationDao
     abstract fun seedanceVideoDao(): SeedanceVideoDao
     abstract fun affinityDao(): AffinityDao
+    abstract fun momentDao(): MomentDao
+    abstract fun novelDao(): NovelDao
 
     companion object {
         @Volatile
@@ -528,6 +536,98 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v9 -> v10：朋友圈。三张新表，纯新增、非破坏式：
+         *
+         * - moment_post：帖子（authorType "user"|"character"；imagesJson 落盘图片路径数组）；
+         * - moment_comment：评论（同 authorType；角色评论 = 发帖者回复）；
+         * - moment_like：点赞（unique(postId, characterId) 防重，characterId NULL = 用户）。
+         *
+         * 列集/类型与 [MomentPostEntity]/[MomentCommentEntity]/[MomentLikeEntity] 完全一致，
+         * 索引名遵循 Room 命名 index_<表>_<列...>。
+         */
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `moment_post` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`authorType` TEXT NOT NULL, " +
+                        "`characterId` TEXT, " +
+                        "`content` TEXT NOT NULL, " +
+                        "`imagesJson` TEXT NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "`imagePrompt` TEXT)"
+                )
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_moment_post_createdAt` ON `moment_post` (`createdAt`)")
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `moment_comment` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`postId` INTEGER NOT NULL, " +
+                        "`authorType` TEXT NOT NULL, " +
+                        "`characterId` TEXT, " +
+                        "`content` TEXT NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL)"
+                )
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_moment_comment_postId_createdAt` ON `moment_comment` (`postId`, `createdAt`)")
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `moment_like` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`postId` INTEGER NOT NULL, " +
+                        "`characterId` TEXT, " +
+                        "`createdAt` INTEGER NOT NULL)"
+                )
+                database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_moment_like_postId_characterId` ON `moment_like` (`postId`, `characterId`)")
+            }
+        }
+
+        /**
+         * v10 -> v11：小说模式。三张新表，纯新增、非破坏式：
+         *
+         * - novel_story：故事（成员/NPC/主控均为 JSON 列或文本列）；
+         * - novel_chapter：章节（话），orderIndex 排序；
+         * - novel_line：脚本行，lineOrder 排序，speakerType 三态。
+         */
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `novel_story` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`title` TEXT NOT NULL, " +
+                        "`background` TEXT NOT NULL, " +
+                        "`memberIdsJson` TEXT NOT NULL, " +
+                        "`customNpcsJson` TEXT NOT NULL, " +
+                        "`protagonistName` TEXT NOT NULL, " +
+                        "`protagonistPersona` TEXT NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL)"
+                )
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `novel_chapter` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`storyId` INTEGER NOT NULL, " +
+                        "`orderIndex` INTEGER NOT NULL, " +
+                        "`title` TEXT NOT NULL, " +
+                        "`summary` TEXT NOT NULL, " +
+                        "`opening` TEXT NOT NULL, " +
+                        "`requirements` TEXT NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL)"
+                )
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_novel_chapter_storyId_orderIndex` ON `novel_chapter` (`storyId`, `orderIndex`)")
+                database.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `novel_line` (" +
+                        "`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`chapterId` INTEGER NOT NULL, " +
+                        "`lineOrder` INTEGER NOT NULL, " +
+                        "`speakerType` TEXT NOT NULL, " +
+                        "`speakerName` TEXT NOT NULL, " +
+                        "`characterId` TEXT, " +
+                        "`content` TEXT NOT NULL)"
+                )
+                database.execSQL("CREATE INDEX IF NOT EXISTS `index_novel_line_chapterId_lineOrder` ON `novel_line` (`chapterId`, `lineOrder`)")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 // 双重检查锁定：避免两个并发首次调用各建一个 RoomDatabase 实例，
@@ -536,7 +636,10 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "rhodes_chat.db"
-                ).addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9).build().also { INSTANCE = it }
+                ).addMigrations(
+                    MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+                    MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
+                ).build().also { INSTANCE = it }
             }
         }
     }
