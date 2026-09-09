@@ -1056,8 +1056,21 @@ class ChatViewModel(
                     generatedTokens = localResult.generation?.generatedTokens ?: 0
                     localCompletionReason = localResult.generation?.completionReason
                 } else {
+                    val usageBefore = container.directLlmClient.lastCloudUsage
                     displayResponse = provider.chat(apiMessages, onChunk)
                     modelText = null
+                    // Token 用量按角色记账（设置页「Token 用量」）：用量在 DirectLlmClient 响应解析处
+                    // 捕获到 lastCloudUsage，本轮快照变化即为本次调用用量；端点未回报则不变、不记账。
+                    container.directLlmClient.lastCloudUsage
+                        ?.takeIf { it !== usageBefore }
+                        ?.let { u ->
+                            container.settingsRepository.recordTokenUsage(
+                                _uiState.value.characterId,
+                                u.promptTokens ?: 0,
+                                u.completionTokens ?: 0,
+                                u.cacheHitTokens ?: 0,
+                            )
+                        }
                 }
 
                 // 流式完成 -> 移除临时 streaming 消息，落库持久化；明确区分 timeout/max-token/用户停止。

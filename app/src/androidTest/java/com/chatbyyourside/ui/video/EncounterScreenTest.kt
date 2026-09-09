@@ -134,18 +134,18 @@ class EncounterScreenTest {
         val v = video(
             id = 7L,
             state = SeedanceVideoState.READY,
-            characterName = "阿米娅",
+            characterName = "苏晚",
             userText = "今天我们去看流星雨吧",
-            assistantText = "好呀，罗德岛的夜空最合适了。",
-            finalPrompt = "流星雨下的阿米娅，远景，9:16",
+            assistantText = "好呀，夏夜的星空最合适了。",
+            finalPrompt = "流星雨下的苏晚，远景，9:16",
         )
         rule.setContent {
             EncounterVideoPage(video = v, settled = true, player = null, onOpenDetails = {})
         }
-        rule.onNodeWithText("阿米娅").assertIsDisplayed()
+        rule.onNodeWithText("苏晚").assertIsDisplayed()
         rule.onNodeWithText("“今天我们去看流星雨吧”").assertIsDisplayed()
-        rule.onNodeWithText("好呀，罗德岛的夜空最合适了。").assertIsDisplayed()
-        rule.onNodeWithText("提示词：流星雨下的阿米娅，远景，9:16").assertIsDisplayed()
+        rule.onNodeWithText("好呀，夏夜的星空最合适了。").assertIsDisplayed()
+        rule.onNodeWithText("提示词：流星雨下的苏晚，远景，9:16").assertIsDisplayed()
     }
 
     // ===== 页面动作：失败/排队/就绪 =====
@@ -411,7 +411,7 @@ class EncounterScreenTest {
         val v = video(
             40L,
             state = SeedanceVideoState.FAILED_REMOTE,
-            characterName = "阿米娅",
+            characterName = "苏晚",
             userText = "用户原文",
             assistantText = "助手原文",
             finalPrompt = "最终提示词内容",
@@ -500,7 +500,7 @@ class EncounterScreenTest {
         id: Long,
         state: SeedanceVideoState = SeedanceVideoState.QUEUED,
         localPath: String? = null,
-        characterName: String = "阿米娅",
+        characterName: String = "苏晚",
         characterImagePath: String? = null,
         userText: String = "你好",
         assistantText: String = "回答",
@@ -519,8 +519,8 @@ class EncounterScreenTest {
         sourceAssistantMessageId = 200L,
         characterIdSnapshot = "char-1",
         characterNameSnapshot = characterName,
-        characterRoleSnapshot = "罗德岛领袖",
-        characterSystemPromptSnapshot = "你是阿米娅。",
+        characterRoleSnapshot = "工作室姐姐",
+        characterSystemPromptSnapshot = "你是苏晚。",
         userTextSnapshot = userText,
         assistantTextSnapshot = assistantText,
         sceneDescriptionSnapshot = "",
@@ -528,7 +528,7 @@ class EncounterScreenTest {
         promptModelSnapshot = "doubao-text-pro",
         promptJson = null,
         finalPrompt = finalPrompt,
-        characterImageSourceSnapshot = "asset://amiya.png",
+        characterImageSourceSnapshot = "asset://senpai.webp",
         backgroundImageSourceSnapshot = null,
         characterImagePath = characterImagePath,
         characterImageMime = null,

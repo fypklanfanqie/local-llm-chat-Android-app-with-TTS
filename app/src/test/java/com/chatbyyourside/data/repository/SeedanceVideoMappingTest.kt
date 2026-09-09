@@ -36,16 +36,16 @@ class SeedanceVideoMappingTest {
         sourceUserMessageId = 11,
         sourceAssistantMessageId = 13,
         characterIdSnapshot = "char-1",
-        characterNameSnapshot = "阿米娅",
-        characterRoleSnapshot = "罗德岛领袖",
-        characterSystemPromptSnapshot = "你是阿米娅，冷静可靠。",
+        characterNameSnapshot = "苏晚",
+        characterRoleSnapshot = "工作室主理",
+        characterSystemPromptSnapshot = "你是苏晚，冷静可靠。",
         userTextSnapshot = "今天天气如何？",
         assistantTextSnapshot = "天气不错，适合出去走走。",
         sceneDescriptionSnapshot = "夜晚的街道，霓虹闪烁",
         promptBaseUrlSnapshot = "https://api.example.com/v1",
         promptModelSnapshot = "doubao-text-pro",
         promptJson = "{\"finalPrompt\":\"p1\"}",
-        finalPrompt = "镜头缓慢推进，阿米娅站在街角。",
+        finalPrompt = "镜头缓慢推进，苏晚站在街角。",
         characterImageSourceSnapshot = "asset://amiya.png",
         backgroundImageSourceSnapshot = "file:///data/bg.png",
         characterImagePath = "filesDir/seedance/tasks/uuid-42/references/character.png",
@@ -97,16 +97,16 @@ class SeedanceVideoMappingTest {
         sourceUserMessageId = 11,
         sourceAssistantMessageId = 13,
         characterIdSnapshot = "char-1",
-        characterNameSnapshot = "阿米娅",
-        characterRoleSnapshot = "罗德岛领袖",
-        characterSystemPromptSnapshot = "你是阿米娅，冷静可靠。",
+        characterNameSnapshot = "苏晚",
+        characterRoleSnapshot = "工作室主理",
+        characterSystemPromptSnapshot = "你是苏晚，冷静可靠。",
         userTextSnapshot = "今天天气如何？",
         assistantTextSnapshot = "天气不错，适合出去走走。",
         sceneDescriptionSnapshot = "夜晚的街道，霓虹闪烁",
         promptBaseUrlSnapshot = "https://api.example.com/v1",
         promptModelSnapshot = "doubao-text-pro",
         promptJson = "{\"finalPrompt\":\"p1\"}",
-        finalPrompt = "镜头缓慢推进，阿米娅站在街角。",
+        finalPrompt = "镜头缓慢推进，苏晚站在街角。",
         characterImageSourceSnapshot = "asset://amiya.png",
         backgroundImageSourceSnapshot = "file:///data/bg.png",
         characterImagePath = "filesDir/seedance/tasks/uuid-42/references/character.png",
@@ -164,9 +164,9 @@ class SeedanceVideoMappingTest {
         assertEquals(13L, d.sourceAssistantMessageId)
         // 快照字段（含两个来源快照列）
         assertEquals("char-1", d.characterIdSnapshot)
-        assertEquals("阿米娅", d.characterNameSnapshot)
-        assertEquals("罗德岛领袖", d.characterRoleSnapshot)
-        assertEquals("你是阿米娅，冷静可靠。", d.characterSystemPromptSnapshot)
+        assertEquals("苏晚", d.characterNameSnapshot)
+        assertEquals("工作室主理", d.characterRoleSnapshot)
+        assertEquals("你是苏晚，冷静可靠。", d.characterSystemPromptSnapshot)
         assertEquals("今天天气如何？", d.userTextSnapshot)
         assertEquals("天气不错，适合出去走走。", d.assistantTextSnapshot)
         assertEquals("夜晚的街道，霓虹闪烁", d.sceneDescriptionSnapshot)
@@ -176,7 +176,7 @@ class SeedanceVideoMappingTest {
         assertEquals("file:///data/bg.png", d.backgroundImageSourceSnapshot)
         // 提示词与图片产物
         assertEquals("{\"finalPrompt\":\"p1\"}", d.promptJson)
-        assertEquals("镜头缓慢推进，阿米娅站在街角。", d.finalPrompt)
+        assertEquals("镜头缓慢推进，苏晚站在街角。", d.finalPrompt)
         assertEquals("filesDir/seedance/tasks/uuid-42/references/character.png", d.characterImagePath)
         assertEquals("image/png", d.characterImageMime)
         assertEquals("abc123", d.characterImageSha256)
@@ -232,9 +232,9 @@ class SeedanceVideoMappingTest {
         assertEquals(11L, e.sourceUserMessageId)
         assertEquals(13L, e.sourceAssistantMessageId)
         assertEquals("char-1", e.characterIdSnapshot)
-        assertEquals("阿米娅", e.characterNameSnapshot)
-        assertEquals("罗德岛领袖", e.characterRoleSnapshot)
-        assertEquals("你是阿米娅，冷静可靠。", e.characterSystemPromptSnapshot)
+        assertEquals("苏晚", e.characterNameSnapshot)
+        assertEquals("工作室主理", e.characterRoleSnapshot)
+        assertEquals("你是苏晚，冷静可靠。", e.characterSystemPromptSnapshot)
         assertEquals("今天天气如何？", e.userTextSnapshot)
         assertEquals("天气不错，适合出去走走。", e.assistantTextSnapshot)
         assertEquals("夜晚的街道，霓虹闪烁", e.sceneDescriptionSnapshot)
@@ -356,9 +356,9 @@ class SeedanceVideoMappingTest {
             sourceConversationId = 7,
             sourceUserMessageId = 11,
             characterIdSnapshot = "char-1",
-            characterNameSnapshot = "阿米娅",
-            characterRoleSnapshot = "罗德岛领袖",
-            characterSystemPromptSnapshot = "你是阿米娅",
+            characterNameSnapshot = "苏晚",
+            characterRoleSnapshot = "工作室主理",
+            characterSystemPromptSnapshot = "你是苏晚",
             userTextSnapshot = "你好",
             assistantTextSnapshot = "你好呀",
             sceneDescriptionSnapshot = "夜晚的街道",
@@ -385,9 +385,9 @@ class SeedanceVideoMappingTest {
         assertEquals(42L, e.sourceAssistantMessageId)
         // 快照原样落库
         assertEquals("char-1", e.characterIdSnapshot)
-        assertEquals("阿米娅", e.characterNameSnapshot)
-        assertEquals("罗德岛领袖", e.characterRoleSnapshot)
-        assertEquals("你是阿米娅", e.characterSystemPromptSnapshot)
+        assertEquals("苏晚", e.characterNameSnapshot)
+        assertEquals("工作室主理", e.characterRoleSnapshot)
+        assertEquals("你是苏晚", e.characterSystemPromptSnapshot)
         assertEquals("你好", e.userTextSnapshot)
         assertEquals("你好呀", e.assistantTextSnapshot)
         assertEquals("夜晚的街道", e.sceneDescriptionSnapshot)
@@ -449,9 +449,9 @@ class SeedanceVideoMappingTest {
             sourceConversationId = 7,
             sourceUserMessageId = null,
             characterIdSnapshot = "char-1",
-            characterNameSnapshot = "阿米娅",
-            characterRoleSnapshot = "罗德岛领袖",
-            characterSystemPromptSnapshot = "你是阿米娅",
+            characterNameSnapshot = "苏晚",
+            characterRoleSnapshot = "工作室主理",
+            characterSystemPromptSnapshot = "你是苏晚",
             userTextSnapshot = "你好",
             assistantTextSnapshot = "你好呀",
             sceneDescriptionSnapshot = "",

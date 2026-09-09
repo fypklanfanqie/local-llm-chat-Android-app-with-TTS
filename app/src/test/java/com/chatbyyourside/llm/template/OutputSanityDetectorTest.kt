@@ -17,7 +17,7 @@ class OutputSanityDetectorTest {
     fun saneChineseResponse() {
         assertEquals(
             OutputSanityDetector.SanityClass.SANE,
-            classifyOf("我是阿米娅，罗德岛的干员。今天有什么可以帮到你的吗？", "如果有需要请随时告诉我。"),
+            classifyOf("我是苏晚，工作室的角色。今天有什么可以帮到你的吗？", "如果有需要请随时告诉我。"),
         )
     }
 

@@ -21,13 +21,13 @@ data class ChatBackgroundConfig(
 /**
  * 通讯界面背景仓库
  *
- * 内置 PRTS 背景轮播来自 [AssetRepository]（assets / CDN）；用户可在设置里添加最多
+ * 内置背景轮播来自 [AssetRepository]（assets / CDN）；用户可在设置里添加最多
  * [MAX_BACKGROUNDS] 张自定义背景。所选 content URI 复制到 app 内部存储
  * （`filesDir/chat_backgrounds/`），仅存绝对路径，**不依赖 SAF 持久化 URI 权限**：
  * 持久权限在部分 OEM / 云相册源上不可靠，源 App 重装或撤销即失效；内部拷贝保证
  * 背景始终可用、离线可用、可删除清理。
  *
- * 生效规则：`enabled && paths 非空` -> 轮播自定义；否则 -> 内置 PRTS 轮播（行为不变）。
+ * 生效规则：`enabled && paths 非空` -> 轮播自定义；否则 -> 内置轮播（行为不变）。
  */
 class ChatBackgroundRepository(
     private val context: Context,

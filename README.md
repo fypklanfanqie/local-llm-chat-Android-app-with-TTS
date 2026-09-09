@@ -18,6 +18,14 @@
 
 ## ✨ 新功能速览 · What's New
 
+- **📸 朋友圈 · Moments** — 角色用云端大模型（配你自己的生图 API）发朋友圈：日常文案 + 配图，定时自动发圈（间隔可调、8–23 点、角色轮换、随机 @ 好友），你也能自己发圈；角色会来点赞评论，评论后发帖角色必回。生图三通道自动回退，失败自动降级纯文字。
+  Characters post to their own Moments feed (LLM caption + your image-gen API), auto-post on a schedule with random @-mentions; you can post too, and characters like/comment — the poster always replies.
+- **📖 小说模式 · Novel mode** — 选角色组团写互动小说：故事 → 话（章节）→ 对白脚本行编辑器，AI 按人设与世界观续写（6–10 行一批），支持旁白 / 角色 / 主控三种说话人。
+  Group your characters into a serialised novel: stories → chapters → script-line editor with AI continuation (narration / character / protagonist speakers).
+- **📊 Token 用量统计 · Token usage analytics** — 按角色累计云端输入 / 输出 token、调用次数与前缀缓存命中率，设置页总量四宫格 + Top 12 双色条形图 + 可搜索明细。
+  Per-character cloud token totals with prompt-cache hit rate, charted in Settings.
+- **🔌 云端辅助功能与聊天模式解耦 · Cloud helpers decoupled from chat mode** — 朋友圈、群聊、主动问候只需「配置过云端 API」即可用，本地模型聊天时照常工作。
+  Moments, group chat and proactive greetings now only need a configured cloud API — they keep working while you chat with a local model.
 - **🧠 端侧 MNN 自适应推理引擎** — CPU / OpenCL GPU / QNN NPU 三后端自适应调度、自动回退链、GPU 自愈健康、一键预热。完全离线推理，数据不出设备。
   **On-device MNN adaptive inference** — auto CPU/OpenCL-GPU/QNN-NPU scheduling with fallback chains, self-healing GPU health and one-tap preheat. Fully offline.
 - **🩹 本地推理稳定性修复 · Local inference stability fix** — 修复本地 MNN 大模型「运行一会后闪退」的 native SIGSEGV：生成路径回退到稳定 JNI 入口；模型下载增加完整性硬校验（权重文件缺失 / 文件截断在加载前拦截，杜绝残缺模型触发原生崩溃）。
@@ -176,8 +184,8 @@
   Real-time liquid-glass overlay monitoring token/s, CPU, GPU, NPU, temperature, and memory during local inference.
 
 - **角色主动问候** · **Proactive character greetings**
-  WorkManager 调度的自续链通知，角色会在你离开后主动发来消息（跨重启存活，限云端）。
-  WorkManager-scheduled self-continuing notification chain — characters message you on their own, surviving app restarts (cloud only).
+  WorkManager 心跳 + 精确闹钟调度，角色会在你离开后主动发来消息（跨重启存活；只需配置过云端 API，本地聊天时同样生效）。
+  WorkManager heartbeat plus exact-alarm scheduling — characters message you on their own, surviving app restarts (needs a configured cloud API, and keeps working while you chat locally).
 
 - **聊天体验打磨** · **Chat polish**
   思考流 30fps 节流渲染、用户控制底部跟随（上滑暂停 + 回到底部按钮）、停止生成保留部分输出并标注状态、首答 Room 行号对账不再闪烁消失。
@@ -186,6 +194,19 @@
 - **💝 好感度 / 羁绊系统** · **Affinity / bond system**
   每日签到领金币（冷启动自动弹窗）；用户自制礼物档案 → 金币采购 → 聊天中赠送 → 角色 AI 生成当面道谢并记入礼物墙；每角色好感度 0–200（聊天 / 视频 / 送礼累加，幂等账本防重复刷分）；好感跨档解锁「特殊邂逅」剧情并桥接为真实聊天会话（仅云端、禁视频）。**内置 50 角色各配 4 档原创剧情文案；自定义角色的剧情文案可在档案页自编辑。**
   Daily check-in coins, a user-authored gift shop (create → buy → send in chat → AI thank-you on the gift wall), per-character affinity 0–200 with an idempotent ledger, and affinity-threshold special events that launch real cloud-only conversations. Built-in characters ship with 4 original scripts each; custom characters' scripts are editable.
+
+- **📸 朋友圈** · **Moments feed**
+  角色用云端大模型写文案、用**你自己的生图 API**（OpenAI 聊天格式出图 / gpt-image Responses / 任务制媒体 API 三通道自动回退）出配图并发圈；支持定时自动发圈（间隔 1–72h 可调、8–23 点窗口、角色严格轮换、随机 @ 一位好友）、用户自己发圈（文字 + 相册图）、点赞与评论（发帖角色必回）。生图失败自动降级纯文字。
+  Characters post captions from the cloud LLM with images from your own image-gen API (three-channel auto fallback): scheduled auto-posting with random @-mentions, your own posts, likes and comments — and the poster always replies.
+
+- **📖 小说模式** · **Novel mode**
+  选若干角色组一个故事（含自定义 NPC 与主控人设），按「话」管理章节，正文是可逐行编辑的脚本（旁白 / 角色 / 主控三种说话人）；AI 按人设与世界观续写 6–10 行一批，本地与云端均可用。
+  Build a serialised novel from a cast of characters (plus custom NPCs and your own protagonist persona), edit it line by line as a script, and let the AI continue the story in character.
+
+- **📊 Token 用量统计** · **Token usage analytics**
+  按角色累计云端输入 / 输出 token 与调用次数，并统计前缀缓存命中率（DeepSeek / OpenAI 兼容 / Anthropic 各家字段统一解析）；设置页给出总量四宫格、Top 12 双色堆叠条形图与可搜索的角色明细。
+  Per-character cloud token totals plus prompt-cache hit rate, charted in Settings (four stat tiles, a Top-12 stacked bar chart and a searchable breakdown).
+
 
 - **📤 对话导出** · **Conversation export**
   把任意会话导出为 TXT 完整记录，或渲染成 PNG（自动分页多张 / 单张超长图，Canvas 直绘聊天壁纸风），经系统 SAF 保存到任意位置。
@@ -224,9 +245,11 @@ com.chatbyyourside/
 ├── manager/         # Audio / Model / Tts 管理器
 ├── perfmon/         # 液态玻璃性能浮窗
 ├── notification/    # 角色主动问候通知
-├── work/            # WorkManager 调度（问候链 / Seedance 视频管线）
-├── ui/              # glass 组件、chat / characters / feed / music / models / settings / theme / video / navigation
-└── util/            # 工具类
+├── affinity/          # 好感度：签到钱包、礼物经济、特殊邂逅剧情与脚本
+├── work/            # WorkManager 调度（问候 / 群聊 / 朋友圈发圈 / Seedance 视频管线）
+├── ui/              # glass 组件、chat / characters / feed / moment（朋友圈）/ novel（小说模式）/
+│                    #   lorebook（世界书）/ groupchat / music / models / settings / theme / video / navigation
+└── util/            # 工具类（相对时间、朋友圈配图抽取、用户可见错误映射…）
 ```
 
 ## 构建 · Build
