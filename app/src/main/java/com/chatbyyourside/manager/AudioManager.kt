@@ -54,11 +54,17 @@ class AudioManager(
     // ===== 角色语音 =====
     private var voicePlayer: MediaPlayer? = null
 
+    /** 每次播放递增的代次：异步回调（onPrepared/onCompletion/onError）先比对身份，
+     *  防止旧播放器迟到的回调清空新播放器状态或在 stop/release 后调用 start()。 */
+    @Volatile
+    private var voiceGeneration = 0L
+
     suspend fun playVoice(url: String, volume: Int = 60) {
         if (url.isBlank()) return
 
         stopVoice()
 
+        val generation = ++voiceGeneration
         val player = MediaPlayer()
         voicePlayer = player
         try {
@@ -93,13 +99,14 @@ class AudioManager(
             val v = (volume / 100f).coerceIn(0f, 1f)
             player.setVolume(v, v)
             player.setOnCompletionListener { mp ->
-                // 仅当该播放器仍是当前 voicePlayer 时才清引用，避免旧播放器回调误清新播放器
-                if (mp === voicePlayer) voicePlayer = null
+                // 仅当代次仍是本次播放、且该播放器仍是当前 voicePlayer 时才清引用，
+                // 避免旧播放器迟到的回调误清新播放器状态
+                if (generation == voiceGeneration && mp === voicePlayer) voicePlayer = null
                 try { mp.release() } catch (e: Exception) {}
             }
             player.setOnErrorListener { mp, _, _ ->
                 Log.w(TAG, "Voice play failed: $url")
-                if (mp === voicePlayer) voicePlayer = null
+                if (generation == voiceGeneration && mp === voicePlayer) voicePlayer = null
                 try { mp.release() } catch (e: Exception) {}
                 true
             }
@@ -107,17 +114,18 @@ class AudioManager(
             // 身份校验：快速连点第二个角色语音时，stopVoice() 已 release 旧播放器，
             // 旧播放器 pending 的 onPrepared 仍会回调，需确认其仍是当前 voicePlayer 再 start，否则 IllegalStateException。
             player.setOnPreparedListener { mp ->
-                if (mp === voicePlayer) mp.start()
+                if (generation == voiceGeneration && mp === voicePlayer) runCatching { mp.start() }
             }
             player.prepareAsync()
         } catch (e: Exception) {
             Log.w(TAG, "Voice play error: ${e.message}")
             try { player.release() } catch (e: Exception) {}
-            voicePlayer = null
+            if (voicePlayer === player) voicePlayer = null
         }
     }
 
     fun stopVoice() {
+        voiceGeneration++
         voicePlayer?.let {
             // release 前先置空监听器，避免 pending 的 onPrepared/onCompletion 回调打到已释放的播放器
             it.setOnPreparedListener(null)

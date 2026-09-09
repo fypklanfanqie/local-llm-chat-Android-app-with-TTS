@@ -18,6 +18,8 @@ import java.util.Locale
  */
 object ConversationImageRenderer {
     private const val BACKGROUND = 0xFF0E1420.toInt()   // 中性深底
+    /** 单页/长图主 Bitmap 的字节预算（约 48MB）：超出即拒绝渲染，防 OOM Error 闪退。 */
+    internal const val MAX_RENDER_BITMAP_BYTES = 48L * 1024 * 1024
     private const val ACCENT = 0xFF7C5CFF.toInt()        // Iris 紫强调（对齐 IrisPrimary）
     private const val SURFACE = 0xFF1A2233.toInt()       // 中性气泡
     private const val USER_BUBBLE = 0xFF3A2E66.toInt()   // 用户气泡（紫调）
@@ -77,6 +79,12 @@ object ConversationImageRenderer {
         pageNumber: Int,
         pageCount: Int,
     ): ByteArray {
+        // OOM 是 Error 不是 Exception，外围 runCatching 拦不住——必须在创建前做像素预算：
+        // 超过安全预算直接引导分页/TXT（与布局层 LongImageTooTallException 同一用户出口）。
+        val pixelBudget = (EXPORT_IMAGE_WIDTH_PX.toLong() * height) * 4
+        if (pixelBudget > MAX_RENDER_BITMAP_BYTES) {
+            throw LongImageTooTallException(height)
+        }
         val bitmap = Bitmap.createBitmap(EXPORT_IMAGE_WIDTH_PX, height, Bitmap.Config.ARGB_8888)
         try {
             val canvas = Canvas(bitmap)
