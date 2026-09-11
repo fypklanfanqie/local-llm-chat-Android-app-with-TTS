@@ -62,18 +62,16 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 /**
- * 角色搜索过滤：按名称 / 代号 / 职位 / 种族模糊匹配（大小写不敏感）。
+ * 角色搜索过滤：按名称 / 代号 / id / 职位 / 种族模糊匹配（大小写不敏感）。
  * 顶层公开，供世界观目标选择器等处复用。
+ *
+ * 口径已统一到 [com.chatbyyourside.ui.pickers.characterMatchesQuery]：全部「选角色」入口
+ * （角色页 / 世界观 / 世界书 / 群聊 / 朋友圈 / 问候 / 小说阵容）共用同一条匹配规则。
  */
 fun filterCharacters(list: List<Character>, query: String): List<Character> {
-    val q = query.trim().lowercase()
+    val q = query.trim()
     if (q.isEmpty()) return list
-    return list.filter { c ->
-        c.name.lowercase().contains(q) ||
-            c.code.lowercase().contains(q) ||
-            c.role.lowercase().contains(q) ||
-            c.race.lowercase().contains(q)
-    }
+    return list.filter { com.chatbyyourside.ui.pickers.characterMatchesQuery(it, q) }
 }
 
 @Composable

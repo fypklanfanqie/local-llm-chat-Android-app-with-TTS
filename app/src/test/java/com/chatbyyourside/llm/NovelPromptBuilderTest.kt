@@ -60,4 +60,88 @@ class NovelPromptBuilderTest {
         assertFalse(user.contains("行20"))
         assertTrue(user.contains("行100"))
     }
+
+    // ===== 用户亲自发言后的「按这个角色推进剧情」约束 =====
+
+    private fun directedLine(
+        speakerType: String,
+        speakerName: String = "苏晚",
+        content: String = "我们分头找线索。",
+        speakerRole: String? = null,
+    ) = NovelPromptBuilder.DirectedLine(speakerType, speakerName, content, speakerRole)
+
+    @Test
+    fun user_withoutDirectedLine_hasNoAdvancementSection() {
+        // 未传用户发言时：不出现「用户刚写下的一行」段，续写指令从新内容开始（老行为逐字节不变）
+        val user = NovelPromptBuilder.buildUser("第 1 话", "", "", "", emptyList())
+        assertFalse(user.contains("用户刚写下的一行"))
+        assertTrue(user.contains("从新内容开始"))
+    }
+
+    @Test
+    fun directedCharacterLine_requiresInCharacterAdvancement() {
+        val user = NovelPromptBuilder.buildUser(
+            chapterTitle = "第 1 话", summary = "", opening = "", requirements = "",
+            script = listOf(NovelScriptParser.ScriptLine(NovelScriptParser.TYPE_CHARACTER, "苏晚", "senpai", "开场")),
+            directed = directedLine(NovelScriptParser.TYPE_CHARACTER, speakerRole = "protagonist"),
+        )
+        assertTrue(user.contains("用户刚写下的一行"))
+        assertTrue(user.contains("苏晚：我们分头找线索。"))
+        // 贴人设推进：不得 OOC / 不得自相矛盾
+        assertTrue(user.contains("严格贴合其人设"))
+        assertTrue(user.contains("不得 OOC"))
+        // 剧情要真的往前走，而不是原地重复
+        assertTrue(user.contains("引出新的行动、信息或冲突"))
+        // 主角定位：重心与视角围绕他
+        assertTrue(user.contains("他是本作主角"))
+        // 明确从哪一行之后接着写，避免复述用户那行
+        assertTrue(user.contains("之后接着写"))
+        assertTrue(user.contains("不要复述用户这一行"))
+    }
+
+    @Test
+    fun directedSupportingLine_keepsSceneRestrained() {
+        val user = NovelPromptBuilder.buildUser(
+            "t", "", "", "", emptyList(),
+            directed = directedLine(NovelScriptParser.TYPE_CHARACTER, speakerName = "阿橙", speakerRole = "supporting"),
+        )
+        assertTrue(user.contains("他是本作配角"))
+        assertTrue(user.contains("戏份保持克制"))
+        assertTrue(user.contains("让主线确实向前一步"))
+    }
+
+    @Test
+    fun directedCharacterLine_withoutCastRole_omitsRoleHints() {
+        val user = NovelPromptBuilder.buildUser(
+            "t", "", "", "", emptyList(),
+            directed = directedLine(NovelScriptParser.TYPE_CHARACTER, speakerRole = null),
+        )
+        assertFalse(user.contains("他是本作主角"))
+        assertFalse(user.contains("他是本作配角"))
+    }
+
+    @Test
+    fun directedNarration_andUserLine_haveDistinctSemantics() {
+        val narration = NovelPromptBuilder.buildUser(
+            "t", "", "", "", emptyList(),
+            directed = directedLine(NovelScriptParser.TYPE_NARRATION, speakerName = "旁白", content = "灯突然灭了。"),
+        )
+        assertTrue(narration.contains("已经发生的事实"))
+
+        val lead = NovelPromptBuilder.buildUser(
+            "t", "", "", "", emptyList(),
+            directed = directedLine(NovelScriptParser.TYPE_USER, speakerName = "小满", content = "我推开门。"),
+        )
+        assertTrue(lead.contains("主控（用户本人）"))
+        assertTrue(lead.contains("各角色按各自人设回应"))
+    }
+
+    @Test
+    fun directedBlankContentAppendsNothing() {
+        val user = NovelPromptBuilder.buildUser(
+            "t", "", "", "", emptyList(),
+            directed = directedLine(NovelScriptParser.TYPE_CHARACTER, content = "   "),
+        )
+        assertFalse(user.contains("用户刚写下的一行"))
+    }
 }

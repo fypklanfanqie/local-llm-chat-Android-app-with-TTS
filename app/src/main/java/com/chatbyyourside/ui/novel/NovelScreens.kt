@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -66,6 +67,7 @@ import com.chatbyyourside.data.local.NovelChapterEntity
 import com.chatbyyourside.data.local.NovelLineEntity
 import com.chatbyyourside.data.repository.NovelRepository
 import com.chatbyyourside.llm.NovelScriptParser
+import com.chatbyyourside.ui.glass.GlassTextField
 import com.chatbyyourside.util.RelativeTime
 
 private val NOVEL_BG = Color(0xFF0E1116)
@@ -160,8 +162,8 @@ fun NovelHomeScreen(
         CreateStoryDialog(
             container = container,
             onDismiss = { showCreate = false },
-            onCreate = { title, bg, memberIds, npcs, pName, pPersona ->
-                viewModel.createStory(title, bg, memberIds, npcs, pName, pPersona) {
+            onCreate = { title, bg, memberIds, npcs, pName, pPersona, castRoles ->
+                viewModel.createStory(title, bg, memberIds, npcs, pName, pPersona, castRoles) {
                     showCreate = false
                     onOpenStory(it)
                 }
@@ -200,14 +202,41 @@ fun NovelStoryScreen(
         factory = viewModelFactory { initializer { NovelStoryViewModel(container, storyId) } },
     )
     val state by viewModel.uiState.collectAsState()
+    val castError by viewModel.castErrorMessage.collectAsState()
+    var showCast by remember { mutableStateOf(false) }
+    val characters by container.characterRepository.characters.collectAsState(initial = emptyList())
 
     Box(Modifier.fillMaxSize().background(NOVEL_BG)) {
         LazyColumn(Modifier.fillMaxSize().statusBarsPadding()) {
             item {
                 NovelTopBar(title = state.story?.title ?: "小说", onBack = onBack) {
+                    IconButton(onClick = { showCast = true }) {
+                        Icon(Icons.Filled.Group, contentDescription = "角色阵容", tint = NOVEL_TEXT)
+                    }
                     IconButton(onClick = { viewModel.createChapter(onCreated = {}) }) {
                         Icon(Icons.Filled.Add, contentDescription = "新建一话", tint = NOVEL_TEXT)
                     }
+                }
+            }
+            state.story?.let { story ->
+                val memberIds = container.novelRepository.decodeMemberIds(story)
+                val npcs = container.novelRepository.decodeCustomNpcs(story)
+                item {
+                    Text(
+                        castSummaryText(
+                            characters = characters,
+                            memberIds = memberIds,
+                            npcs = npcs,
+                            castRoles = container.novelRepository.decodeCastRoles(story),
+                        ),
+                        color = NOVEL_ACCENT, fontSize = 11.sp,
+                        modifier = Modifier
+                            .padding(horizontal = 20.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(NOVEL_SURFACE_2)
+                            .clickable { showCast = true }
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    )
                 }
             }
             item {
@@ -287,6 +316,26 @@ fun NovelStoryScreen(
             }
             item { Spacer(Modifier.height(bottomBarHeight + 24.dp)) }
         }
+
+        castError?.let { message ->
+            NovelErrorBar(message, bottomBarHeight) { viewModel.clearError() }
+        }
+    }
+
+    // 阵容弹窗：写作过程中随时增删角色 / 改主角配角，保存后 story Flow 立即刷新
+    val castStory = state.story
+    if (showCast && castStory != null) {
+        CastManagerSheet(
+            characters = characters,
+            memberIds = container.novelRepository.decodeMemberIds(castStory),
+            npcs = container.novelRepository.decodeCustomNpcs(castStory),
+            castRoles = container.novelRepository.decodeCastRoles(castStory),
+            onDismiss = { showCast = false },
+            onSave = { memberIds, npcs, castRoles ->
+                viewModel.updateCast(memberIds, npcs, castRoles)
+                showCast = false
+            },
+        )
     }
 }
 
@@ -307,9 +356,18 @@ fun NovelEditorScreen(
     )
     val state by viewModel.uiState.collectAsState()
     var inputText by remember { mutableStateOf("") }
+    /**
+     * 发送后是否立刻让 AI 顺着这一行推进。
+     *
+     * 默认**关** = 原逻辑：发送只把这一行追加进正文，不触发生成（想连写几句对白时最顺手）。
+     * 用户可在发言人条下的开关里打开「发送后自动续写」；选择持久化在 DataStore，
+     * 离开编辑器再回来仍然生效。
+     */
+    val autoContinue by container.settingsRepository.novelAutoContinue.collectAsState(initial = false)
     // 发言人选择：0 = 旁白；1 = 主控；2.. = 角色
     var selectedSpeaker by remember { mutableStateOf(0) }
     var showChapterSetting by remember { mutableStateOf(false) }
+    var showCast by remember { mutableStateOf(false) }
     var editTarget by remember { mutableStateOf<NovelLineEntity?>(null) }
 
     val story by container.novelRepository.observeStory(state.chapter?.storyId ?: 0L)
@@ -350,6 +408,9 @@ fun NovelEditorScreen(
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                     Text("已自动保存到本机", color = NOVEL_TEXT_DIM.copy(alpha = 0.7f), fontSize = 10.sp)
+                }
+                IconButton(onClick = { showCast = true }) {
+                    Icon(Icons.Filled.Group, contentDescription = "角色阵容", tint = NOVEL_TEXT)
                 }
                 IconButton(onClick = { showChapterSetting = true }) {
                     Icon(Icons.Filled.Tune, contentDescription = "本话设定", tint = NOVEL_TEXT)
@@ -412,6 +473,20 @@ fun NovelEditorScreen(
                 }
             }
 
+            // 发送后自动续写开关：用户选角色发言 = 「按这个角色的人设把剧情推下去」，
+            // 默认开；连写多句对白时不必每句都触发一次生成，可临时关掉。
+            Text(
+                if (autoContinue) "发送后自动续写" else "仅添加，不自动续写",
+                color = if (autoContinue) NOVEL_ACCENT else NOVEL_TEXT_DIM,
+                fontSize = 11.sp,
+                modifier = Modifier
+                    .padding(start = 12.dp, top = 6.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (autoContinue) NOVEL_ACCENT.copy(alpha = 0.18f) else NOVEL_SURFACE_2)
+                    .clickable { viewModel.setAutoContinue(!autoContinue) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+
             // 输入栏 + AI 续写
             Row(
                 Modifier.fillMaxWidth().imePadding().padding(horizontal = 12.dp, vertical = 8.dp),
@@ -436,7 +511,13 @@ fun NovelEditorScreen(
                 Spacer(Modifier.width(8.dp))
                 androidx.compose.material3.FilledTonalIconButton(
                     onClick = {
-                        viewModel.addLine(selTypePair.first, selLabel, selTypePair.second, inputText)
+                        viewModel.addLine(
+                            speakerType = selTypePair.first,
+                            speakerName = selLabel,
+                            characterId = selTypePair.second,
+                            text = inputText,
+                            continueAfter = autoContinue,
+                        )
                         inputText = ""
                     },
                     enabled = inputText.isNotBlank() && !state.isGenerating,
@@ -460,6 +541,22 @@ fun NovelEditorScreen(
         state.errorMessage?.let { message ->
             NovelErrorBar(message, bottomBarHeight) { viewModel.clearError() }
         }
+    }
+
+    // 阵容弹层：写作中随时增删角色/改主角配角（用 story 快照开草稿，保存后 Flow 刷新重开即最新）
+    val castStory = story
+    if (showCast && castStory != null) {
+        CastManagerSheet(
+            characters = characters,
+            memberIds = container.novelRepository.decodeMemberIds(castStory),
+            npcs = container.novelRepository.decodeCustomNpcs(castStory),
+            castRoles = container.novelRepository.decodeCastRoles(castStory),
+            onDismiss = { showCast = false },
+            onSave = { newMembers, newNpcs, newRoles ->
+                viewModel.updateCast(newMembers, newNpcs, newRoles)
+                showCast = false
+            },
+        )
     }
 
     // 行编辑弹窗
@@ -618,7 +715,7 @@ private fun NovelSettingField(label: String, value: String, maxLength: Int, onCh
     }
 }
 
-/** 新建故事弹窗：故事名/背景/主控/角色多选/NPC。 */
+/** 新建故事弹窗：故事名/背景/主控/角色多选（带搜索 + 主角配角）/NPC。 */
 @Composable
 private fun CreateStoryDialog(
     container: AppContainer,
@@ -626,6 +723,7 @@ private fun CreateStoryDialog(
     onCreate: (
         title: String, background: String, memberIds: List<String>,
         npcs: List<NovelRepository.CustomNpc>, protagonistName: String, protagonistPersona: String,
+        castRoles: Map<String, String>,
     ) -> Unit,
 ) {
     val characters by container.characterRepository.characters.collectAsState(initial = emptyList())
@@ -633,10 +731,19 @@ private fun CreateStoryDialog(
     var background by remember { mutableStateOf("") }
     var protagonistName by remember { mutableStateOf("") }
     var protagonistPersona by remember { mutableStateOf("") }
-    var selectedIds by remember { mutableStateOf(setOf<String>()) }
+    // 有序列表：第一位即默认主角（与读取端「成员第一位视为主角」的推导一致，避免同阵容两种结论）
+    var selectedIds by remember { mutableStateOf(listOf<String>()) }
+    var leadId by remember { mutableStateOf<String?>(null) }
+    var query by remember { mutableStateOf("") }
     var npcs by remember { mutableStateOf(listOf<NovelRepository.CustomNpc>()) }
     var npcName by remember { mutableStateOf("") }
     var npcPersona by remember { mutableStateOf("") }
+
+    // 首个选中的成员自动成为主角：新故事立刻有一套可用的阵容，不必手动点标记
+    LaunchedEffect(selectedIds.size) {
+        if (leadId == null || leadId !in selectedIds) leadId = selectedIds.firstOrNull()
+    }
+    val shown = characters.filter { query.isBlank() || it.name.contains(query.trim(), ignoreCase = true) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -649,9 +756,16 @@ private fun CreateStoryDialog(
                 NovelSettingField("主控性格与设定（选填）", protagonistPersona, 300) { protagonistPersona = it }
                 Text("选择参与角色（可多选）", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(4.dp))
+                GlassTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = "搜索角色",
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(4.dp))
                 LazyColumn(modifier = Modifier.height(180.dp)) {
-                    items(characters.size) { index ->
-                        val char = characters[index]
+                    items(shown, key = { it.id }) { char ->
                         val checked = char.id in selectedIds
                         Row(
                             Modifier
@@ -659,14 +773,35 @@ private fun CreateStoryDialog(
                                 .clickable {
                                     selectedIds = if (checked) selectedIds - char.id else selectedIds + char.id
                                 }
-                                .padding(vertical = 6.dp),
+                                .padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             androidx.compose.material3.Checkbox(checked = checked, onCheckedChange = null)
                             Spacer(Modifier.width(6.dp))
-                            Text(char.name, fontSize = 13.sp)
+                            Text(
+                                char.name, fontSize = 13.sp,
+                                modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                            if (checked) {
+                                // 主角/配角就地切换：先选中的成员默认主角，点配角即让位给下一位
+                                NovelRoleChip("主角", leadId == char.id) { leadId = char.id }
+                                Spacer(Modifier.width(4.dp))
+                                NovelRoleChip("配角", leadId != char.id) {
+                                    if (leadId == char.id) leadId = selectedIds.firstOrNull { it != char.id }
+                                }
+                            }
                         }
                     }
+                }
+                if (selectedIds.isNotEmpty()) {
+                    Text(
+                        "阵容：主角 " + (
+                            selectedIds.firstOrNull { it == leadId }
+                                ?.let { id -> characters.firstOrNull { it.id == id }?.name } ?: "—"
+                            ) + " · 其余为配角",
+                        fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
                 }
                 Spacer(Modifier.height(8.dp))
                 Text("自定义 NPC（可选）", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -697,7 +832,7 @@ private fun CreateStoryDialog(
                 }
                 npcs.forEach { npc ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("· ${npc.name}", fontSize = 13.sp, modifier = Modifier.weight(1f))
+                        Text("· ${npc.name}（配角）", fontSize = 13.sp, modifier = Modifier.weight(1f))
                         Text("移除", fontSize = 11.sp, color = MaterialTheme.colorScheme.error,
                             modifier = Modifier.clickable { npcs = npcs - npc }.padding(4.dp))
                     }
@@ -707,11 +842,38 @@ private fun CreateStoryDialog(
         confirmButton = {
             TextButton(
                 enabled = title.isNotBlank() && (selectedIds.isNotEmpty() || npcs.isNotEmpty()),
-                onClick = { onCreate(title, background, selectedIds.toList(), npcs, protagonistName, protagonistPersona) },
+                onClick = {
+                    val roles = buildMap {
+                        selectedIds.forEach { id -> put(id, NovelRepository.ROLE_SUPPORTING) }
+                        npcs.forEach { npc -> put(npc.name.trim(), NovelRepository.ROLE_SUPPORTING) }
+                        // 主角 key：主控（用户自己）不算阵容成员，所以主角只能是选中角色之一
+                        leadId?.takeIf { it in selectedIds }?.let { put(it, NovelRepository.ROLE_PROTAGONIST) }
+                    }
+                    onCreate(title, background, selectedIds, npcs, protagonistName, protagonistPersona, roles)
+                },
             ) { Text("创建并进入") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+/** 主角/配角就地切换药丸（新建故事弹窗用；阵容弹窗里是同款交互的另一实现）。 */
+@Composable
+private fun NovelRoleChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (selected) scheme.primary.copy(alpha = 0.22f) else scheme.surface.copy(alpha = 0.04f))
+            .clickable(enabled = !selected, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    ) {
+        Text(
+            label,
+            color = if (selected) scheme.primary else scheme.onSurfaceVariant,
+            fontSize = 10.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+        )
+    }
 }
 
 @Composable

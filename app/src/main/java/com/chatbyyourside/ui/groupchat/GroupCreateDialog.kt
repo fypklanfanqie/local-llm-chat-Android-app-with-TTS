@@ -50,6 +50,7 @@ import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
 import com.chatbyyourside.AppContainer
 import com.chatbyyourside.config.AppConfig
+import com.chatbyyourside.ui.pickers.CharacterMultiPicker
 import com.chatbyyourside.ui.glass.frostedGlass
 import com.chatbyyourside.ui.theme.GlassShapes
 import com.chatbyyourside.ui.theme.LocalDarkTheme
@@ -173,37 +174,21 @@ fun GroupCreateDialog(
                         Text("清空", color = scheme.error, fontSize = 12.sp)
                     }
                 }
-                LazyColumn(modifier = Modifier.fillMaxWidth().height(240.dp)) {
-                    items(characters, key = { it.id }) { c ->
+                // 共享可搜索多选器（角色多时按名称/代号/职位筛人；已选项不受过滤影响）
+                CharacterMultiPicker(
+                    characters = characters,
+                    selectedIds = selectedIds,
+                    onToggle = { c ->
                         val checked = c.id in selectedIds
-                        val atCap = selectedIds.size >= AppConfig.GroupChat.MAX_MEMBERS && !checked
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    if (atCap) {
-                                        Toast.makeText(context, "最多选择 ${AppConfig.GroupChat.MAX_MEMBERS} 名成员", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        selectedIds = if (checked) selectedIds - c.id else selectedIds + c.id
-                                    }
-                                }
-                                .padding(vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                c.name,
-                                color = when {
-                                    atCap -> scheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                    checked -> scheme.primary
-                                    else -> scheme.onSurface
-                                },
-                                fontSize = 13.sp,
-                                modifier = Modifier.weight(1f),
-                            )
-                            if (checked) Text("✓", color = scheme.primary, fontSize = 14.sp)
+                        if (!checked && selectedIds.size >= AppConfig.GroupChat.MAX_MEMBERS) {
+                            Toast.makeText(context, "最多选择 ${AppConfig.GroupChat.MAX_MEMBERS} 名成员", Toast.LENGTH_SHORT).show()
+                        } else {
+                            selectedIds = if (checked) selectedIds - c.id else selectedIds + c.id
                         }
-                    }
-                }
+                    },
+                    listHeight = 240.dp,
+                    placeholder = "搜索角色名 / 代号 / 职位…",
+                )
             }
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {

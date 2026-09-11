@@ -14,6 +14,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -22,6 +26,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.ui.chat.ChatAvatar
+import com.chatbyyourside.ui.pickers.CharacterSearchField
+import com.chatbyyourside.ui.pickers.filterCharactersByQuery
 import com.chatbyyourside.ui.glass.frostedGlass
 import com.chatbyyourside.ui.theme.GlassShapes
 
@@ -51,18 +57,37 @@ fun GroupAtPicker(
                 fontWeight = FontWeight.Bold,
             )
             Spacer(Modifier.height(10.dp))
-            LazyColumn(modifier = Modifier.fillMaxWidth().height(320.dp)) {
-                items(members, key = { it.id }) { m ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onPick(m.name) }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        ChatAvatar(imageUrl = images[m.id] ?: "", name = m.name, size = 30.dp)
-                        Spacer(Modifier.width(10.dp))
-                        Text(m.name, color = scheme.onSurface, fontSize = 14.sp)
+            // 成员多时按名称/代号筛人（与其它选角入口同一口径）
+            var query by remember { mutableStateOf("") }
+            val filtered = remember(members, query) { filterCharactersByQuery(members, query) }
+            CharacterSearchField(
+                query = query,
+                onQueryChange = { query = it },
+                placeholder = "搜索成员名 / 代号…",
+                hitCount = filtered.size,
+            )
+            Spacer(Modifier.height(6.dp))
+            if (filtered.isEmpty()) {
+                Text(
+                    "没有匹配的成员",
+                    color = scheme.onSurfaceVariant,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(vertical = 16.dp),
+                )
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxWidth().height(320.dp)) {
+                    items(filtered, key = { it.id }) { m ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onPick(m.name) }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            ChatAvatar(imageUrl = images[m.id] ?: "", name = m.name, size = 30.dp)
+                            Spacer(Modifier.width(10.dp))
+                            Text(m.name, color = scheme.onSurface, fontSize = 14.sp)
+                        }
                     }
                 }
             }

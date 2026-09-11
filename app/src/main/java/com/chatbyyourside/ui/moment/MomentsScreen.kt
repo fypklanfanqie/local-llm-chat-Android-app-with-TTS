@@ -65,6 +65,8 @@ import com.chatbyyourside.AppContainer
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.data.repository.MomentRepository
 import com.chatbyyourside.ui.moment.MomentsViewModel.PostUi
+import com.chatbyyourside.ui.pickers.CharacterSearchField
+import com.chatbyyourside.ui.pickers.filterCharactersByQuery
 import com.chatbyyourside.util.RelativeTime
 
 /**
@@ -82,7 +84,8 @@ import com.chatbyyourside.util.RelativeTime
 fun MomentsScreen(
     container: AppContainer,
     bottomBarHeight: androidx.compose.ui.unit.Dp = 0.dp,
-    onBack: () -> Unit,
+    /** 返回动作：从卡片流进入时传 popBackStack；作为 dock 根页时传 null（无上一级，隐藏返回键）。 */
+    onBack: (() -> Unit)? = null,
 ) {
     val app = LocalContext.current.applicationContext as android.app.Application
     val viewModel: MomentsViewModel = viewModel(
@@ -141,8 +144,10 @@ fun MomentsScreen(
                 .padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.Filled.Close, contentDescription = "返回", tint = Color.White)
+            if (onBack != null) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Filled.Close, contentDescription = "返回", tint = Color.White)
+                }
             }
             Spacer(Modifier.weight(1f))
             IconButton(onClick = { showAiPostDialog = true }) {
@@ -518,6 +523,9 @@ private fun AiPostDialog(
     val characters by container.characterRepository.characters.collectAsState(initial = emptyList())
     var selectedId by remember { mutableStateOf<String?>(null) }
     var imageCount by remember { mutableStateOf(1) }
+    // 角色多时按名称/代号/职位筛人（与其它选角入口同一口径）
+    var query by remember { mutableStateOf("") }
+    val filtered = remember(characters, query) { filterCharactersByQuery(characters, query) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -526,8 +534,23 @@ private fun AiPostDialog(
             Column {
                 Text("选择角色（云端 AI 生成文案与配图）", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(8.dp))
+                CharacterSearchField(
+                    query = query,
+                    onQueryChange = { query = it },
+                    placeholder = "搜索角色名 / 代号 / 职位…",
+                    hitCount = filtered.size,
+                )
+                Spacer(Modifier.height(6.dp))
+                if (filtered.isEmpty()) {
+                    Text(
+                        "没有匹配的角色",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(vertical = 16.dp),
+                    )
+                }
                 LazyColumn(modifier = Modifier.height(220.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    items(characters) { char ->
+                    items(filtered) { char ->
                         Row(
                             Modifier
                                 .fillMaxWidth()
