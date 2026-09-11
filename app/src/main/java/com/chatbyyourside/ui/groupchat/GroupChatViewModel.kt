@@ -134,6 +134,18 @@ class GroupChatViewModel(
         viewModelScope.launch { reloadGroup() }
     }
 
+    /**
+     * 更新群成员（随时加入 / 移出角色）。落库后立即 [reloadGroup]，
+     * 成员条与后续发言名单马上跟着变；已发出的历史消息按行级 characterId 快照渲染，不受影响。
+     */
+    fun updateMembers(memberIds: List<String>) {
+        viewModelScope.launch {
+            runCatching { container.groupChatRepository.setGroupMembers(groupId, memberIds) }
+                .onFailure { notifyError(it.message ?: "成员更新失败") }
+            reloadGroup()
+        }
+    }
+
     private suspend fun reloadGroup() {
         try {
             val group = container.groupChatRepository.getGroup(groupId)

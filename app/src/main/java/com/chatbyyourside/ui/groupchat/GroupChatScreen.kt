@@ -123,6 +123,17 @@ fun GroupChatScreen(
 
         // 群聊发言直接调用已配置的云端 LLM，与聊天页的本地/云端切换解耦（未配置时发送会提示）
 
+        // @ 用法提醒：只在输入框为空时出现（一开始打字就让位给内容，不长期占版面）。
+        // 说清语义——@ 谁谁答、其余成员不抢答，避免用户以为 @ 只是「点名」而已。
+        if (state.members.isNotEmpty() && state.inputText.isBlank()) {
+            Text(
+                "输入 @ 可以指定成员回答：@ 谁谁答，其余成员不抢答",
+                color = scheme.onSurfaceVariant,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+            )
+        }
+
         GroupChatInputBar(
             text = state.inputText,
             isStreaming = state.isStreaming,

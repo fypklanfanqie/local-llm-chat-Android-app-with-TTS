@@ -98,11 +98,33 @@
 - **避免复述**：续写指令改为「从「A：<用户那行前 40 字>…」之后接着写」，否则模型容易把用户刚写的那行当成待补全上下文而复述。
 - 阵容定位在续写开始时从当前故事读取（用户在弹窗里改完阵容，下一次续写即生效）；定位取不到（未设阵容）时不加主角/配角附加要求。
 
+## 7. 小说行可改 / 可移 / 可删后再续写
+
+原先脚本行只能改内容或删除，**顺序无法调整**（章节有上移/下移，行没有）。补齐：
+
+- `NovelDao.swapLineOrder`：相邻两行 lineOrder 互换，`@Transaction` 原子完成，且与章节的 `swapChapterOrder` 同一套「先把 first 挪到 -1 错开」写法（值本身无唯一索引，但保持确定性便于排查）。`novel_line` 无 updatedAt 列，故不传时间戳。
+- `NovelRepository.moveLine(chapterId, lineId, delta)`：按 `getLines` 的**当前显示顺序**取相邻行，所以「先删几行再移动」也不会因序号空洞而错位；越界/非法 delta 一律 no-op。
+- 纯函数 `NovelRepository.swapTargetId(orderedLineIds, lineId, delta)` 承载目标行计算，JVM 单测覆盖首行上移、尾行下移、非法 delta、未知 id、空章、单行章。
+- 编辑器行编辑弹窗底部新增「↑ 上移 / ↓ 下移」（首/尾自动置灰）；改完/移完再点 ✨AI 即按新顺序续写（续写每次现读 `getLines`）。
+- **方向与编辑的一致性**（`pendingDirected` 卫生）：
+  - 新增 `pendingDirectedLineId` 记住方向对应的行；改写这一行 → 方向文本同步更新（改完错字再点 AI，模型收到的锚点不是旧文案）；删除这一行 → 方向一并清空。
+  - `continuePlot` 增加**尾部校验**：只有「用户写的那行仍排在正文最后」时才注入「从它之后接着写」的锚点；若用户已把它移走/删掉、或把别的行移到它后面，则退化为普通续写并把方向清掉——避免把模型引回错误位置。
+
+## 8. 群聊：@ 用法提醒 + 成员随时增删
+
+- **@ 提醒**：输入框为空时显示一行提示「输入 @ 可以指定成员回答：@ 谁谁答，其余成员不抢答」——把定向回答的语义说清楚（旧 UI 只在输入 @ 时弹选择器，用户不知道 @ 等于「只让谁答」）；开始打字后提示自动让位给内容，不长期占版面。
+- **成员随时增删**：群信息弹窗（点群名/成员数进入）新增成员区——
+  - 成员列表（固定高度内滚动，成员多不撑爆弹窗）+ 每行「移出」；`MIN_GROUP_MEMBERS = 2` 时移出按钮置灰并给文案（单人聊天走角色页单聊）。
+  - 「增删成员」打开全局可搜索多选器（`CharacterMultiPicker`，口径与新建群一致：名称/代号/职位/种族）；超过 `AppConfig.GroupChat.MAX_MEMBERS`(=10) 时 Toast + 行内提示。
+  - 成员与名称/封面同一个「保存」语义落库：`GroupChatRepository.setGroupMembers`（去重 + 截断到上限，数据层不做「最少 2 人」硬校验以免历史数据打不开）→ VM `updateMembers` → `reloadGroup()`，成员条与后续发言名单立即更新。
+  - 已发出的历史消息按行级 `characterId` 快照渲染，移出成员不影响旧消息（未知成员回退「群聊成员」）。
+
 ## 验证
 
 - `:app:compileDebugKotlin` ✅、`:app:assembleDebug` ✅
-- `:app:testDebugUnitTest`：**952 条，2 条失败**——均为 `MnnJniContractTest`（`MnnRuntimeInfo.fromJson` 走 `org.json`，JVM 单测下构造即抛异常），已在基线提交 `84f23c4` 单独复现，属既有欠账，与本次改动无关。
+- `:app:testDebugUnitTest`：**960 条，2 条失败**——均为 `MnnJniContractTest`（`MnnRuntimeInfo.fromJson` 走 `org.json`，JVM 单测下构造即抛异常），已在基线提交 `84f23c4` 单独复现，属既有欠账，与本次改动无关。
 - 新增单测：
   - `DirectLlmModelListTest`（7 条）：端点归一化（OpenAI / 尾斜杠 / 粘贴完整端点 / Anthropic 两种写法）、三种响应形态解析、去重、垃圾输入返回空表。
   - `CharacterPickersQueryTest`（4 条）：五字段匹配 + 大小写、空查询返回原列表、不命中排除、查询去空格。
   - `NovelPromptBuilderTest` 新增 6 条：不传用户发言时无推进段、角色发言的贴人设与「不得 OOC + 必须引出新推进」约束、主角/配角差异化提示、未设阵容时不加定位提示、旁白 vs 主控语义区分、空白内容不产生段落。
+  - `NovelLineMoveTest`（8 条）：行上移/下移与四类 no-op 边界（首行上移、尾行下移、未知 id、非法 delta、空章、单行章）。

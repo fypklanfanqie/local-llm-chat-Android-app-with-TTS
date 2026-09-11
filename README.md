@@ -30,8 +30,10 @@
   Every character picker (group members, @-mentions, Moments, greetings, auto-posting, replies, novel cast) is searchable by name, codename, role or race with one shared rule.
 - **📸 朋友圈 · Moments** — 角色用云端大模型（配你自己的生图 API）发朋友圈：日常文案 + 配图，定时自动发圈（间隔可调、8–23 点、角色轮换、随机 @ 好友），你也能自己发圈；角色会来点赞评论，评论后发帖角色必回。生图三通道自动回退，失败自动降级纯文字。
   Characters post to their own Moments feed (LLM caption + your image-gen API), auto-post on a schedule with random @-mentions; you can post too, and characters like/comment — the poster always replies.
-- **📖 小说模式 · Novel mode** — 选角色组团写互动小说：故事 → 话（章节）→ 对白脚本行编辑器，AI 按人设与世界观续写（6–10 行一批），支持旁白 / 角色 / 主控三种说话人。
-  Group your characters into a serialised novel: stories → chapters → script-line editor with AI continuation (narration / character / protagonist speakers).
+- **📖 小说模式 · Novel mode** — 选角色组团写互动小说：故事 → 话（章节）→ 对白脚本行编辑器，AI 按人设与世界观续写（6–10 行一批），支持旁白 / 角色 / 主控三种说话人。**每一行都能改写、上移 / 下移调整顺序、删除**，改完再让 AI 接着写。
+  Group your characters into a serialised novel: stories → chapters → script-line editor with AI continuation. Every line can be edited, reordered (move up/down) or deleted before you ask the AI to continue.
+- **👥 群聊 · Group chat** — 多名角色同群聊天：输入 **@ 可以指定谁来回答**（@ 谁谁答，其余成员不抢答），本地提示会告诉你怎么用；**成员随时增删**（群信息弹窗里加人/移人，最多 10 人）。
+  Multi-character group chat: type **@ to direct who answers** (only the mentioned member replies), with an on-screen hint; add or remove members at any time from the group info sheet (up to 10).
 - **📊 Token 用量统计 · Token usage analytics** — 按角色累计云端输入 / 输出 token、调用次数与前缀缓存命中率，设置页总量四宫格 + Top 12 双色条形图 + 可搜索明细。
   Per-character cloud token totals with prompt-cache hit rate, charted in Settings.
 - **🔌 云端辅助功能与聊天模式解耦 · Cloud helpers decoupled from chat mode** — 朋友圈、群聊、主动问候只需「配置过云端 API」即可用，本地模型聊天时照常工作。
@@ -210,7 +212,7 @@
   Characters post captions from the cloud LLM with images from your own image-gen API (three-channel auto fallback): scheduled auto-posting with random @-mentions, your own posts, likes and comments — and the poster always replies.
 
 - **📖 小说模式** · **Novel mode**
-  选若干角色组一个故事（含自定义 NPC 与主控人设），按「话」管理章节，正文是可逐行编辑的脚本（旁白 / 角色 / 主控三种说话人）；AI 按人设与世界观续写 6–10 行一批。可指定**主角 / 配角**，写作过程中随时增删角色或改定位，下一次续写即生效；选角支持搜索。你以某角色发言后，AI 会**顺着这一行、按该角色的人设**把剧情推下去（不得 OOC、不得改口反噬，其他角色按各自人设反应并引出新的行动与冲突；旁白当作既成事实、主控则让角色围绕你回应）。默认保持原逻辑「只追加、不自动生成」，可在编辑器一键打开「发送后自动续写」（选择会记住）。
+  选若干角色组一个故事（含自定义 NPC 与主控人设），按「话」管理章节，正文是可逐行编辑的脚本（旁白 / 角色 / 主控三种说话人）；AI 按人设与世界观续写 6–10 行一批。**每一行都能改写 / 上移 / 下移 / 删除**——改完顺序再点 ✨AI 就按新顺序接着写。可指定**主角 / 配角**，写作过程中随时增删角色或改定位，下一次续写即生效；选角支持搜索。你以某角色发言后，AI 会**顺着这一行、按该角色的人设**把剧情推下去（不得 OOC、不得改口反噬，其他角色按各自人设反应并引出新的行动与冲突；旁白当作既成事实、主控则让角色围绕你回应）。默认保持原逻辑「只追加、不自动生成」，可在编辑器一键打开「发送后自动续写」（选择会记住）。
   Build a serialised novel from a cast of characters (plus custom NPCs and your own protagonist persona), edit it line by line as a script, and let the AI continue the story in character. Assign protagonist/supporting roles and change the cast mid-writing. When you speak as a character, the AI advances the plot **from your line in that character's voice** (no OOC; others react by their own personas). It defaults to the original "append only, no auto-generation" behavior — flip on "auto-continue after send" in the editor, and the choice is remembered.
 
 - **📊 Token 用量统计** · **Token usage analytics**

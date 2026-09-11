@@ -1,6 +1,7 @@
 package com.chatbyyourside.data.repository
 
 import android.content.Context
+import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.data.model.ChatMessage
 import com.chatbyyourside.data.model.Conversation
 import com.chatbyyourside.util.GroupCoverStore
@@ -59,6 +60,20 @@ class GroupChatRepository(
     /** 更新群封面（null=清除）。 */
     suspend fun setGroupCover(id: Long, coverPath: String?) {
         conversationRepository.setGroupCover(id, coverPath)
+    }
+
+    /**
+     * 更新群成员（随时增删）：去重 + 截断到上限后落库。
+     *
+     * 不做「最少 2 人」校验——这是 UI 侧的交互约束（弹窗里按钮会置灰并提示），
+     * 数据层保持宽松以免历史数据/导入数据打不开。历史上已发言但被移出的成员不受影响：
+     * 消息按行级 characterId 快照渲染（[com.chatbyyourside.ui.groupchat.GroupChatPromptBuilder.FALLBACK_NAME] 兜底）。
+     */
+    suspend fun setGroupMembers(id: Long, memberIds: List<String>) {
+        conversationRepository.setGroupMembers(
+            id,
+            memberIds.distinct().take(AppConfig.GroupChat.MAX_MEMBERS),
+        )
     }
 
     /** 删除群及其全部消息；封面文件一并清理（审计：删行不删文件会泄漏内部存储）。 */

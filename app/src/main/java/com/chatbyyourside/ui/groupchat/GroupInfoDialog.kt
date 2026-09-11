@@ -42,6 +42,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
+import android.widget.Toast
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.runtime.collectAsState
+import com.chatbyyourside.config.AppConfig
+import com.chatbyyourside.ui.pickers.CharacterMultiPicker
 import com.chatbyyourside.AppContainer
 import com.chatbyyourside.data.model.Conversation
 import com.chatbyyourside.ui.theme.GlassShapes
@@ -52,8 +59,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 群信息编辑弹窗：改群名称 + 群封面（选择/更换/清除），可选「删除群聊」。
- * 保存时一并落库（名称+封面）；改名/改封面后回调 [onSaved]。
+ * 群信息编辑弹窗：改群名称 + 群封面（选择/更换/清除）+ **群成员随时增删**，可选「删除群聊」。
+ * 保存时一并落库（名称+封面+成员）；改动后回调 [onSaved]。
  */
 @Composable
 fun GroupInfoDialog(
@@ -66,6 +73,7 @@ fun GroupInfoDialog(
     val scheme = MaterialTheme.colorScheme
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val characters by container.characterRepository.characters.collectAsState(initial = emptyList())
 
     var name by remember { mutableStateOf(group.title) }
     var coverUri by remember { mutableStateOf(group.coverImagePath ?: "") }
@@ -74,6 +82,10 @@ fun GroupInfoDialog(
     var coverError by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
     var deleteConfirm by remember { mutableStateOf(false) }
+    // 成员草稿：与名称/封面一起在「保存」时落库；数量约束 2..MAX（移出到 2 人即止）
+    var memberIdsDraft by remember { mutableStateOf(group.memberIds) }
+    var showMemberPicker by remember { mutableStateOf(false) }
+    var memberHint by remember { mutableStateOf<String?>(null) }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -148,6 +160,44 @@ fun GroupInfoDialog(
                     .padding(12.dp),
             )
 
+            // ===== 群成员（随时加入 / 移出角色）=====
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "群成员（${memberIdsDraft.size}/${AppConfig.GroupChat.MAX_MEMBERS}）",
+                    color = scheme.onSurfaceVariant, fontSize = 11.sp,
+                )
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = { showMemberPicker = true }) {
+                    Text("增删成员", color = scheme.primary, fontSize = 12.sp)
+                }
+            }
+            // 固定高度列表：成员多时不把弹窗撑爆（弹窗整体不滚动）
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 132.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                items(memberIdsDraft, key = { it }) { id ->
+                    val label = characters.firstOrNull { it.id == id }?.name ?: "已注销角色"
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(label, color = textColor, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                        TextButton(
+                            enabled = memberIdsDraft.size > MIN_GROUP_MEMBERS,
+                            onClick = { memberIdsDraft = memberIdsDraft - id },
+                        ) { Text("移出", color = scheme.error, fontSize = 12.sp) }
+                    }
+                }
+            }
+            if (memberIdsDraft.size <= MIN_GROUP_MEMBERS) {
+                Text(
+                    "群聊至少保留 $MIN_GROUP_MEMBERS 名成员（要单人聊天请回角色页单聊）",
+                    color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                )
+            }
+            memberHint?.let { Text(it, color = scheme.error, fontSize = 10.sp) }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -180,6 +230,10 @@ fun GroupInfoDialog(
                             }
                             container.groupChatRepository.setGroupName(group.id, name.trim())
                             container.groupChatRepository.setGroupCover(group.id, finalCover)
+                            // 成员一并落库（与名称/封面同一「保存」语义，避免两处状态打架）
+                            if (memberIdsDraft.size >= MIN_GROUP_MEMBERS) {
+                                container.groupChatRepository.setGroupMembers(group.id, memberIdsDraft)
+                            }
                             saving = false
                             onSaved()
                             onDismiss()
@@ -214,4 +268,50 @@ fun GroupInfoDialog(
             },
         )
     }
+
+    // 成员增删弹窗：复用全局可搜索多选器（口径与新建群一致：名称/代号/职位/种族）
+    if (showMemberPicker) {
+        AlertDialog(
+            onDismissRequest = { showMemberPicker = false },
+            containerColor = scheme.surfaceContainerHigh,
+            title = { Text("选择群成员（$MIN_GROUP_MEMBERS–${AppConfig.GroupChat.MAX_MEMBERS} 人）", color = scheme.onSurface) },
+            text = {
+                CharacterMultiPicker(
+                    characters = characters,
+                    selectedIds = memberIdsDraft.toSet(),
+                    onToggle = { c ->
+                        when {
+                            c.id in memberIdsDraft -> {
+                                if (memberIdsDraft.size > MIN_GROUP_MEMBERS) {
+                                    memberIdsDraft = memberIdsDraft - c.id
+                                } else {
+                                    memberHint = "至少要保留 $MIN_GROUP_MEMBERS 名成员"
+                                }
+                            }
+                            memberIdsDraft.size >= AppConfig.GroupChat.MAX_MEMBERS -> {
+                                memberHint = "最多 ${AppConfig.GroupChat.MAX_MEMBERS} 名成员"
+                                Toast.makeText(
+                                    context,
+                                    "最多选择 ${AppConfig.GroupChat.MAX_MEMBERS} 名成员",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            }
+                            else -> {
+                                memberIdsDraft = memberIdsDraft + c.id
+                                memberHint = null
+                            }
+                        }
+                    },
+                    listHeight = 260.dp,
+                    placeholder = "搜索角色名 / 代号 / 职位…",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showMemberPicker = false }) { Text("完成") }
+            },
+        )
+    }
 }
+
+/** 群聊最少成员数：1 人不成群（单人聊天走角色页单聊），与新建群的下限保持一致。 */
+private const val MIN_GROUP_MEMBERS = 2
