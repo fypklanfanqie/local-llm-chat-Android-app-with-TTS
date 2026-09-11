@@ -266,6 +266,21 @@ class NovelRepository(
 
     suspend fun deleteLine(lineId: Long) = dao.deleteLine(lineId)
 
+    /**
+     * 上移/下移一行：与相邻行交换 lineOrder（同事务原子）。
+     *
+     * [delta] 只接受 ±1；越界（已在首/尾）静默 no-op——UI 侧同样把按钮置灰，
+     * 这里再兜一次避免越界时把顺序搅乱。顺序按 [NovelDao.getLines] 的当前排序取，
+     * 所以「先删几行再移动」也不会因为序号有空洞而错位。
+     */
+    suspend fun moveLine(chapterId: Long, lineId: Long, delta: Int) {
+        val lines = dao.getLines(chapterId)
+        val targetId = swapTargetId(lines.map { it.id }, lineId, delta) ?: return
+        val current = lines.first { it.id == lineId }
+        val target = lines.first { it.id == targetId }
+        dao.swapLineOrder(current.id, target.id, current.lineOrder, target.lineOrder)
+    }
+
     /** 批量追加 AI 续写产物（保持相对顺序）。 */
     suspend fun appendLines(chapterId: Long, lines: List<NovelLineEntity>) {
         lines.forEach { appendLine(it.copy(chapterId = chapterId)) }
@@ -295,5 +310,21 @@ class NovelRepository(
 
         /** 配角：服务主线，戏份克制。 */
         const val ROLE_SUPPORTING = "supporting"
+
+        /**
+         * 计算「与 [lineId] 相邻、需要交换顺序」的那一行的 id（纯函数，JVM 可测）。
+         *
+         * @param orderedLineIds 本章行 id，**按当前显示顺序**排列
+         * @param delta -1 = 上移（与上一行交换）、+1 = 下移；其余值视为非法
+         * @return 相邻行 id；越界（已是首/尾）、非法 delta、id 不存在时返回 null（调用方 no-op）
+         */
+        fun swapTargetId(orderedLineIds: List<Long>, lineId: Long, delta: Int): Long? {
+            if (delta != 1 && delta != -1) return null
+            val index = orderedLineIds.indexOf(lineId)
+            if (index < 0) return null
+            val targetIndex = index + delta
+            if (targetIndex !in orderedLineIds.indices) return null
+            return orderedLineIds[targetIndex]
+        }
     }
 }

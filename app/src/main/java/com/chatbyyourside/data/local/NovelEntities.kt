@@ -168,6 +168,23 @@ interface NovelDao {
     @Query("DELETE FROM novel_line WHERE id = :lineId")
     suspend fun deleteLine(lineId: Long)
 
+    /**
+     * 相邻脚本行交换顺序（上移/下移）：lineOrder 互换，同事务原子完成。
+     *
+     * 与章节的 [swapChapterOrder] 同一套做法——先把 first 挪到 -1 错开，
+     * 避免 (chapterId, lineOrder) 在中间态撞上同一序号（值本身无唯一索引，但保持确定性更好排查）。
+     * novel_line 无 updatedAt 列，故不传时间戳。
+     */
+    @Transaction
+    suspend fun swapLineOrder(firstId: Long, secondId: Long, firstOrder: Int, secondOrder: Int) {
+        updateLineOrderRaw(firstId, -1)
+        updateLineOrderRaw(firstId, secondOrder)
+        updateLineOrderRaw(secondId, firstOrder)
+    }
+
+    @Query("UPDATE novel_line SET lineOrder = :lineOrder WHERE id = :lineId")
+    suspend fun updateLineOrderRaw(lineId: Long, lineOrder: Int)
+
     /** 删除章节时级联清行（无外键，事务手动级联）。 */
     @Transaction
     suspend fun deleteChapterCascade(chapterId: Long) {

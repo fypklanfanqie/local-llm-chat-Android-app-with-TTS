@@ -566,12 +566,27 @@ fun NovelEditorScreen(
             onDismissRequest = { editTarget = null },
             title = { Text("编辑（${line.speakerName}）") },
             text = {
-                BasicTextField(
-                    value = editContent,
-                    onValueChange = { editContent = it },
-                    textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp),
-                    modifier = Modifier.fillMaxWidth().height(140.dp),
-                )
+                Column {
+                    BasicTextField(
+                        value = editContent,
+                        onValueChange = { editContent = it },
+                        textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp),
+                        modifier = Modifier.fillMaxWidth().height(140.dp),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    // 调整顺序：与相邻行交换 lineOrder（首/尾自动置灰）。改完/移完再点 ✨AI 即按新顺序续写。
+                    val index = state.lines.indexOfFirst { it.id == line.id }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextButton(
+                            enabled = index > 0,
+                            onClick = { viewModel.moveLine(line.id, -1) },
+                        ) { Text("↑ 上移", fontSize = 12.sp) }
+                        TextButton(
+                            enabled = index >= 0 && index < state.lines.lastIndex,
+                            onClick = { viewModel.moveLine(line.id, 1) },
+                        ) { Text("↓ 下移", fontSize = 12.sp) }
+                    }
+                }
             },
             confirmButton = {
                 TextButton(onClick = {

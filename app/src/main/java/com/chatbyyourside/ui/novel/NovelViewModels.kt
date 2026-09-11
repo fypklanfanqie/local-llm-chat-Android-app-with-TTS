@@ -212,6 +212,9 @@ class NovelEditorViewModel(
      */
     private var pendingDirected: NovelPromptBuilder.DirectedLine? = null
 
+    /** 方向对应的行 id（用户编辑/删除该行时用于同步修正或清空方向）。 */
+    private var pendingDirectedLineId: Long? = null
+
     private data class StoryCastSnapshot(
         val members: List<CastMember>,
         val npcs: List<NovelRepository.CustomNpc>,
@@ -253,7 +256,7 @@ class NovelEditorViewModel(
         pendingDirected = NovelPromptBuilder.DirectedLine(speakerType, speakerName, content)
         viewModelScope.launch {
             runCatching {
-                repo.appendLine(
+                val newId = repo.appendLine(
                     NovelLineEntity(
                         chapterId = chapterId,
                         lineOrder = 0, // appendLine 自动接尾
@@ -263,22 +266,55 @@ class NovelEditorViewModel(
                         content = content,
                     ),
                 )
+                // 记住行 id：之后用户编辑/删除这一行时要同步修正「本次要顺着它推进」的方向
+                pendingDirectedLineId = newId
                 repo.getChapter(chapterId)?.let { repo.saveChapterSetting(it) } // touch updatedAt 顺带
             }.onFailure {
                 errorMessage.value = it.message
                 pendingDirected = null
+                pendingDirectedLineId = null
                 return@launch
             }
             if (continueAfter) continuePlot()
         }
     }
 
+    /**
+     * 改写一行内容（AI 续写前可随时调整）。
+     *
+     * 若改写的正是「用户刚写下、本次要顺着推进」的那一行，方向文本同步跟着更新——
+     * 否则用户改完错字再点 ✨AI，模型收到的锚点仍是改之前的旧文案。
+     */
     fun updateLine(line: NovelLineEntity, newContent: String) {
-        viewModelScope.launch { repo.updateLine(line.copy(content = newContent.trim())) }
+        val content = newContent.trim()
+        if (content.isEmpty()) return
+        if (line.id == pendingDirectedLineId) {
+            pendingDirected = pendingDirected?.copy(content = content)
+        }
+        viewModelScope.launch { repo.updateLine(line.copy(content = content)) }
     }
 
+    /**
+     * 删除一行。
+     *
+     * 删掉的若是「本次要顺着推进」的那一行，方向一并清空——否则提示词会锚定一行已经不存在的文案。
+     */
     fun deleteLine(lineId: Long) {
+        if (lineId == pendingDirectedLineId) {
+            pendingDirected = null
+            pendingDirectedLineId = null
+        }
         viewModelScope.launch { repo.deleteLine(lineId) }
+    }
+
+    /**
+     * 上移 / 下移一行（[delta] = -1 / +1，与相邻行交换顺序）。
+     *
+     * 移动不改方向文本本身；但若移动后这一行不再是正文最后一行，
+     * 续写时会由 [continuePlot] 的尾部校验自动放弃「从它之后接着写」的锚点（见该方法注释）。
+     */
+    fun moveLine(lineId: Long, delta: Int) {
+        viewModelScope.launch { runCatching { repo.moveLine(chapterId, lineId, delta) } }
     }
 
     /**
@@ -340,6 +376,19 @@ class NovelEditorViewModel(
                 val script = existingLines.map {
                     NovelScriptParser.ScriptLine(it.speakerType, it.speakerName, it.characterId, it.content)
                 }
+                // 尾部校验：只有「用户写的那行仍排在正文最后」时，锚点才有意义——
+                // 用户可能已经删掉它、或把别的行移到它后面（想改从别处接），
+                // 此时仍注入「从它之后接着写」会把模型引回错误位置，故退化为普通续写。
+                val directedValidated = directedResolved?.takeIf { d ->
+                    val last = existingLines.lastOrNull()
+                    last != null &&
+                        last.speakerName == d.speakerName &&
+                        last.content.trim() == d.content.trim()
+                }
+                if (directedResolved != null && directedValidated == null) {
+                    pendingDirected = null
+                    pendingDirectedLineId = null
+                }
                 val apiMessages = buildList {
                     add(
                         ChatMessage(
@@ -363,7 +412,7 @@ class NovelEditorViewModel(
                                 opening = chapter.opening,
                                 requirements = chapter.requirements,
                                 script = script,
-                                directed = directedResolved,
+                                directed = directedValidated,
                             ),
                         ),
                     )
@@ -390,6 +439,7 @@ class NovelEditorViewModel(
                 repo.appendLines(chapterId, entities)
                 // 只有真正把续写内容落库后才清掉方向标记：失败/停止时保留，重试仍顺着用户那一行
                 pendingDirected = null
+                pendingDirectedLineId = null
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
