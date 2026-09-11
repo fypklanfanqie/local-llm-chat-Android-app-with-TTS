@@ -3,8 +3,10 @@ package com.chatbyyourside.data.repository
 import com.chatbyyourside.data.local.LocalInferenceSettings
 import com.chatbyyourside.data.local.SettingsStore
 import com.chatbyyourside.data.model.ApiConfig
+import com.chatbyyourside.data.model.CachedModelList
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.ChatProviderType
+import com.chatbyyourside.data.model.CloudProfile
 import com.chatbyyourside.data.model.GroupChatConfig
 import com.chatbyyourside.data.model.Lorebook
 import com.chatbyyourside.data.model.LorebookGlobalConfig
@@ -247,6 +249,73 @@ class SettingsRepository(private val store: SettingsStore) {
     /** 原子双写：更新活跃 api_config 并写入该供应商记忆（设置页保存按钮调用）。 */
     suspend fun saveApiConfig(providerKey: String, config: ApiConfig) =
         store.saveApiConfig(providerKey, config)
+
+    // ===== 自定义云端 LLM 配置档（多份保存 + 切换）=====
+
+    val cloudProfiles: Flow<List<CloudProfile>> = store.cloudProfiles
+    val activeCloudProfileId: Flow<String> = store.activeCloudProfileId
+
+    suspend fun getCloudProfilesNow(): List<CloudProfile> = dataStoreFirst(cloudProfiles, emptyList())
+
+    /** 当前生效配置档（未选 / 已被删除 → null）。 */
+    suspend fun getActiveCloudProfileNow(): CloudProfile? {
+        val id = dataStoreFirst(activeCloudProfileId, "")
+        if (id.isBlank()) return null
+        return getCloudProfilesNow().firstOrNull { it.id == id }
+    }
+
+    /**
+     * 保存配置档并立即生效为当前档：id 为空则分配新 id（即「另存为新配置」），
+     * 非空则覆盖同 id 的旧档（即「更新当前配置」）。
+     *
+     * 同时把该档写入活跃 [ApiConfig]：用户点保存的语义就是「以后用这份」，
+     * 分两步（先落档再切换）会让 UI 出现「保存了但没生效」的错觉。
+     */
+    suspend fun saveCloudProfile(profile: CloudProfile): CloudProfile {
+        val id = profile.id.ifBlank { "cp-" + java.util.UUID.randomUUID().toString().take(8) }
+        val saved = profile.copy(id = id, baseUrl = profile.baseUrl.trim(), model = profile.model.trim())
+        val list = getCloudProfilesNow().toMutableList()
+        val idx = list.indexOfFirst { it.id == id }
+        if (idx >= 0) list[idx] = saved else list.add(saved)
+        store.setCloudProfiles(list)
+        store.setActiveCloudProfile(id)
+        saveApiConfig(PROVIDER_KEY_CUSTOM, ApiConfig(saved.baseUrl, saved.apiKey, saved.model))
+        return saved
+    }
+
+    /** 删除配置档；删的正好是当前档时把 active 清空（UI 自行决定是否回落到其它档）。 */
+    suspend fun deleteCloudProfile(id: String) {
+        store.setCloudProfiles(getCloudProfilesNow().filterNot { it.id == id })
+        if (dataStoreFirst(activeCloudProfileId, "") == id) store.setActiveCloudProfile("")
+    }
+
+    /** 切换当前配置档并立即生效（聊天下一轮就用新端点）。不存在则返回 null、不改动任何状态。 */
+    suspend fun activateCloudProfile(id: String): CloudProfile? {
+        val profile = getCloudProfilesNow().firstOrNull { it.id == id } ?: return null
+        store.setActiveCloudProfile(id)
+        saveApiConfig(PROVIDER_KEY_CUSTOM, ApiConfig(profile.baseUrl, profile.apiKey, profile.model))
+        return profile
+    }
+
+    // ===== 远程模型清单（清单不写死：从服务商 /models 拉取并缓存）=====
+
+    val modelListCache: Flow<Map<String, CachedModelList>> = store.modelListCache
+
+    suspend fun getModelListCacheNow(): Map<String, CachedModelList> =
+        dataStoreFirst(modelListCache, emptyMap())
+
+    /** 某服务商/配置档的上次拉取结果（从未拉取 → null）。 */
+    suspend fun getCachedModelList(cacheKey: String): CachedModelList? = getModelListCacheNow()[cacheKey]
+
+    /**
+     * 写入某服务商的模型清单缓存。
+     *
+     * 网络调用按项目既有分层由 UI 层走 `container.directLlmClient.listModels(...)`（与「测试连接」
+     * 同一惯例），仓储只负责落库与读取，避免数据层持有 HTTP 客户端。
+     */
+    suspend fun saveModelListCache(cacheKey: String, models: List<String>) {
+        store.putModelListCache(cacheKey, CachedModelList(System.currentTimeMillis(), models))
+    }
     suspend fun setSeedanceConfig(config: SeedanceConfig) = store.setSeedanceConfig(config)
     suspend fun setTtsConfig(config: TtsConfig) = store.setTtsConfig(config)
     suspend fun setTtsLanguage(lang: TtsLanguage) = store.setTtsLanguage(lang)
@@ -390,6 +459,13 @@ class SettingsRepository(private val store: SettingsStore) {
 
     suspend fun setCloudTemperature(value: Float?) = store.setCloudTemperature(value)
 
+    // ===== 小说「发送后自动续写」开关（默认关 = 原逻辑：发送只追加该行，不触发生成）=====
+
+    /** 开关流（默认 false）。开启后用户选角色发言会在落库后立刻让 AI 顺着这一行推进。 */
+    val novelAutoContinue: Flow<Boolean> = store.novelAutoContinue
+
+    suspend fun setNovelAutoContinue(enabled: Boolean) = store.setNovelAutoContinue(enabled)
+
     suspend fun getCloudFoldIntervalRoundsNow(): Int = withTimeoutOrNull(DATASTORE_TIMEOUT_MS) {
         cloudFoldIntervalRounds.first()
     } ?: AppConfig.ContextCompression.DEFAULT_FOLD_INTERVAL_ROUNDS
@@ -494,8 +570,25 @@ class SettingsRepository(private val store: SettingsStore) {
         userProfile.first()
     } ?: UserProfileConfig()
 
+    /**
+     * DataStore 单值读取统一入口（超时 + 空值兜底）。
+     * 国产 ROM 文件 I/O 被拦截时避免永久挂起；[fallback] 为超时/无值时的返回值。
+     */
+    private suspend fun <T> dataStoreFirst(flow: Flow<T>, fallback: T): T =
+        withTimeoutOrNull(DATASTORE_TIMEOUT_MS) { flow.first() } ?: fallback
+
     companion object {
         /** DataStore .first() 超时阈值（ms）。国产 ROM 文件 I/O 被拦截时避免永久挂起。 */
         private const val DATASTORE_TIMEOUT_MS = 5000L
+
+        /** 自定义服务商在每供应商配置 map 里的固定槽位键（切自定义配置档时同步写入）。 */
+        const val PROVIDER_KEY_CUSTOM = "custom"
+
+        /**
+         * 模型清单缓存键：预设服务商按 id 缓存；自定义端点按**配置档 id** 分开缓存
+         * （不同中转站的模型清单完全不同，共用 key 会互相覆盖）。
+         */
+        fun modelCacheKey(providerId: String?, profileId: String? = null): String =
+            if (providerId.isNullOrBlank()) "custom:${profileId.orEmpty()}" else "preset:$providerId"
     }
 }

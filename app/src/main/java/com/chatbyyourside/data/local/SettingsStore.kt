@@ -8,8 +8,10 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.chatbyyourside.config.AppConfig
 import com.chatbyyourside.config.Characters
 import com.chatbyyourside.data.model.ApiConfig
+import com.chatbyyourside.data.model.CachedModelList
 import com.chatbyyourside.data.model.Character
 import com.chatbyyourside.data.model.ChatProviderType
+import com.chatbyyourside.data.model.CloudProfile
 import com.chatbyyourside.data.model.GroupChatConfig
 import com.chatbyyourside.data.model.Lorebook
 import com.chatbyyourside.data.model.LorebookGlobalConfig
@@ -69,6 +71,12 @@ class SettingsStore(
         val API_MODEL = stringPreferencesKey("api_model")
         // 每供应商配置记忆（JSON Map<providerKey, ApiConfig>；仅设置页切换/恢复用，请求仍读活跃 api_base/api_key/api_model）
         val API_CONFIG_MAP = stringPreferencesKey("api_config_map")
+        // 用户自定义云端 LLM 配置档列表（JSON: List<CloudProfile>）+ 当前生效档 id。
+        // 自定义端点常有多个（公司中转站 / 本地 LM Studio / 第三方兼容站），单槽位会互相覆盖。
+        val CLOUD_PROFILES = stringPreferencesKey("cloud_profiles")
+        val ACTIVE_CLOUD_PROFILE = stringPreferencesKey("active_cloud_profile")
+        // 每服务商的远程模型清单缓存（JSON: Map<key, CachedModelList>，key = 预设 id / "custom:<profileId>"）。
+        val MODEL_LIST_CACHE = stringPreferencesKey("model_list_cache")
 
         // TTS
         val TTS_API_KEY = stringPreferencesKey("tts_api_key")
@@ -131,6 +139,9 @@ class SettingsStore(
         val THINKING_LEVEL = stringPreferencesKey(LocalInferenceSettings.THINKING_LEVEL_KEY)
         // 性能监控浮窗液态玻璃效果开关（默认开）：backdrop blur + 镜面高光 + 旋转虹彩光晕；关闭则用普通深色面板
         val LIQUID_GLASS = booleanPreferencesKey("liquid_glass_perf_overlay")
+        // 小说「发送后自动续写」开关（默认**关** = 原逻辑：发送只追加该行，不触发生成）。
+        // 想要「选角色发言就顺着这个角色的人设把剧情推下去」的用户可自行打开；持久化以免离开编辑器就忘掉。
+        val NOVEL_AUTO_CONTINUE = booleanPreferencesKey("novel_auto_continue")
 
         // 通讯界面自定义背景：是否启用 + 内部存储图片绝对路径列表（JSON List<String>，有序）。
         // 所选相册图复制到 filesDir/chat_backgrounds/，仅存路径，不依赖 SAF 持久权限。
@@ -298,6 +309,49 @@ class SettingsStore(
             p[Keys.API_MODEL] = config.model
             val next = readApiConfigMap(p) + (providerKey to config)
             p[Keys.API_CONFIG_MAP] = apiConfigJson.encodeToString(next)
+        }
+    }
+
+    // ===== 自定义云端 LLM 配置档（多份保存 + 切换）=====
+
+    /** 全部自定义配置档（损坏/缺键 → 空列表，不抛异常）。 */
+    val cloudProfiles: Flow<List<CloudProfile>> = dataStore.data.map { p ->
+        val raw = p[Keys.CLOUD_PROFILES] ?: ""
+        if (raw.isBlank()) emptyList()
+        else runCatching { apiConfigJson.decodeFromString<List<CloudProfile>>(raw) }.getOrDefault(emptyList())
+    }
+
+    /** 当前生效的自定义配置档 id（空串 = 未选）。 */
+    val activeCloudProfileId: Flow<String> = dataStore.data.map { p ->
+        p[Keys.ACTIVE_CLOUD_PROFILE] ?: ""
+    }
+
+    /** 覆盖整份配置档列表（删除即写回过滤后的列表）。 */
+    suspend fun setCloudProfiles(list: List<CloudProfile>) {
+        dataStore.edit { p -> p[Keys.CLOUD_PROFILES] = apiConfigJson.encodeToString(list) }
+    }
+
+    suspend fun setActiveCloudProfile(id: String) {
+        dataStore.edit { p -> p[Keys.ACTIVE_CLOUD_PROFILE] = id }
+    }
+
+    // ===== 远程模型清单缓存（按服务商键）=====
+
+    val modelListCache: Flow<Map<String, CachedModelList>> = dataStore.data.map { p ->
+        val raw = p[Keys.MODEL_LIST_CACHE] ?: ""
+        if (raw.isBlank()) emptyMap()
+        else runCatching { apiConfigJson.decodeFromString<Map<String, CachedModelList>>(raw) }
+            .getOrDefault(emptyMap())
+    }
+
+    /** 键为 [key] 的模型清单缓存；原子读改写避免与其它服务商的刷新互相覆盖。 */
+    suspend fun putModelListCache(key: String, entry: CachedModelList) {
+        dataStore.edit { p ->
+            val raw = p[Keys.MODEL_LIST_CACHE] ?: ""
+            val current = if (raw.isBlank()) emptyMap()
+            else runCatching { apiConfigJson.decodeFromString<Map<String, CachedModelList>>(raw) }
+                .getOrDefault(emptyMap())
+            p[Keys.MODEL_LIST_CACHE] = apiConfigJson.encodeToString(current + (key to entry))
         }
     }
 
@@ -799,6 +853,18 @@ class SettingsStore(
 
     suspend fun setChatBgEnabled(enabled: Boolean) {
         dataStore.edit { it[Keys.CHAT_BG_ENABLED] = enabled }
+    }
+
+    /**
+     * 小说「发送后自动续写」开关（默认 false = 原逻辑：发送只追加该行）。
+     * 开启后，用户选角色发言会在落库后立刻让 AI 顺着这一行推进。
+     */
+    val novelAutoContinue: Flow<Boolean> = dataStore.data.map { p ->
+        p[Keys.NOVEL_AUTO_CONTINUE] ?: false
+    }
+
+    suspend fun setNovelAutoContinue(enabled: Boolean) {
+        dataStore.edit { it[Keys.NOVEL_AUTO_CONTINUE] = enabled }
     }
 
     /** 自定义背景图片路径列表（有序）。 */

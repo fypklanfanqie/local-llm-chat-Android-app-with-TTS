@@ -47,6 +47,7 @@ import com.chatbyyourside.data.model.ApiConfig
 import com.chatbyyourside.data.model.TtsConfig
 import com.chatbyyourside.data.repository.ChatBackgroundConfig
 import com.chatbyyourside.data.repository.ChatBackgroundRepository
+import com.chatbyyourside.ui.pickers.CharacterMultiPicker
 import com.chatbyyourside.ui.glass.CollapsibleSection
 import com.chatbyyourside.ui.glass.GlassLargeTitle
 import com.chatbyyourside.ui.glass.GlassListRow
@@ -95,6 +96,12 @@ import com.chatbyyourside.util.AppStorageUsage
 import com.chatbyyourside.util.CrashReporter
 import com.chatbyyourside.util.CrashWatchdog
 import com.chatbyyourside.util.UserProfileImageStore
+import com.chatbyyourside.util.UserFacingErrorMapper
+import com.chatbyyourside.data.model.CloudProfile
+import com.chatbyyourside.data.repository.SettingsRepository
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import com.chatbyyourside.work.GroupChatScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -104,6 +111,8 @@ fun SettingsScreen(
     container: AppContainer,
     onNavigateToBackendSettings: () -> Unit,
     onNavigateToLorebook: (String) -> Unit = {},
+    /** 进入音乐页（原底部 dock 第 3 个 Tab，现为设置二级页）。 */
+    onNavigateToMusic: () -> Unit = {},
 ) {
     val scheme = MaterialTheme.colorScheme
     val apiConfig by container.settingsRepository.apiConfig.collectAsState(initial = ApiConfig())
@@ -156,6 +165,55 @@ fun SettingsScreen(
 
     var customBaseUrl by remember(apiConfig) { mutableStateOf(apiConfig.baseUrl) }
     var customModel by remember(apiConfig) { mutableStateOf(apiConfig.model) }
+
+    // 自定义云端 LLM 配置档（多份保存 + 切换）+ 远程模型清单缓存
+    val cloudProfiles by container.settingsRepository.cloudProfiles.collectAsState(initial = emptyList())
+    val activeProfileId by container.settingsRepository.activeCloudProfileId.collectAsState(initial = "")
+    val modelListCache by container.settingsRepository.modelListCache.collectAsState(initial = emptyMap())
+    var profileName by remember { mutableStateOf("") }
+    var modelFetching by remember { mutableStateOf(false) }
+    var modelFetchMsg by remember { mutableStateOf<String?>(null) }
+
+    // 当前编辑目标对应哪条缓存：预设服务商按 id；自定义端点按**配置档 id**（不同中转站清单不同）
+    val modelCacheKey = SettingsRepository.modelCacheKey(
+        providerId = selectedProvider?.id,
+        profileId = if (isCustom) activeProfileId else null,
+    )
+    val remoteModels = modelListCache[modelCacheKey]?.models.orEmpty()
+    val remoteFetchedAt = modelListCache[modelCacheKey]?.fetchedAt ?: 0L
+
+    /**
+     * 从服务商 `GET /models` 拉取可用模型清单并落缓存。
+     * 失败给出用户可读文案（不静默），成功提示条数；空结果单独提示（部分网关不支持 /models）。
+     */
+    suspend fun fetchRemoteModels() {
+        if (modelFetching) return
+        val base = if (isCustom) normalizeBaseUrl(customBaseUrl) else selectedProvider?.baseUrl.orEmpty()
+        if (base.isBlank()) {
+            modelFetchMsg = "请先填写服务地址"
+            return
+        }
+        // 「免费对话」的 key 由云端代理注入，这里用空 key 请求即可
+        val key = if (selectedProvider?.id == FREE_PROVIDER_ID) "" else apiKey.trim()
+        modelFetching = true
+        modelFetchMsg = null
+        try {
+            val models = container.directLlmClient.listModels(base, key)
+            if (models.isEmpty()) {
+                modelFetchMsg = "服务商未返回任何模型（该端点可能不支持 /models）"
+            } else {
+                container.settingsRepository.saveModelListCache(modelCacheKey, models)
+                modelFetchMsg = "已获取 ${models.size} 个模型"
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("SettingsScreen", "拉取模型清单失败", e)
+            modelFetchMsg = UserFacingErrorMapper.userFacingError(e, "获取模型列表失败")
+        } finally {
+            modelFetching = false
+        }
+    }
 
     // 首开回填：把当前活跃配置写入对应供应商记忆（老用户升级后切走再切回也不丢 key）。
     // 只写 map、不碰 apiConfig，不冲掉未保存编辑；已有记录即 no-op。
@@ -221,6 +279,17 @@ fun SettingsScreen(
                 title = "使用指南",
                 subtitle = "快速了解全部功能与配置",
                 onClick = { showGuide = true },
+                trailing = { Chevron() },
+                showDivider = false,
+            )
+        }
+
+        // ===== 音乐（原底部 dock 入口迁入此处：播放列表 / 本地导入 / 在线搜索）=====
+        GlassListSection {
+            GlassListRow(
+                title = "音乐",
+                subtitle = "播放列表 · 本地导入 · 在线搜索",
+                onClick = onNavigateToMusic,
                 trailing = { Chevron() },
                 showDivider = false,
             )
@@ -312,10 +381,102 @@ fun SettingsScreen(
                             selectedModel = model
                             modelExpanded = false
                         },
+                        remoteModels = remoteModels,
+                        onRemoteModelSelected = { id ->
+                            // 远程模型不在预设清单里：构造同名 PresetModel，保存时取 id 即可
+                            selectedModel = PresetModel(id = id, displayName = id)
+                            modelExpanded = false
+                        },
+                    )
+                    ModelFetchRow(
+                        busy = modelFetching,
+                        cachedCount = remoteModels.size,
+                        fetchedAt = remoteFetchedAt,
+                        message = modelFetchMsg,
+                        onRefresh = { scope.launch { fetchRemoteModels() } },
                     )
                 } else {
+                    // 自定义端点：多份命名配置档（保存 / 切换 / 删除），互不覆盖
+                    FieldLabel("我的云端配置")
+                    CloudProfilesBlock(
+                        profiles = cloudProfiles,
+                        activeId = activeProfileId,
+                        onActivate = { profile ->
+                            scope.launch {
+                                container.settingsRepository.activateCloudProfile(profile.id)
+                                modelFetchMsg = null
+                            }
+                        },
+                        onDelete = { profile ->
+                            scope.launch {
+                                container.settingsRepository.deleteCloudProfile(profile.id)
+                                if (profile.id == activeProfileId) profileName = ""
+                            }
+                        },
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(Modifier.weight(1f)) {
+                            GlassInputField(
+                                value = profileName,
+                                onValueChange = { profileName = it },
+                                placeholder = "配置名称（如：公司中转站）",
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                scope.launch {
+                                    val saved = container.settingsRepository.saveCloudProfile(
+                                        CloudProfile(
+                                            id = "",
+                                            name = profileName.trim(),
+                                            baseUrl = normalizeBaseUrl(customBaseUrl),
+                                            apiKey = apiKey,
+                                            model = customModel.trim(),
+                                        ),
+                                    )
+                                    // 让输入框反映落库后的归一化结果（用户看到的就是实际会用的值）
+                                    customBaseUrl = saved.baseUrl
+                                    customModel = saved.model
+                                    profileName = saved.name
+                                    apiSaved = true
+                                }
+                            },
+                            enabled = customBaseUrl.isNotBlank(),
+                        ) { Text("另存为新配置", fontSize = 12.sp) }
+                        if (activeProfileId.isNotBlank()) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        container.settingsRepository.saveCloudProfile(
+                                            CloudProfile(
+                                                id = activeProfileId,
+                                                name = profileName.trim().ifBlank {
+                                                    cloudProfiles.firstOrNull { it.id == activeProfileId }?.name.orEmpty()
+                                                },
+                                                baseUrl = normalizeBaseUrl(customBaseUrl),
+                                                apiKey = apiKey,
+                                                model = customModel.trim(),
+                                            ),
+                                        )
+                                        apiSaved = true
+                                    }
+                                },
+                            ) { Text("更新当前配置", fontSize = 12.sp) }
+                        }
+                    }
                     GlassInputField(value = customBaseUrl, onValueChange = { customBaseUrl = it }, placeholder = "API BASE URL")
                     GlassInputField(value = customModel, onValueChange = { customModel = it }, placeholder = "MODEL")
+                    ModelFetchRow(
+                        busy = modelFetching,
+                        cachedCount = remoteModels.size,
+                        fetchedAt = remoteFetchedAt,
+                        message = modelFetchMsg,
+                        onRefresh = { scope.launch { fetchRemoteModels() } },
+                    )
                     Text(
                         "Anthropic 端点（URL 含 anthropic / claude 或以 /v1/messages 结尾）将自动走 /v1/messages + x-api-key 协议；其余走 OpenAI 兼容 /chat/completions。Base URL 也可直接填完整 chat/completions 或 v1/messages 端点。",
                         color = scheme.onSurfaceVariant, fontSize = 10.sp,
@@ -348,6 +509,22 @@ fun SettingsScreen(
                     val providerKey = selectedProvider?.id ?: CUSTOM_PROVIDER_KEY
                     // 原子双写：更新活跃配置 + 写入该供应商记忆。
                     container.settingsRepository.saveApiConfig(providerKey, ApiConfig(baseUrl, key, model))
+                    // 自定义端点且已有生效配置档：保存同时更新该档，
+                    // 否则「保存设置」与「配置档」会出现两份不一致的值。
+                    if (isCustom && activeProfileId.isNotBlank()) {
+                        container.settingsRepository.saveCloudProfile(
+                            CloudProfile(
+                                id = activeProfileId,
+                                name = cloudProfiles.firstOrNull { it.id == activeProfileId }?.name.orEmpty(),
+                                baseUrl = baseUrl,
+                                apiKey = key,
+                                model = model,
+                            ),
+                        )
+                        // 输入框回到落库后的归一化值
+                        customBaseUrl = baseUrl
+                        customModel = model
+                    }
                     apiSaved = true
                 }
             },
@@ -1346,34 +1523,20 @@ private fun GreetingSection(container: AppContainer, scope: CoroutineScope) {
                             }
                         }) { Text("清空", color = scheme.error, fontSize = 12.sp) }
                     }
-                    // 固定高度 LazyColumn：AlertDialog 内 verticalScroll + heightIn 在无界约束下不滚动，
-                    // 列表会撑满整屏导致下方角色选不到（bug 修复）。
-                    LazyColumn(modifier = Modifier.height(360.dp)) {
-                        items(characters, key = { it.id }) { c ->
-                            val checked = c.id in charIds
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        scope.launch {
-                                            val next = if (checked) charIds - c.id else charIds + c.id
-                                            settings.setGreetingCharacterIds(next)
-                                            GreetingScheduler.reschedule(context, settings)
-                                        }
-                                    }
-                                    .padding(vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    c.name,
-                                    color = if (checked) scheme.primary else scheme.onSurface,
-                                    fontSize = 13.sp,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                if (checked) Text("✓", color = scheme.primary, fontSize = 14.sp)
+                    // 共享可搜索多选器：角色多时按名称/代号/职位筛人（替代原先无搜索的裸列表）
+                    CharacterMultiPicker(
+                        characters = characters,
+                        selectedIds = charIds,
+                        onToggle = { c ->
+                            scope.launch {
+                                val next = if (c.id in charIds) charIds - c.id else charIds + c.id
+                                settings.setGreetingCharacterIds(next)
+                                GreetingScheduler.reschedule(context, settings)
                             }
-                        }
-                    }
+                        },
+                        listHeight = 320.dp,
+                        placeholder = "搜索角色名 / 代号 / 职位…",
+                    )
                 }
             },
             confirmButton = {
@@ -1706,70 +1869,38 @@ private fun MomentsSection(container: AppContainer, scope: CoroutineScope) {
             onDismissRequest = { showCharPicker = false },
             title = { Text("选择发圈角色（可多选）", color = scheme.onSurface) },
             text = {
-                LazyColumn(modifier = Modifier.height(320.dp)) {
-                    items(characters.size) { index ->
-                        val char = characters[index]
-                        val checked = char.id in autoEnabled.characterIds
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    val next = autoEnabled.characterIds.toMutableSet()
-                                    if (checked) next.remove(char.id) else next.add(char.id)
-                                    scope.launch { settings.setMomentAutoConfig(autoEnabled.copy(characterIds = next)) }
-                                }
-                                .padding(vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            androidx.compose.material3.Checkbox(checked = checked, onCheckedChange = null)
-                            Spacer(Modifier.width(8.dp))
-                            Text(char.name, color = scheme.onSurface, fontSize = 14.sp)
-                        }
-                    }
-                }
+                CharacterMultiPicker(
+                    characters = characters,
+                    selectedIds = autoEnabled.characterIds,
+                    onToggle = { char ->
+                        val next = autoEnabled.characterIds.toMutableSet()
+                        if (char.id in next) next.remove(char.id) else next.add(char.id)
+                        scope.launch { settings.setMomentAutoConfig(autoEnabled.copy(characterIds = next)) }
+                    },
+                    listHeight = 320.dp,
+                    placeholder = "搜索角色名 / 代号 / 职位…",
+                )
             },
             confirmButton = { TextButton(onClick = { showCharPicker = false }) { Text("完成") } },
         )
     }
 
     if (showReplyPicker) {
-        var search by remember { mutableStateOf("") }
-        val filtered = characters.filter { it.name.contains(search.trim(), ignoreCase = true) }
         AlertDialog(
             onDismissRequest = { showReplyPicker = false },
             title = { Text("选择互动角色（可多选）", color = scheme.onSurface) },
             text = {
-                Column {
-                    GlassInputField(value = search, onValueChange = { search = it }, placeholder = "搜索角色名")
-                    Spacer(Modifier.height(8.dp))
-                    if (filtered.isEmpty()) {
-                        Text(
-                            "没有匹配的角色",
-                            color = scheme.onSurfaceVariant, fontSize = 13.sp,
-                            modifier = Modifier.padding(vertical = 16.dp),
-                        )
-                    }
-                    LazyColumn(modifier = Modifier.height(300.dp)) {
-                        items(filtered.size) { index ->
-                            val char = filtered[index]
-                            val checked = char.id in replyIds
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        val next = if (checked) replyIds - char.id else replyIds + char.id
-                                        scope.launch { container.settingsRepository.setMomentReplyCharacterIds(next) }
-                                    }
-                                    .padding(vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                androidx.compose.material3.Checkbox(checked = checked, onCheckedChange = null)
-                                Spacer(Modifier.width(8.dp))
-                                Text(char.name, color = scheme.onSurface, fontSize = 14.sp)
-                            }
-                        }
-                    }
-                }
+                // 与发圈角色/问候角色同一套可搜索多选器（口径统一：名称/代号/职位）
+                CharacterMultiPicker(
+                    characters = characters,
+                    selectedIds = replyIds,
+                    onToggle = { char ->
+                        val next = if (char.id in replyIds) replyIds - char.id else replyIds + char.id
+                        scope.launch { container.settingsRepository.setMomentReplyCharacterIds(next) }
+                    },
+                    listHeight = 300.dp,
+                    placeholder = "搜索角色名 / 代号 / 职位…",
+                )
             },
             confirmButton = { TextButton(onClick = { showReplyPicker = false }) { Text("完成") } },
         )
@@ -2244,6 +2375,9 @@ private fun ModelDropdown(
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
     onModelSelected: (PresetModel) -> Unit,
+    /** 远程拉取的模型 id（`GET /models` 缓存结果）：附在内置清单之后，清单不写死。 */
+    remoteModels: List<String> = emptyList(),
+    onRemoteModelSelected: (String) -> Unit = {},
 ) {
     val scheme = MaterialTheme.colorScheme
     ExposedDropdownMenuBox(
@@ -2291,6 +2425,131 @@ private fun ModelDropdown(
                     },
                     onClick = { onModelSelected(model) },
                 )
+            }
+            // 远程模型（服务商实际返回的清单）：与内置清单分区展示，点选即用
+            if (remoteModels.isNotEmpty()) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            "— 从服务商获取（${remoteModels.size}）—",
+                            color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                        )
+                    },
+                    onClick = {},
+                    enabled = false,
+                )
+                remoteModels.forEach { id ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                id,
+                                color = if (selectedModel?.id == id) scheme.primary else scheme.onSurface,
+                                fontSize = 13.sp,
+                            )
+                        },
+                        onClick = { onRemoteModelSelected(id) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 模型清单远程刷新行：一条按钮 + 缓存状态（条数 / 拉取时间 / 结果提示）。
+ *
+ * 内置预设清单会随服务商发版过期，故提供「从服务商获取」；拉取结果按服务商/配置档分别缓存。
+ */
+@Composable
+private fun ModelFetchRow(
+    busy: Boolean,
+    cachedCount: Int,
+    fetchedAt: Long,
+    message: String?,
+    onRefresh: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = if (fetchedAt > 0L) {
+                    "已缓存 $cachedCount 个模型 · ${formatFetchedAt(fetchedAt)}"
+                } else {
+                    "模型清单未写死：可从服务商实时获取"
+                },
+                color = scheme.onSurfaceVariant, fontSize = 11.sp,
+            )
+            TextButton(onClick = onRefresh, enabled = !busy) {
+                Text(if (busy) "获取中…" else "从服务商获取", fontSize = 12.sp)
+            }
+        }
+        message?.let {
+            Text(it, color = scheme.onSurfaceVariant, fontSize = 10.sp, lineHeight = 13.sp)
+        }
+    }
+}
+
+/** 缓存时间戳格式化（MM-dd HH:mm，本地时区）。 */
+private fun formatFetchedAt(epochMs: Long): String =
+    SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(epochMs))
+
+/**
+ * 自定义云端配置档列表：多份命名配置（公司中转站 / 本地 LM Studio / 第三方兼容站）可切换、可删除。
+ *
+ * 空列表给一句引导（保存当前配置即产生第一份），避免用户以为这块坏了。
+ */
+@Composable
+private fun CloudProfilesBlock(
+    profiles: List<CloudProfile>,
+    activeId: String,
+    onActivate: (CloudProfile) -> Unit,
+    onDelete: (CloudProfile) -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    if (profiles.isEmpty()) {
+        Text(
+            "还没有保存的配置：填好下面的地址 / 模型 / KEY 后点「另存为新配置」，以后一键切换。",
+            color = scheme.onSurfaceVariant, fontSize = 11.sp,
+        )
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        profiles.forEach { profile ->
+            val active = profile.id == activeId
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(
+                        if (active) scheme.primary.copy(alpha = 0.12f) else scheme.surface.copy(alpha = 0.5f),
+                    )
+                    .clickable { onActivate(profile) }
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        profile.displayTitle.ifBlank { "未命名配置" } + if (active) "  ✓" else "",
+                        color = if (active) scheme.primary else scheme.onSurface,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        listOf(profile.baseUrl, profile.model).filter { it.isNotBlank() }.joinToString(" · "),
+                        color = scheme.onSurfaceVariant, fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                TextButton(onClick = { onDelete(profile) }) {
+                    Text("删除", color = scheme.error, fontSize = 12.sp)
+                }
             }
         }
     }
