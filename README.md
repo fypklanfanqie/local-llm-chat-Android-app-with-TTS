@@ -18,6 +18,16 @@
 
 ## ✨ 新功能速览 · What's New
 
+- **🧭 底部导航调整 · Dock reshuffle** — 音乐入口迁入「设置 → 音乐」二级页（返回键回设置），dock 第 3 位改为「朋友圈」，随手刷角色动态；音乐仍后台续播不被打断。
+  Music moved into Settings → Music (with a back button) and the third dock slot is now the Moments feed; playback keeps running in the background.
+- **🔀 多份云端配置 · Multiple cloud profiles** — 自定义云端 LLM 可保存多份并命名（公司中转站 / 本地 LM Studio / 第三方兼容站），一键切换即整体切换地址、Key 与模型；「另存为新配置 / 更新当前配置 / 删除」齐备，互不覆盖。
+  Save and name as many custom cloud LLM endpoints as you like and switch between them in one tap — base URL, key and model switch together.
+- **🔄 模型清单实时获取 · Live model discovery** — 内置供应商的模型清单不再写死：模型下拉可直接「从服务商获取」`GET /models`，兼容 OpenAI 兼容站与 Anthropic 端点，按服务商 / 配置档分别缓存并显示拉取时间。
+  Built-in model lists are no longer hard-coded: fetch the live list from the provider's `/models` endpoint, cached per provider/profile with a timestamp.
+- **🎭 小说阵容 · Novel cast roles** — 小说可指定谁是主角、谁是配角，写作过程中随时增删角色或改定位；阵容写进 system 稳定区（主角推动主线、配角戏份克制），下一次 AI 续写即生效。
+  Pick who leads and who supports, add or remove characters mid-writing — the cast goes into the stable system block and applies from the next AI continuation.
+- **🔍 选角处处可搜索 · Search everywhere you pick a character** — 群成员 / @ 选择 / 朋友圈选角 / 问候角色 / 发圈角色 / 互动角色 / 小说阵容，全部支持按名称、代号、职位、种族搜索，口径统一。
+  Every character picker (group members, @-mentions, Moments, greetings, auto-posting, replies, novel cast) is searchable by name, codename, role or race with one shared rule.
 - **📸 朋友圈 · Moments** — 角色用云端大模型（配你自己的生图 API）发朋友圈：日常文案 + 配图，定时自动发圈（间隔可调、8–23 点、角色轮换、随机 @ 好友），你也能自己发圈；角色会来点赞评论，评论后发帖角色必回。生图三通道自动回退，失败自动降级纯文字。
   Characters post to their own Moments feed (LLM caption + your image-gen API), auto-post on a schedule with random @-mentions; you can post too, and characters like/comment — the poster always replies.
 - **📖 小说模式 · Novel mode** — 选角色组团写互动小说：故事 → 话（章节）→ 对白脚本行编辑器，AI 按人设与世界观续写（6–10 行一批），支持旁白 / 角色 / 主控三种说话人。
@@ -151,8 +161,8 @@
   <img width="1080" height="2400" alt="Screenshot_2026-08-07-18-20-04-991_com chatbyyou" src="https://github.com/user-attachments/assets/2f6457c6-96e5-4184-b3a7-c41dd0eb36b7" />
 
 - **云端 + 本地双引擎** · **Cloud + local dual engine**
-  云端 OpenAI 兼容 API（SSE 流式）与本地 MNN 离线推理一键切换，对话按角色独立保存；自定义云端 LLM 支持 **OpenAI（/chat/completions）与 Anthropic（/v1/messages）双协议自动识别**、可填任意 base URL 与模型名（Base URL 也支持直接填完整端点，不会重复拼接）。
-  Switch between a cloud OpenAI-compatible API (SSE streaming) and on-device MNN offline inference. Conversations are saved per character; custom cloud endpoints auto-detect both OpenAI and Anthropic request formats with user-defined base URL and model (full endpoints are accepted without duplicate path joining).
+  云端 OpenAI 兼容 API（SSE 流式）与本地 MNN 离线推理一键切换，对话按角色独立保存；自定义云端 LLM 支持 **OpenAI（/chat/completions）与 Anthropic（/v1/messages）双协议自动识别**、可填任意 base URL 与模型名（Base URL 也支持直接填完整端点，不会重复拼接）。自定义端点可**保存多份命名配置**并一键切换（互不覆盖），内置供应商的模型清单支持从服务商 `GET /models` **实时获取并缓存**（不再写死）。
+  Switch between a cloud OpenAI-compatible API (SSE streaming) and on-device MNN offline inference. Conversations are saved per character; custom cloud endpoints auto-detect both OpenAI and Anthropic request formats. Custom endpoints can be saved as multiple named profiles and switched in one tap, and built-in model lists can be fetched live from the provider's `/models` endpoint.
 
 - **内置免费云端 · Built-in free cloud**
   内置「免费对话」供应商（硅基流动免费 7B 模型，含 DeepSeek-R1-7B 免费推理模型），开箱即用、无需 API Key；Key 由 Cloudflare 云端代理注入，App 端与仓库均不含明文 Key。
@@ -171,8 +181,8 @@
   Render and collapse the model's reasoning trace — with local-only thinking levels and budgets.
 
 - **音乐播放** · **Music playback**
-  网易云音乐搜索在线播放 + 本地音乐导入，支持进度 / 音量 / 歌词。
-  Online playback via Netease Cloud Music search plus local file import, with seek / volume / lyrics.
+  网易云音乐搜索在线播放 + 本地音乐导入，支持进度 / 音量 / 歌词。入口在「设置 → 音乐」（底部 dock 第 3 位已改为「朋友圈」）。
+  Online playback via Netease Cloud Music search plus local file import, with seek / volume / lyrics. Reachable from Settings → Music (the third dock slot is now Moments).
   <img width="1080" height="2400" alt="Screenshot_2026-08-07-18-20-11-452_com chatbyyou" src="https://github.com/user-attachments/assets/d62e5ac6-a109-4b40-8f8c-72362400f228" />
 
 - **多模态对话** · **Multimodal chat**
@@ -200,8 +210,8 @@
   Characters post captions from the cloud LLM with images from your own image-gen API (three-channel auto fallback): scheduled auto-posting with random @-mentions, your own posts, likes and comments — and the poster always replies.
 
 - **📖 小说模式** · **Novel mode**
-  选若干角色组一个故事（含自定义 NPC 与主控人设），按「话」管理章节，正文是可逐行编辑的脚本（旁白 / 角色 / 主控三种说话人）；AI 按人设与世界观续写 6–10 行一批，本地与云端均可用。
-  Build a serialised novel from a cast of characters (plus custom NPCs and your own protagonist persona), edit it line by line as a script, and let the AI continue the story in character.
+  选若干角色组一个故事（含自定义 NPC 与主控人设），按「话」管理章节，正文是可逐行编辑的脚本（旁白 / 角色 / 主控三种说话人）；AI 按人设与世界观续写 6–10 行一批。可指定**主角 / 配角**，写作过程中随时增删角色或改定位，下一次续写即生效；选角支持搜索。你以某角色发言后，AI 会**顺着这一行、按该角色的人设**把剧情推下去（不得 OOC、不得改口反噬，其他角色按各自人设反应并引出新的行动与冲突；旁白当作既成事实、主控则让角色围绕你回应）。默认保持原逻辑「只追加、不自动生成」，可在编辑器一键打开「发送后自动续写」（选择会记住）。
+  Build a serialised novel from a cast of characters (plus custom NPCs and your own protagonist persona), edit it line by line as a script, and let the AI continue the story in character. Assign protagonist/supporting roles and change the cast mid-writing. When you speak as a character, the AI advances the plot **from your line in that character's voice** (no OOC; others react by their own personas). It defaults to the original "append only, no auto-generation" behavior — flip on "auto-continue after send" in the editor, and the choice is remembered.
 
 - **📊 Token 用量统计** · **Token usage analytics**
   按角色累计云端输入 / 输出 token 与调用次数，并统计前缀缓存命中率（DeepSeek / OpenAI 兼容 / Anthropic 各家字段统一解析）；设置页给出总量四宫格、Top 12 双色堆叠条形图与可搜索的角色明细。
